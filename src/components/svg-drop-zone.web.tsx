@@ -11,9 +11,10 @@ interface SvgLayer {
 
 interface ActiveSvg {
   name: string;
-  src: string;         // thumbnail / blob URL
-  content: string;     // serialized SVG string (layer IDs injected)
-  layers: SvgLayer[];  // top-level <g> children, in document order
+  src: string;           // thumbnail / blob URL
+  content: string;       // serialized SVG string (layer IDs injected)
+  originalContent: string; // content as first parsed — used for reset
+  layers: SvgLayer[];    // top-level <g> children, in document order
   objectUrl?: string;
 }
 
@@ -169,7 +170,7 @@ export function SvgDropZone() {
     (raw: string, name: string, src: string, objectUrl?: string) => {
       const cleaned = stripScripts(raw);
       const { content, layers } = parseSvg(cleaned);
-      setActiveSvg((prev) => { revokePrev(prev); return { name, src, content, layers, objectUrl }; });
+      setActiveSvg((prev) => { revokePrev(prev); return { name, src, content, originalContent: content, layers, objectUrl }; });
       setHiddenLayers(new Set());
       setSelectedLayer(null);
       setIsLoading(false);
@@ -227,12 +228,6 @@ export function SvgDropZone() {
       if (next.has(id)) next.delete(id); else next.add(id);
       return next;
     });
-  }, []);
-
-  // ── Layer selection ────────────────────────────────────────────────────────
-
-  const selectLayer = useCallback((id: string) => {
-    setSelectedLayer((prev) => (prev === id ? null : id));
   }, []);
 
   // Click on canvas: walk up from the clicked element to find its layer
@@ -418,6 +413,17 @@ export function SvgDropZone() {
     URL.revokeObjectURL(url);
   }, [activeSvg, hiddenLayers]);
 
+  // ── Reset ──────────────────────────────────────────────────────────────────
+
+  const resetSvg = useCallback(() => {
+    if (!activeSvg) return;
+    if (!window.confirm('Reset to the original SVG? All changes will be lost.')) return;
+    const { content, layers } = parseSvg(activeSvg.originalContent);
+    setActiveSvg((prev) => (prev ? { ...prev, content, layers } : null));
+    setHiddenLayers(new Set());
+    setSelectedLayer(null);
+  }, [activeSvg]);
+
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -455,6 +461,9 @@ export function SvgDropZone() {
   // ── Render ─────────────────────────────────────────────────────────────────
 
   const showCanvas = activeSvg || isLoading;
+  const isDirty = !!activeSvg && (
+    hiddenLayers.size > 0 || activeSvg.content !== activeSvg.originalContent
+  );
 
   return (
     <div className="flex h-screen bg-zinc-950 overflow-hidden">
@@ -665,8 +674,23 @@ export function SvgDropZone() {
                     )}
                   </div>
 
-                  {/* Export button */}
-                  <div className="p-2 border-t border-zinc-800 shrink-0">
+                  {/* Reset + Export buttons */}
+                  <div className="p-2 border-t border-zinc-800 shrink-0 flex flex-col gap-1.5">
+                    <button
+                      onClick={resetSvg}
+                      disabled={!isDirty}
+                      className={cn(
+                        'w-full flex items-center justify-center gap-1.5 rounded-md text-xs font-medium py-2 transition-colors',
+                        isDirty
+                          ? 'bg-zinc-800/60 hover:bg-red-900/40 text-zinc-400 hover:text-red-300 cursor-pointer'
+                          : 'bg-zinc-800/30 text-zinc-600 cursor-not-allowed'
+                      )}
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
+                      </svg>
+                      Reset
+                    </button>
                     <button
                       onClick={exportSvg}
                       className="w-full flex items-center justify-center gap-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-zinc-100 text-xs font-medium py-2 transition-colors"
