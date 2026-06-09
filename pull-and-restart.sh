@@ -1,4 +1,5 @@
 #!/bin/bash
+# Pull latest code and restart the app if there are changes
 APP_NAME="vs-svg-editor"
 
 cd ~/git/$APP_NAME || { echo "cd failed"; exit 1; }
