@@ -71,6 +71,31 @@ function parseSvg(raw: string): { content: string; layers: SvgLayer[] } {
   }
 }
 
+// Returns the element's bounding box in SVG root coordinate space,
+// correctly accounting for the element's own transform attribute.
+function bboxInRootSpace(svgEl: SVGSVGElement, el: SVGGraphicsElement): DOMRect | null {
+  try {
+    const local = el.getBBox();
+    const m = svgEl.getScreenCTM()!.inverse().multiply(el.getScreenCTM()!);
+    const corners = [
+      [local.x,               local.y],
+      [local.x + local.width, local.y],
+      [local.x + local.width, local.y + local.height],
+      [local.x,               local.y + local.height],
+    ].map(([x, y]) => {
+      const pt = svgEl.createSVGPoint();
+      pt.x = x; pt.y = y;
+      return pt.matrixTransform(m);
+    });
+    const xs = corners.map((p) => p.x);
+    const ys = corners.map((p) => p.y);
+    const x = Math.min(...xs), y = Math.min(...ys);
+    return new DOMRect(x, y, Math.max(...xs) - x, Math.max(...ys) - y);
+  } catch {
+    return null;
+  }
+}
+
 // ─── Icons ───────────────────────────────────────────────────────────────────
 
 function EyeIcon({ className }: { className?: string }) {
@@ -125,9 +150,14 @@ export function SvgDropZone() {
     startSvgX: number;   startSvgY: number;
     baseTransform: string;
   } | null>(null);
-  const dragMovedRef  = useRef(false);
-  const fileInputRef  = useRef<HTMLInputElement>(null);
-  const svgCanvasRef  = useRef<HTMLDivElement>(null);
+  const dragMovedRef            = useRef(false);
+  // Panel drag — use refs so onPointerMove/Up handlers always see current values
+  const panelDragIdRef          = useRef<string | null>(null);
+  const panelDropPositionRef    = useRef<{ targetId: string; before: boolean } | null>(null);
+  const panelReorderDoneRef     = useRef(false); // suppresses the post-drag click
+  const layerListRef            = useRef<HTMLDivElement>(null);
+  const fileInputRef            = useRef<HTMLInputElement>(null);
+  const svgCanvasRef            = useRef<HTMLDivElement>(null);
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -209,12 +239,12 @@ export function SvgDropZone() {
   const handleCanvasClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (dragMovedRef.current) { dragMovedRef.current = false; return; }
     if (!activeSvg?.layers.length) return;
-    const svgEl = svgCanvasRef.current?.querySelector('svg');
+    const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
     if (!svgEl) return;
     const layerIds = new Set(activeSvg.layers.map((l) => l.id));
     let el = e.target as Element | null;
-    while (el && el !== svgEl) {
-      if (el.parentElement === svgEl && layerIds.has(el.id)) {
+    while (el && el !== (svgEl as Element)) {
+      if (el.parentElement === (svgEl as Element) && layerIds.has(el.id)) {
         setSelectedLayer((prev) => (prev === el!.id ? null : el!.id));
         return;
       }
@@ -312,33 +342,29 @@ export function SvgDropZone() {
   useLayoutEffect(() => {
     const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
     svgEl?.querySelector('#__svghl__')?.remove();
-    if (!selectedLayer || !svgEl) return;
+    if (!selectedLayer || !svgEl || canvasDrag) return;
     const targetEl = svgEl.querySelector(`#${CSS.escape(selectedLayer)}`);
     if (!targetEl) return;
-    try {
-      const bbox = (targetEl as SVGGraphicsElement).getBBox();
-      if (!bbox.width && !bbox.height) return;
-      const ns = 'http://www.w3.org/2000/svg';
-      const rect = document.createElementNS(ns, 'rect');
-      const pad = 4;
-      rect.id = '__svghl__';
-      rect.setAttribute('x', String(bbox.x - pad));
-      rect.setAttribute('y', String(bbox.y - pad));
-      rect.setAttribute('width',  String(bbox.width  + pad * 2));
-      rect.setAttribute('height', String(bbox.height + pad * 2));
-      rect.setAttribute('fill', 'none');
-      rect.setAttribute('stroke', '#3b82f6');
-      rect.setAttribute('stroke-width', '2');
-      rect.setAttribute('stroke-dasharray', '6 4');
-      rect.setAttribute('vector-effect', 'non-scaling-stroke');
-      rect.setAttribute('pointer-events', 'none');
-      svgEl.appendChild(rect);
-    } catch {
-      // getBBox fails on invisible / detached elements
-    }
-  }, [selectedLayer, activeSvg?.content]);
+    const bbox = bboxInRootSpace(svgEl, targetEl as SVGGraphicsElement);
+    if (!bbox || (!bbox.width && !bbox.height)) return;
+    const ns = 'http://www.w3.org/2000/svg';
+    const rect = document.createElementNS(ns, 'rect');
+    const pad = 4;
+    rect.id = '__svghl__';
+    rect.setAttribute('x', String(bbox.x - pad));
+    rect.setAttribute('y', String(bbox.y - pad));
+    rect.setAttribute('width',  String(bbox.width  + pad * 2));
+    rect.setAttribute('height', String(bbox.height + pad * 2));
+    rect.setAttribute('fill', 'none');
+    rect.setAttribute('stroke', '#3b82f6');
+    rect.setAttribute('stroke-width', '2');
+    rect.setAttribute('stroke-dasharray', '6 4');
+    rect.setAttribute('vector-effect', 'non-scaling-stroke');
+    rect.setAttribute('pointer-events', 'none');
+    svgEl.appendChild(rect);
+  }, [selectedLayer, activeSvg?.content, canvasDrag]);
 
-  // ── Layer reorder (drag-and-drop) ──────────────────────────────────────────
+  // ── Layer reorder ──────────────────────────────────────────────────────────
 
   const reorderLayers = useCallback((fromId: string, toId: string, panelBefore: boolean) => {
     if (!activeSvg || fromId === toId) return;
@@ -537,11 +563,43 @@ export function SvgDropZone() {
                   </div>
 
                   <div
+                    ref={layerListRef}
                     className="flex flex-col overflow-y-auto py-1 flex-1"
-                    onDragLeave={(e) => {
-                      if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                    onPointerMove={(e) => {
+                      if (!panelDragIdRef.current) return;
+                      // Reveal the dragged row as faded (state update, fine to call repeatedly)
+                      setDragLayerId(panelDragIdRef.current);
+                      // Hit-test the element visually under the pointer
+                      const under = document.elementFromPoint(e.clientX, e.clientY);
+                      const row   = under?.closest('[data-layer-id]') as HTMLElement | null;
+                      if (!row || row.dataset.layerId === panelDragIdRef.current) {
+                        panelDropPositionRef.current = null;
                         setDropPosition(null);
+                        return;
                       }
+                      const rect = row.getBoundingClientRect();
+                      const pos  = { targetId: row.dataset.layerId!, before: e.clientY < rect.top + rect.height / 2 };
+                      panelDropPositionRef.current = pos;
+                      setDropPosition(pos);
+                    }}
+                    onPointerUp={(e) => {
+                      if (!panelDragIdRef.current) return;
+                      layerListRef.current?.releasePointerCapture(e.pointerId);
+                      const pos = panelDropPositionRef.current;
+                      if (pos) {
+                        reorderLayers(panelDragIdRef.current, pos.targetId, pos.before);
+                        panelReorderDoneRef.current = true;
+                      }
+                      panelDragIdRef.current       = null;
+                      panelDropPositionRef.current = null;
+                      setDragLayerId(null);
+                      setDropPosition(null);
+                    }}
+                    onPointerCancel={() => {
+                      panelDragIdRef.current       = null;
+                      panelDropPositionRef.current = null;
+                      setDragLayerId(null);
+                      setDropPosition(null);
                     }}
                   >
                     {activeSvg.layers.length === 0 ? (
@@ -559,33 +617,24 @@ export function SvgDropZone() {
                         return (
                           <div
                             key={layer.id}
-                            draggable
-                            onClick={() => selectLayer(layer.id)}
-                            onDragStart={(e) => {
-                              setDragLayerId(layer.id);
-                              e.dataTransfer.effectAllowed = 'move';
-                            }}
-                            onDragEnd={() => { setDragLayerId(null); setDropPosition(null); }}
-                            onDragOver={(e) => {
-                              e.preventDefault();
-                              if (!dragLayerId || dragLayerId === layer.id) return;
-                              const r = e.currentTarget.getBoundingClientRect();
-                              setDropPosition({ targetId: layer.id, before: e.clientY < r.top + r.height / 2 });
-                            }}
-                            onDrop={(e) => {
-                              e.preventDefault();
-                              if (dragLayerId && dropPosition) {
-                                reorderLayers(dragLayerId, dropPosition.targetId, dropPosition.before);
-                              }
-                              setDragLayerId(null);
-                              setDropPosition(null);
-                            }}
                             data-layer-id={layer.id}
+                            onPointerDown={(e) => {
+                              if (e.button !== 0) return;
+                              setSelectedLayer(layer.id);
+                              layerListRef.current?.setPointerCapture(e.pointerId);
+                              panelDragIdRef.current       = layer.id;
+                              panelDropPositionRef.current = null;
+                            }}
+                            onClick={() => {
+                              if (panelReorderDoneRef.current) {
+                                panelReorderDoneRef.current = false;
+                              }
+                            }}
                             className={cn(
-                              'relative group flex items-center gap-2 px-2 py-1.5 mx-1 rounded-md transition-colors',
+                              'relative group flex items-center gap-2 px-2 py-1.5 mx-1 rounded-md transition-colors select-none',
                               isSelected ? 'bg-zinc-700/60 ring-1 ring-inset ring-zinc-600' : 'hover:bg-zinc-800/60',
                               hidden && 'opacity-40',
-                              isDragged && 'opacity-25 pointer-events-none',
+                              isDragged && 'opacity-25',
                             )}
                           >
                             {/* Drop-position indicator lines */}
@@ -597,6 +646,7 @@ export function SvgDropZone() {
                             )}
 
                             <button
+                              onPointerDown={(e) => e.stopPropagation()}
                               onClick={(e) => { e.stopPropagation(); toggleLayer(layer.id); }}
                               title={hidden ? 'Show layer' : 'Hide layer'}
                               className="shrink-0 text-zinc-500 hover:text-zinc-200 transition-colors"
@@ -606,7 +656,7 @@ export function SvgDropZone() {
                                 : <EyeIcon className="size-3.5" />
                               }
                             </button>
-                            <span className="text-xs text-zinc-300 truncate leading-snug select-none">
+                            <span className="text-xs text-zinc-300 truncate leading-snug">
                               {layer.label}
                             </span>
                           </div>
