@@ -1,5 +1,5 @@
 #!/bin/bash
-# 
+# git testing
 APP_NAME="vs-svg-editor"
 
 cd ~/git/$APP_NAME || { echo "cd failed"; exit 1; }
