@@ -1,0 +1,702 @@
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+
+import { cn } from '@/lib/utils';
+
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+interface SvgLayer {
+  id: string;
+  label: string;
+}
+
+interface ActiveSvg {
+  name: string;
+  src: string;         // thumbnail / blob URL
+  content: string;     // serialized SVG string (layer IDs injected)
+  layers: SvgLayer[];  // top-level <g> children, in document order
+  objectUrl?: string;
+}
+
+// ─── Samples ─────────────────────────────────────────────────────────────────
+
+const SAMPLES = [
+  { label: 'Element 15',    name: 'element_15.svg',        src: '/samples/element_15.svg' },
+  { label: 'Vector 956069', name: 'vectorstock_956069.svg', src: '/samples/vectorstock_956069.svg' },
+  { label: 'Vector 51876595', name: 'vectorstock_51876595.svg', src: '/samples/vectorstock_51876595.svg' },
+] as const;
+
+type SampleName = (typeof SAMPLES)[number]['name'];
+
+// ─── SVG processing ───────────────────────────────────────────────────────────
+
+function stripScripts(raw: string): string {
+  return raw
+    .replace(/<script[\s\S]*?<\/script>/gi, '')
+    .replace(/\son\w+="[^"]*"/gi, '');
+}
+
+// Tags that are metadata/definitions, not visual layers
+const SKIP_TAGS = new Set([
+  'defs', 'style', 'title', 'desc', 'metadata',
+  'lineargradient', 'radialgradient', 'pattern',
+  'clippath', 'mask', 'filter', 'marker',
+]);
+
+function parseSvg(raw: string): { content: string; layers: SvgLayer[] } {
+  try {
+    const doc = new DOMParser().parseFromString(raw, 'image/svg+xml');
+    if (doc.querySelector('parsererror')) return { content: raw, layers: [] };
+
+    const svg = doc.documentElement;
+    const layers: SvgLayer[] = [];
+
+    Array.from(svg.children).forEach((child, i) => {
+      if (SKIP_TAGS.has(child.tagName.toLowerCase())) return;
+      if (!child.id) child.id = `_layer_${i}`;
+
+      const label =
+        child.getAttribute('data-name')?.trim() ||
+        child.getAttribute('inkscape:label')?.trim() ||
+        (!child.id.startsWith('_layer_') ? child.id : null) ||
+        `Layer ${layers.length + 1}`;
+
+      layers.push({ id: child.id, label });
+    });
+
+    // Serialize the SVG element only (no XML declaration)
+    const content = new XMLSerializer().serializeToString(svg);
+    return { content, layers };
+  } catch {
+    return { content: raw, layers: [] };
+  }
+}
+
+// ─── Icons ───────────────────────────────────────────────────────────────────
+
+function EyeIcon({ className }: { className?: string }) {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+      stroke="currentColor" strokeWidth={1.75} className={className}>
+      <path strokeLinecap="round" strokeLinejoin="round"
+        d="M2.036 12.322a1.012 1.012 0 0 1 0-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178Z" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
+    </svg>
+  );
+}
+
+function EyeSlashIcon({ className }: { className?: string }) {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+      stroke="currentColor" strokeWidth={1.75} className={className}>
+      <path strokeLinecap="round" strokeLinejoin="round"
+        d="M3.98 8.223A10.477 10.477 0 0 0 1.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.451 10.451 0 0 1 12 4.5c4.756 0 8.773 3.162 10.065 7.498a10.522 10.522 0 0 1-4.293 5.774M6.228 6.228 3 3m3.228 3.228 3.65 3.65m7.894 7.894L21 21m-3.228-3.228-3.65-3.65m0 0a3 3 0 1 0-4.243-4.243m4.242 4.242L9.88 9.88" />
+    </svg>
+  );
+}
+
+function GripIcon({ className }: { className?: string }) {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 14" fill="currentColor" className={className}>
+      <circle cx="1.5" cy="1.5"  r="1.5" />
+      <circle cx="6.5" cy="1.5"  r="1.5" />
+      <circle cx="1.5" cy="7"    r="1.5" />
+      <circle cx="6.5" cy="7"    r="1.5" />
+      <circle cx="1.5" cy="12.5" r="1.5" />
+      <circle cx="6.5" cy="12.5" r="1.5" />
+    </svg>
+  );
+}
+
+// ─── Component ───────────────────────────────────────────────────────────────
+
+export function SvgDropZone() {
+  const [activeSvg, setActiveSvg]       = useState<ActiveSvg | null>(null);
+  const [activeSample, setActiveSample] = useState<SampleName | null>(null);
+  const [hiddenLayers, setHiddenLayers] = useState<Set<string>>(new Set());
+  const [selectedLayer, setSelectedLayer] = useState<string | null>(null);
+  const [dragLayerId, setDragLayerId]   = useState<string | null>(null);
+  const [dropPosition, setDropPosition] = useState<{ targetId: string; before: boolean } | null>(null);
+  const [isLoading, setIsLoading]       = useState(false);
+  const [isDragging, setIsDragging]     = useState(false);
+  const [, setDragCounter]   = useState(0);
+  const [canvasDrag, setCanvasDrag] = useState<{
+    layerId: string;
+    startClientX: number; startClientY: number;
+    startSvgX: number;   startSvgY: number;
+    baseTransform: string;
+  } | null>(null);
+  const dragMovedRef  = useRef(false);
+  const fileInputRef  = useRef<HTMLInputElement>(null);
+  const svgCanvasRef  = useRef<HTMLDivElement>(null);
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+
+  const revokePrev = useCallback((svg: ActiveSvg | null) => {
+    if (svg?.objectUrl) URL.revokeObjectURL(svg.objectUrl);
+  }, []);
+
+  const applyParsed = useCallback(
+    (raw: string, name: string, src: string, objectUrl?: string) => {
+      const cleaned = stripScripts(raw);
+      const { content, layers } = parseSvg(cleaned);
+      setActiveSvg((prev) => { revokePrev(prev); return { name, src, content, layers, objectUrl }; });
+      setHiddenLayers(new Set());
+      setSelectedLayer(null);
+      setIsLoading(false);
+    },
+    [revokePrev]
+  );
+
+  // ── Open sample ────────────────────────────────────────────────────────────
+
+  const openSample = useCallback(
+    async (sample: (typeof SAMPLES)[number]) => {
+      setIsLoading(true);
+      setActiveSample(sample.name);
+      try {
+        const text = await fetch(sample.src).then((r) => r.text());
+        applyParsed(text, sample.name, sample.src);
+      } catch (err) {
+        console.error('Failed to load sample', sample.name, err);
+        setIsLoading(false);
+      }
+    },
+    [applyParsed]
+  );
+
+  // ── Open dropped / browsed file ────────────────────────────────────────────
+
+  const openFile = useCallback(
+    (file: File) => {
+      if (file.type !== 'image/svg+xml' && !file.name.toLowerCase().endsWith('.svg')) return;
+      setIsLoading(true);
+      setActiveSample(null);
+      const objectUrl = URL.createObjectURL(file);
+      const reader = new FileReader();
+      reader.onload = (e) => applyParsed(e.target?.result as string, file.name, objectUrl, objectUrl);
+      reader.onerror = () => { setIsLoading(false); URL.revokeObjectURL(objectUrl); };
+      reader.readAsText(file);
+    },
+    [applyParsed]
+  );
+
+  // ── Clear ──────────────────────────────────────────────────────────────────
+
+  const clear = useCallback(() => {
+    setActiveSvg((prev) => { revokePrev(prev); return null; });
+    setActiveSample(null);
+    setHiddenLayers(new Set());
+    setSelectedLayer(null);
+  }, [revokePrev]);
+
+  // ── Layer toggle ───────────────────────────────────────────────────────────
+
+  const toggleLayer = useCallback((id: string) => {
+    setHiddenLayers((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
+  // ── Layer selection ────────────────────────────────────────────────────────
+
+  const selectLayer = useCallback((id: string) => {
+    setSelectedLayer((prev) => (prev === id ? null : id));
+  }, []);
+
+  // Click on canvas: walk up from the clicked element to find its layer
+  const handleCanvasClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (dragMovedRef.current) { dragMovedRef.current = false; return; }
+    if (!activeSvg?.layers.length) return;
+    const svgEl = svgCanvasRef.current?.querySelector('svg');
+    if (!svgEl) return;
+    const layerIds = new Set(activeSvg.layers.map((l) => l.id));
+    let el = e.target as Element | null;
+    while (el && el !== svgEl) {
+      if (el.parentElement === svgEl && layerIds.has(el.id)) {
+        setSelectedLayer((prev) => (prev === el!.id ? null : el!.id));
+        return;
+      }
+      el = el.parentElement;
+    }
+    setSelectedLayer(null);
+  }, [activeSvg]);
+
+  // mousedown on canvas: begin drag if the pointer is over the selected layer
+  const handleCanvasMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (!selectedLayer || !activeSvg?.layers.length) return;
+    const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
+    if (!svgEl) return;
+    const layerEl = svgEl.querySelector(`#${CSS.escape(selectedLayer)}`);
+    if (!layerEl) return;
+
+    // Only start drag if the click is inside the selected layer element
+    let el = e.target as Element | null;
+    while (el && el !== svgEl) {
+      if (el === layerEl) break;
+      el = el.parentElement;
+    }
+    if (!el || el === svgEl) return;
+
+    e.preventDefault();
+    const pt = svgEl.createSVGPoint();
+    pt.x = e.clientX; pt.y = e.clientY;
+    const svgPt = pt.matrixTransform(svgEl.getScreenCTM()!.inverse());
+    dragMovedRef.current = false;
+    setCanvasDrag({
+      layerId: selectedLayer,
+      startClientX: e.clientX, startClientY: e.clientY,
+      startSvgX: svgPt.x,      startSvgY: svgPt.y,
+      baseTransform: layerEl.getAttribute('transform') ?? '',
+    });
+  }, [selectedLayer, activeSvg]);
+
+  // Global mouse listeners while a canvas drag is active
+  useEffect(() => {
+    if (!canvasDrag) return;
+    const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
+
+    const onMove = (e: MouseEvent) => {
+      if (!svgEl) return;
+      if (Math.abs(e.clientX - canvasDrag.startClientX) > 2 ||
+          Math.abs(e.clientY - canvasDrag.startClientY) > 2) {
+        dragMovedRef.current = true;
+      }
+      if (!dragMovedRef.current) return;
+      const layerEl = svgEl.querySelector(`#${CSS.escape(canvasDrag.layerId)}`);
+      if (!layerEl) return;
+      const pt = svgEl.createSVGPoint();
+      pt.x = e.clientX; pt.y = e.clientY;
+      const cur = pt.matrixTransform(svgEl.getScreenCTM()!.inverse());
+      const dx = cur.x - canvasDrag.startSvgX;
+      const dy = cur.y - canvasDrag.startSvgY;
+      layerEl.setAttribute(
+        'transform',
+        `translate(${dx}, ${dy}) ${canvasDrag.baseTransform}`.trim(),
+      );
+      svgEl.querySelector('#__svghl__')?.remove();
+    };
+
+    const onUp = () => {
+      if (svgEl && dragMovedRef.current) {
+        svgEl.querySelector('#__svghl__')?.remove();
+        const content = new XMLSerializer().serializeToString(svgEl);
+        setActiveSvg((prev) => (prev ? { ...prev, content } : null));
+      }
+      setCanvasDrag(null);
+    };
+
+    document.body.style.cursor = 'grabbing';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [canvasDrag]);
+
+  // Scroll the matching panel row into view whenever selectedLayer changes
+  useEffect(() => {
+    if (!selectedLayer) return;
+    document
+      .querySelector(`[data-layer-id="${selectedLayer}"]`)
+      ?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  }, [selectedLayer]);
+
+  // ── SVG selection highlight (perforated rect injected into SVG DOM) ─────────
+
+  useLayoutEffect(() => {
+    const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
+    svgEl?.querySelector('#__svghl__')?.remove();
+    if (!selectedLayer || !svgEl) return;
+    const targetEl = svgEl.querySelector(`#${CSS.escape(selectedLayer)}`);
+    if (!targetEl) return;
+    try {
+      const bbox = (targetEl as SVGGraphicsElement).getBBox();
+      if (!bbox.width && !bbox.height) return;
+      const ns = 'http://www.w3.org/2000/svg';
+      const rect = document.createElementNS(ns, 'rect');
+      const pad = 4;
+      rect.id = '__svghl__';
+      rect.setAttribute('x', String(bbox.x - pad));
+      rect.setAttribute('y', String(bbox.y - pad));
+      rect.setAttribute('width',  String(bbox.width  + pad * 2));
+      rect.setAttribute('height', String(bbox.height + pad * 2));
+      rect.setAttribute('fill', 'none');
+      rect.setAttribute('stroke', '#3b82f6');
+      rect.setAttribute('stroke-width', '2');
+      rect.setAttribute('stroke-dasharray', '6 4');
+      rect.setAttribute('vector-effect', 'non-scaling-stroke');
+      rect.setAttribute('pointer-events', 'none');
+      svgEl.appendChild(rect);
+    } catch {
+      // getBBox fails on invisible / detached elements
+    }
+  }, [selectedLayer, activeSvg?.content]);
+
+  // ── Layer reorder (drag-and-drop) ──────────────────────────────────────────
+
+  const reorderLayers = useCallback((fromId: string, toId: string, panelBefore: boolean) => {
+    if (!activeSvg || fromId === toId) return;
+
+    // Work in panel order (reversed document order: panel[0] = topmost layer)
+    const panelLayers = [...activeSvg.layers].reverse();
+    const fromPanelIdx = panelLayers.findIndex((l) => l.id === fromId);
+    const toPanelIdx   = panelLayers.findIndex((l) => l.id === toId);
+    if (fromPanelIdx === -1 || toPanelIdx === -1) return;
+
+    let insertPanelIdx = panelBefore ? toPanelIdx : toPanelIdx + 1;
+    const newPanel = [...panelLayers];
+    const [moved] = newPanel.splice(fromPanelIdx, 1);
+    if (fromPanelIdx < insertPanelIdx) insertPanelIdx--;
+    newPanel.splice(insertPanelIdx, 0, moved);
+
+    const newDocLayers = [...newPanel].reverse();
+
+    // Reorder the SVG DOM by moving fromEl to its new document position
+    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+    const svg = doc.documentElement;
+    const fromEl = doc.getElementById(fromId);
+    if (!fromEl) return;
+
+    const newFromDocIdx = newDocLayers.findIndex((l) => l.id === fromId);
+    const nextDocId = newFromDocIdx < newDocLayers.length - 1 ? newDocLayers[newFromDocIdx + 1].id : null;
+    const nextEl = nextDocId ? doc.getElementById(nextDocId) : null;
+    if (nextEl) svg.insertBefore(fromEl, nextEl);
+    else svg.appendChild(fromEl);
+
+    const content = new XMLSerializer().serializeToString(svg);
+    setActiveSvg((prev) => (prev ? { ...prev, content, layers: newDocLayers } : null));
+  }, [activeSvg]);
+
+  // ── Export ─────────────────────────────────────────────────────────────────
+
+  const exportSvg = useCallback(() => {
+    if (!activeSvg) return;
+    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+    hiddenLayers.forEach((id) => {
+      const el = doc.getElementById(id);
+      el?.parentNode?.removeChild(el);
+    });
+    const serialized = new XMLSerializer().serializeToString(doc.documentElement);
+    const blob = new Blob([serialized], { type: 'image/svg+xml' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = activeSvg.name.replace(/\.svg$/i, '') + '_export.svg';
+    a.click();
+    URL.revokeObjectURL(url);
+  }, [activeSvg, hiddenLayers]);
+
+  // ── Lifecycle ──────────────────────────────────────────────────────────────
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => () => revokePrev(activeSvg), []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') clear(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [clear]);
+
+  // ── File drag handlers (drop zone) ─────────────────────────────────────────
+
+  const handleDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setDragCounter(0); setIsDragging(false);
+    const file = e.dataTransfer.files[0];
+    if (file) openFile(file);
+  }, [openFile]);
+
+  const handleDragEnter = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setDragCounter((c) => { if (c === 0) setIsDragging(true); return c + 1; });
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setDragCounter((c) => { const n = c - 1; if (n === 0) setIsDragging(false); return n; });
+  }, []);
+
+  const handleDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+  }, []);
+
+  // ── Render ─────────────────────────────────────────────────────────────────
+
+  const showCanvas = activeSvg || isLoading;
+
+  return (
+    <div className="flex h-screen bg-zinc-950 overflow-hidden">
+
+      {/* ── Left sidebar ─────────────────────────────────────────────── */}
+      <aside className="w-44 shrink-0 flex flex-col border-r border-zinc-800 bg-zinc-900/60">
+        <div className="px-3 py-2.5 border-b border-zinc-800">
+          <span className="text-[10px] font-semibold text-zinc-500 uppercase tracking-widest">
+            Samples
+          </span>
+        </div>
+        <div className="flex flex-col gap-1.5 p-2 overflow-y-auto">
+          {SAMPLES.map((sample) => {
+            const isActive = activeSample === sample.name;
+            return (
+              <button
+                key={sample.name}
+                onClick={() => openSample(sample)}
+                disabled={isLoading}
+                className={cn(
+                  'flex flex-col gap-1.5 rounded-lg p-1.5 text-left transition-all duration-100 outline-none',
+                  isActive ? 'bg-zinc-700/80 ring-1 ring-inset ring-zinc-500' : 'hover:bg-zinc-800/70',
+                  isLoading && 'opacity-50 cursor-wait'
+                )}
+              >
+                <div className="w-full aspect-square rounded-md overflow-hidden bg-zinc-950/60">
+                  <img src={sample.src} alt={sample.label} className="w-full h-full object-contain p-1.5" />
+                </div>
+                <span className={cn(
+                  'text-[11px] truncate w-full leading-tight transition-colors',
+                  isActive ? 'text-zinc-200' : 'text-zinc-500'
+                )}>
+                  {sample.label}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </aside>
+
+      {/* ── Main area ────────────────────────────────────────────────── */}
+      <div className="flex flex-col flex-1 min-w-0">
+        {showCanvas ? (
+          <>
+            {/* Toolbar */}
+            <div className="flex items-center justify-between px-4 h-11 border-b border-zinc-800 shrink-0">
+              <span className="text-zinc-400 text-sm font-mono truncate">
+                {isLoading && !activeSvg ? 'Loading…' : activeSvg?.name}
+              </span>
+              <button
+                onClick={clear}
+                className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-200 transition-colors px-2 py-1 rounded hover:bg-zinc-800"
+              >
+                Open new file
+                <kbd className="text-zinc-700 text-[10px] font-mono">ESC</kbd>
+              </button>
+            </div>
+
+            {/* Canvas row: SVG + layers panel */}
+            <div className="flex flex-1 min-h-0">
+
+              {/* Canvas */}
+              <div
+                ref={svgCanvasRef}
+                onClick={handleCanvasClick}
+                onMouseDown={handleCanvasMouseDown}
+                className="flex-1 overflow-auto flex items-center justify-center min-w-0"
+                style={{
+                  backgroundImage: 'radial-gradient(circle, #3f3f46 1px, transparent 1px)',
+                  backgroundSize: '20px 20px',
+                }}
+              >
+                {isLoading && !activeSvg ? (
+                  <div className="w-8 h-8 rounded-full border-2 border-zinc-700 border-t-zinc-400 animate-spin" />
+                ) : activeSvg ? (
+                  <>
+                    {hiddenLayers.size > 0 && (
+                      <style>{
+                        [...hiddenLayers]
+                          .map((id) => `.svg-canvas #${CSS.escape(id)}{display:none!important}`)
+                          .join('')
+                      }</style>
+                    )}
+                    {selectedLayer && (
+                      <style>{`.svg-canvas #${CSS.escape(selectedLayer)}{cursor:grab}`}</style>
+                    )}
+                    <div
+                      className="svg-canvas"
+                      style={{ width: '80%' }}
+                      dangerouslySetInnerHTML={{ __html: activeSvg.content }}
+                    />
+                  </>
+                ) : null}
+              </div>
+
+              {/* ── Layers panel ─────────────────────────────────────── */}
+              {activeSvg && (
+                <aside className="w-52 shrink-0 flex flex-col border-l border-zinc-800 bg-zinc-900/60">
+                  <div className="px-3 py-2.5 border-b border-zinc-800 flex items-center justify-between">
+                    <span className="text-[10px] font-semibold text-zinc-500 uppercase tracking-widest">
+                      Layers
+                    </span>
+                    <span className="text-[10px] text-zinc-600">
+                      {activeSvg.layers.length}
+                    </span>
+                  </div>
+
+                  <div
+                    className="flex flex-col overflow-y-auto py-1 flex-1"
+                    onDragLeave={(e) => {
+                      if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                        setDropPosition(null);
+                      }
+                    }}
+                  >
+                    {activeSvg.layers.length === 0 ? (
+                      <p className="text-xs text-zinc-600 px-3 py-4 text-center">
+                        No named layers found
+                      </p>
+                    ) : (
+                      // Reverse: last SVG element is visually on top
+                      [...activeSvg.layers].reverse().map((layer) => {
+                        const hidden     = hiddenLayers.has(layer.id);
+                        const isSelected = selectedLayer === layer.id;
+                        const isDragged  = dragLayerId === layer.id;
+                        const dropBefore = dropPosition?.targetId === layer.id && dropPosition.before;
+                        const dropAfter  = dropPosition?.targetId === layer.id && !dropPosition.before;
+                        return (
+                          <div
+                            key={layer.id}
+                            draggable
+                            onClick={() => selectLayer(layer.id)}
+                            onDragStart={(e) => {
+                              setDragLayerId(layer.id);
+                              e.dataTransfer.effectAllowed = 'move';
+                            }}
+                            onDragEnd={() => { setDragLayerId(null); setDropPosition(null); }}
+                            onDragOver={(e) => {
+                              e.preventDefault();
+                              if (!dragLayerId || dragLayerId === layer.id) return;
+                              const r = e.currentTarget.getBoundingClientRect();
+                              setDropPosition({ targetId: layer.id, before: e.clientY < r.top + r.height / 2 });
+                            }}
+                            onDrop={(e) => {
+                              e.preventDefault();
+                              if (dragLayerId && dropPosition) {
+                                reorderLayers(dragLayerId, dropPosition.targetId, dropPosition.before);
+                              }
+                              setDragLayerId(null);
+                              setDropPosition(null);
+                            }}
+                            data-layer-id={layer.id}
+                            className={cn(
+                              'relative group flex items-center gap-2 px-2 py-1.5 mx-1 rounded-md transition-colors',
+                              isSelected ? 'bg-zinc-700/60 ring-1 ring-inset ring-zinc-600' : 'hover:bg-zinc-800/60',
+                              hidden && 'opacity-40',
+                              isDragged && 'opacity-25 pointer-events-none',
+                            )}
+                          >
+                            {/* Drop-position indicator lines */}
+                            {dropBefore && (
+                              <div className="pointer-events-none absolute top-0 left-1 right-1 h-0.5 -translate-y-1/2 rounded-full bg-blue-500 z-10" />
+                            )}
+                            {dropAfter && (
+                              <div className="pointer-events-none absolute bottom-0 left-1 right-1 h-0.5 translate-y-1/2 rounded-full bg-blue-500 z-10" />
+                            )}
+
+                            <button
+                              onClick={(e) => { e.stopPropagation(); toggleLayer(layer.id); }}
+                              title={hidden ? 'Show layer' : 'Hide layer'}
+                              className="shrink-0 text-zinc-500 hover:text-zinc-200 transition-colors"
+                            >
+                              {hidden
+                                ? <EyeSlashIcon className="size-3.5" />
+                                : <EyeIcon className="size-3.5" />
+                              }
+                            </button>
+                            <span className="text-xs text-zinc-300 truncate leading-snug select-none">
+                              {layer.label}
+                            </span>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+
+                  {/* Export button */}
+                  <div className="p-2 border-t border-zinc-800 shrink-0">
+                    <button
+                      onClick={exportSvg}
+                      className="w-full flex items-center justify-center gap-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-zinc-100 text-xs font-medium py-2 transition-colors"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
+                      </svg>
+                      {hiddenLayers.size > 0
+                        ? `Export (${activeSvg.layers.length - hiddenLayers.size} layers)`
+                        : 'Export SVG'}
+                    </button>
+                  </div>
+                </aside>
+              )}
+            </div>
+          </>
+        ) : (
+          /* ── Drop zone ─────────────────────────────────────────────── */
+          <div
+            className="flex-1 flex items-center justify-center"
+            onDrop={handleDrop}
+            onDragEnter={handleDragEnter}
+            onDragLeave={handleDragLeave}
+            onDragOver={handleDragOver}
+          >
+            {isDragging && (
+              <div className="pointer-events-none fixed inset-0 bg-blue-500/10 border-2 border-blue-500/40 z-10" />
+            )}
+            <div
+              className={cn(
+                'flex flex-col items-center gap-5 rounded-2xl border-2 border-dashed px-20 py-16 transition-all duration-150 cursor-pointer select-none',
+                isDragging
+                  ? 'border-blue-500 bg-blue-500/5 scale-[1.02]'
+                  : 'border-zinc-700 hover:border-zinc-600 hover:bg-zinc-900/40'
+              )}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                className={cn('size-10 transition-colors', isDragging ? 'text-blue-400' : 'text-zinc-600')}
+                fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.25}
+              >
+                <path strokeLinecap="round" strokeLinejoin="round"
+                  d="M12 16.5V9.75m0 0 3 3m-3-3-3 3M6.75 19.5a4.5 4.5 0 0 1-1.41-8.775 5.25 5.25 0 0 1 10.338-2.32 5.75 5.75 0 0 1 1.023 9.095"
+                />
+              </svg>
+              <div className="text-center">
+                <p className={cn('text-sm font-medium', isDragging ? 'text-blue-300' : 'text-zinc-400')}>
+                  {isDragging ? 'Release to open' : 'Drop an SVG file'}
+                </p>
+                <p className="text-xs text-zinc-600 mt-1">or click to browse</p>
+              </div>
+            </div>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".svg,image/svg+xml"
+              className="hidden"
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) openFile(file);
+                e.target.value = '';
+              }}
+            />
+          </div>
+        )}
+      </div>
+
+      {/* Global SVG canvas sizing — width:100% fixes SVGs with no intrinsic dimensions */}
+      <style>{`
+        .svg-canvas {
+          max-height: calc(80vh - 3rem);
+        }
+        .svg-canvas svg {
+          display: block;
+          width: 100%;
+          height: auto;
+          max-height: calc(80vh - 3rem);
+        }
+      `}</style>
+    </div>
+  );
+}
