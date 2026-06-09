@@ -1,7 +1,7 @@
 #!/bin/bash
 APP_NAME="vs-svg-editor"
 
-cd ~/git-repos/$APP_NAME || { echo "cd failed"; exit 1; }
+cd ~/git/$APP_NAME || { echo "cd failed"; exit 1; }
 
 BEFORE=$(git rev-parse HEAD)
 git pull origin main >> ~/logs/$APP_NAME.log 2>&1
