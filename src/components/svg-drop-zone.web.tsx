@@ -151,7 +151,7 @@ export function SvgDropZone() {
     startSvgX: number;   startSvgY: number;
     baseTransform: string;
   } | null>(null);
-  const [textForm, setTextForm] = useState({ content: 'Text', font: 'Arial', size: 48, color: '#ffffff' });
+  const [textForm, setTextForm] = useState({ content: 'Text', font: 'Arial', size: 48, color: '#000000' });
   const dragMovedRef            = useRef(false);
   // Panel drag — use refs so onPointerMove/Up handlers always see current values
   const panelDragIdRef          = useRef<string | null>(null);
@@ -175,6 +175,13 @@ export function SvgDropZone() {
       setHiddenLayers(new Set());
       setSelectedLayer(null);
       setIsLoading(false);
+      // Default font size = ~8% of the smallest viewBox dimension
+      const svgEl = new DOMParser().parseFromString(content, 'image/svg+xml').documentElement;
+      const vb = svgEl.getAttribute('viewBox')?.trim().split(/[\s,]+/).map(Number);
+      const w = vb?.length === 4 ? vb[2] : Number(svgEl.getAttribute('width') || 0);
+      const h = vb?.length === 4 ? vb[3] : Number(svgEl.getAttribute('height') || 0);
+      const dim = Math.min(w || h, h || w) || 200;
+      setTextForm((f) => ({ ...f, size: Math.max(8, Math.round(dim * 0.08)) }));
     },
     [revokePrev]
   );
