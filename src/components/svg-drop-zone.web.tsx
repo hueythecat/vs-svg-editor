@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 import { cn } from '@/lib/utils';
 
@@ -151,6 +151,7 @@ export function SvgDropZone() {
     startSvgX: number;   startSvgY: number;
     baseTransform: string;
   } | null>(null);
+  const [textForm, setTextForm] = useState({ content: 'Text', font: 'Arial', size: 48, color: '#ffffff' });
   const dragMovedRef            = useRef(false);
   // Panel drag — use refs so onPointerMove/Up handlers always see current values
   const panelDragIdRef          = useRef<string | null>(null);
@@ -413,6 +414,71 @@ export function SvgDropZone() {
     URL.revokeObjectURL(url);
   }, [activeSvg, hiddenLayers]);
 
+  // ── Selected text layer properties ────────────────────────────────────────
+
+  const selectedTextProps = useMemo(() => {
+    if (!selectedLayer || !activeSvg) return null;
+    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+    const el = doc.getElementById(selectedLayer);
+    if (!el || el.tagName.toLowerCase() !== 'text') return null;
+    return {
+      content: el.textContent ?? '',
+      font:    el.getAttribute('font-family') ?? 'Arial',
+      size:    Number(el.getAttribute('font-size') ?? 48),
+      color:   el.getAttribute('fill') ?? '#ffffff',
+    };
+  }, [selectedLayer, activeSvg?.content]);
+
+  const updateTextLayer = useCallback((attrs: Partial<{ content: string; font: string; size: number; color: string }>) => {
+    if (!selectedLayer || !activeSvg) return;
+    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+    const el = doc.getElementById(selectedLayer);
+    if (!el) return;
+    if (attrs.content !== undefined) el.textContent = attrs.content;
+    if (attrs.font    !== undefined) el.setAttribute('font-family', attrs.font);
+    if (attrs.size    !== undefined) el.setAttribute('font-size', String(attrs.size));
+    if (attrs.color   !== undefined) el.setAttribute('fill', attrs.color);
+    const content = new XMLSerializer().serializeToString(doc.documentElement);
+    setActiveSvg((prev) => {
+      if (!prev) return null;
+      const layers = attrs.content !== undefined
+        ? prev.layers.map((l) => l.id === selectedLayer ? { ...l, label: attrs.content!.trim() || l.label } : l)
+        : prev.layers;
+      return { ...prev, content, layers };
+    });
+  }, [selectedLayer, activeSvg]);
+
+  // ── Add text layer ─────────────────────────────────────────────────────────
+
+  const addTextLayer = useCallback(() => {
+    if (!activeSvg || !textForm.content.trim()) return;
+    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+    const svg = doc.documentElement;
+
+    // Find center of viewBox (or fall back to 50% of width/height attributes)
+    const vb = svg.getAttribute('viewBox')?.trim().split(/[\s,]+/).map(Number);
+    const cx = vb && vb.length === 4 ? vb[0] + vb[2] / 2 : Number(svg.getAttribute('width') || 200) / 2;
+    const cy = vb && vb.length === 4 ? vb[1] + vb[3] / 2 : Number(svg.getAttribute('height') || 200) / 2;
+
+    const id = `_text_${Date.now()}`;
+    const el = doc.createElementNS('http://www.w3.org/2000/svg', 'text');
+    el.id = id;
+    el.setAttribute('x', String(cx));
+    el.setAttribute('y', String(cy));
+    el.setAttribute('text-anchor', 'middle');
+    el.setAttribute('dominant-baseline', 'middle');
+    el.setAttribute('font-family', textForm.font);
+    el.setAttribute('font-size', String(textForm.size));
+    el.setAttribute('fill', textForm.color);
+    el.textContent = textForm.content.trim();
+    svg.appendChild(el);
+
+    const content = new XMLSerializer().serializeToString(svg);
+    const newLayer = { id, label: textForm.content.trim() };
+    setActiveSvg((prev) => (prev ? { ...prev, content, layers: [...prev.layers, newLayer] } : null));
+    setSelectedLayer(id);
+  }, [activeSvg, textForm]);
+
   // ── Reset ──────────────────────────────────────────────────────────────────
 
   const resetSvg = useCallback(() => {
@@ -569,6 +635,77 @@ export function SvgDropZone() {
                     <span className="text-[10px] text-zinc-600">
                       {activeSvg.layers.length}
                     </span>
+                  </div>
+
+                  {/* Text layer form — add when nothing selected, edit when a text layer is selected */}
+                  <div className="px-2 py-2 border-b border-zinc-800 flex flex-col gap-1.5">
+                    <span className="text-[10px] font-semibold text-zinc-500 uppercase tracking-widest px-1">
+                      {selectedTextProps ? 'Edit Text' : 'Add Text'}
+                    </span>
+                    <input
+                      type="text"
+                      value={selectedTextProps ? selectedTextProps.content : textForm.content}
+                      onChange={(e) =>
+                        selectedTextProps
+                          ? updateTextLayer({ content: e.target.value })
+                          : setTextForm((f) => ({ ...f, content: e.target.value }))
+                      }
+                      placeholder="Text content"
+                      className="w-full rounded bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs px-2 py-1 outline-none focus:border-zinc-500 placeholder:text-zinc-600"
+                    />
+                    <select
+                      value={selectedTextProps ? selectedTextProps.font : textForm.font}
+                      onChange={(e) =>
+                        selectedTextProps
+                          ? updateTextLayer({ font: e.target.value })
+                          : setTextForm((f) => ({ ...f, font: e.target.value }))
+                      }
+                      className="w-full rounded bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs px-2 py-1 outline-none focus:border-zinc-500"
+                    >
+                      {['Arial','Helvetica','Georgia','Times New Roman','Courier New','Verdana','Impact','Trebuchet MS'].map((f) => (
+                        <option key={f} value={f} style={{ fontFamily: f }}>{f}</option>
+                      ))}
+                    </select>
+                    <div className="flex gap-1.5">
+                      <input
+                        type="number"
+                        min={1}
+                        max={999}
+                        value={selectedTextProps ? selectedTextProps.size : textForm.size}
+                        onChange={(e) =>
+                          selectedTextProps
+                            ? updateTextLayer({ size: Math.max(1, Number(e.target.value)) })
+                            : setTextForm((f) => ({ ...f, size: Math.max(1, Number(e.target.value)) }))
+                        }
+                        className="w-full rounded bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs px-2 py-1 outline-none focus:border-zinc-500"
+                        title="Font size"
+                      />
+                      <input
+                        type="color"
+                        value={selectedTextProps ? selectedTextProps.color : textForm.color}
+                        onChange={(e) =>
+                          selectedTextProps
+                            ? updateTextLayer({ color: e.target.value })
+                            : setTextForm((f) => ({ ...f, color: e.target.value }))
+                        }
+                        className="h-[26px] w-9 shrink-0 rounded border border-zinc-700 bg-zinc-800 cursor-pointer p-0.5"
+                        title="Text color"
+                      />
+                    </div>
+                    {!selectedTextProps && (
+                      <button
+                        onClick={addTextLayer}
+                        disabled={!textForm.content.trim()}
+                        className={cn(
+                          'w-full rounded text-xs font-medium py-1.5 transition-colors',
+                          textForm.content.trim()
+                            ? 'bg-zinc-700 hover:bg-zinc-600 text-zinc-200'
+                            : 'bg-zinc-800/40 text-zinc-600 cursor-not-allowed'
+                        )}
+                      >
+                        Add layer
+                      </button>
+                    )}
                   </div>
 
                   <div
