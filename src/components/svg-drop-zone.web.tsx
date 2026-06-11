@@ -496,7 +496,6 @@ export function SvgDropZone() {
 
   const backgroundLayerId = useMemo(() => {
     if (!activeSvg || activeSvg.layers.length === 0) return null;
-    // Bottom visual layer = first in SVG document order = layers[0]
     const candidate = activeSvg.layers[0];
     const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
     const svgRoot = doc.documentElement;
@@ -506,27 +505,39 @@ export function SvgDropZone() {
     const viewBoxArea = vw * vh;
     const el = doc.getElementById(candidate.id);
     if (!el) return null;
-    const children = Array.from(el.children).filter((c) => !['defs','title','desc'].includes(c.tagName.toLowerCase()));
-    if (children.length === 0 || children.length > 6) return null;
-    for (const child of children) {
-      const tag = child.tagName.toLowerCase();
+
+    const coversCanvas = (node: Element): boolean => {
+      const tag = node.localName.toLowerCase();
       if (tag === 'rect') {
-        const w = parseFloat(child.getAttribute('width') ?? '0');
-        const h = parseFloat(child.getAttribute('height') ?? '0');
-        if (w * h >= viewBoxArea * 0.75) return candidate.id;
+        const w = parseFloat(node.getAttribute('width') ?? '0');
+        const h = parseFloat(node.getAttribute('height') ?? '0');
+        return w * h >= viewBoxArea * 0.75;
       }
       if (tag === 'circle') {
-        const r = parseFloat(child.getAttribute('r') ?? '0');
-        if (Math.PI * r * r >= viewBoxArea * 0.75) return candidate.id;
+        const r = parseFloat(node.getAttribute('r') ?? '0');
+        return Math.PI * r * r >= viewBoxArea * 0.75;
       }
       if (tag === 'ellipse') {
-        const rx = parseFloat(child.getAttribute('rx') ?? '0');
-        const ry = parseFloat(child.getAttribute('ry') ?? '0');
-        if (Math.PI * rx * ry >= viewBoxArea * 0.75) return candidate.id;
+        const rx = parseFloat(node.getAttribute('rx') ?? '0');
+        const ry = parseFloat(node.getAttribute('ry') ?? '0');
+        return Math.PI * rx * ry >= viewBoxArea * 0.75;
       }
+      return false;
+    };
+
+    // Case 1: the layer element itself is a background shape
+    if (coversCanvas(el)) return candidate.id;
+
+    // Case 2: the layer is a group whose first few children include a background shape
+    const children = Array.from(el.children).filter(
+      (c) => !['defs', 'title', 'desc'].includes(c.localName.toLowerCase())
+    );
+    if (children.length > 0 && children.length <= 6) {
+      if (children.some(coversCanvas)) return candidate.id;
     }
+
     return null;
-  }, [activeSvg?.content]);
+  }, [activeSvg?.src]);
 
   // ── Selected text layer properties ────────────────────────────────────────
 
