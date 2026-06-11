@@ -21,9 +21,10 @@ interface ActiveSvg {
 // ─── Samples ─────────────────────────────────────────────────────────────────
 
 const SAMPLES = [
-  { label: 'Element 15',    name: 'element_15.svg',        src: '/samples/element_15.svg' },
-  { label: 'Vector 956069', name: 'vectorstock_956069.svg', src: '/samples/vectorstock_956069.svg' },
-  { label: 'Vector 51876595', name: 'vectorstock_51876595.svg', src: '/samples/vectorstock_51876595.svg' },
+  { label: 'Vector 33133625', name: 'vectorstock_33133625.svg',  src: '/samples/vectorstock_33133625.svg' },
+  { label: 'Vector 51876595', name: 'vectorstock_51876595.svg',  src: '/samples/vectorstock_51876595.svg' },
+  { label: 'Vector 956069',   name: 'vectorstock_956069.svg',    src: '/samples/vectorstock_956069.svg' },
+  { label: 'Element 15',      name: 'element_15.svg',           src: '/samples/element_15.svg' },
 ] as const;
 
 type SampleName = (typeof SAMPLES)[number]['name'];
@@ -97,6 +98,34 @@ function bboxInRootSpace(svgEl: SVGSVGElement, el: SVGGraphicsElement): DOMRect 
   }
 }
 
+// Arc path for curved text: sweep=1→arch up, sweep=0→arch down
+function computeArcPath(cx: number, cy: number, halfW: number, curve: number): string {
+  const h = halfW * Math.abs(curve) / 100;
+  const r = (halfW * halfW) / (2 * h) + h / 2;
+  const sweep = curve > 0 ? 1 : 0;
+  return `M ${cx - halfW} ${cy} A ${r} ${r} 0 0 ${sweep} ${cx + halfW} ${cy}`;
+}
+
+function svgToBase64Png(svgString: string, width: number, height: number): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const blob = new Blob([svgString], { type: 'image/svg+xml' });
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) { URL.revokeObjectURL(url); reject(new Error('Canvas unavailable')); return; }
+      ctx.drawImage(img, 0, 0, width, height);
+      URL.revokeObjectURL(url);
+      resolve(canvas.toDataURL('image/png').replace('data:image/png;base64,', ''));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('SVG render failed')); };
+    img.src = url;
+  });
+}
+
 // ─── Icons ───────────────────────────────────────────────────────────────────
 
 function EyeIcon({ className }: { className?: string }) {
@@ -120,6 +149,7 @@ function EyeSlashIcon({ className }: { className?: string }) {
   );
 }
 
+
 function GripIcon({ className }: { className?: string }) {
   return (
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 14" fill="currentColor" className={className}>
@@ -129,6 +159,17 @@ function GripIcon({ className }: { className?: string }) {
       <circle cx="6.5" cy="7"    r="1.5" />
       <circle cx="1.5" cy="12.5" r="1.5" />
       <circle cx="6.5" cy="12.5" r="1.5" />
+    </svg>
+  );
+}
+
+
+function SparklesIcon({ className }: { className?: string }) {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
+      stroke="currentColor" strokeWidth={1.75} className={className}>
+      <path strokeLinecap="round" strokeLinejoin="round"
+        d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 0 0-2.456 2.456ZM16.894 20.567 16.5 21.75l-.394-1.183a2.25 2.25 0 0 0-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 0 0 1.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 0 0 1.423 1.423l1.183.394-1.183.394a2.25 2.25 0 0 0-1.423 1.423Z" />
     </svg>
   );
 }
@@ -151,7 +192,9 @@ export function SvgDropZone() {
     startSvgX: number;   startSvgY: number;
     baseTransform: string;
   } | null>(null);
-  const [textForm, setTextForm] = useState({ content: 'Text', font: 'Arial', size: 48, color: '#000000' });
+  const [textForm, setTextForm] = useState({ content: 'Text', font: 'Arial', size: 48, color: '#000000', curve: 0 });
+  const [aiLoading, setAiLoading] = useState(false);
+  const [aiError, setAiError]   = useState<string | null>(null);
   const dragMovedRef            = useRef(false);
   // Panel drag — use refs so onPointerMove/Up handlers always see current values
   const panelDragIdRef          = useRef<string | null>(null);
@@ -427,24 +470,48 @@ export function SvgDropZone() {
     if (!selectedLayer || !activeSvg) return null;
     const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
     const el = doc.getElementById(selectedLayer);
-    if (!el || el.tagName.toLowerCase() !== 'text') return null;
+    if (!el) return null;
+    const isGroup = el.getAttribute('data-text-layer') === '1';
+    const textEl = isGroup
+      ? el.querySelector('text')
+      : el.tagName.toLowerCase() === 'text' ? el : null;
+    if (!textEl) return null;
+    const textPathEl = textEl.querySelector('textPath');
     return {
-      content: el.textContent ?? '',
-      font:    el.getAttribute('font-family') ?? 'Arial',
-      size:    Number(el.getAttribute('font-size') ?? 48),
-      color:   el.getAttribute('fill') ?? '#ffffff',
+      content: textPathEl ? (textPathEl.textContent ?? '') : (textEl.textContent ?? ''),
+      font:    textEl.getAttribute('font-family') ?? 'Arial',
+      size:    Number(textEl.getAttribute('font-size') ?? 48),
+      color:   textEl.getAttribute('fill') ?? '#000000',
+      curve:   isGroup ? Number(el.getAttribute('data-curve') ?? 0) : null as number | null,
     };
   }, [selectedLayer, activeSvg?.content]);
 
-  const updateTextLayer = useCallback((attrs: Partial<{ content: string; font: string; size: number; color: string }>) => {
+  const updateTextLayer = useCallback((attrs: Partial<{ content: string; font: string; size: number; color: string; curve: number }>) => {
     if (!selectedLayer || !activeSvg) return;
     const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
     const el = doc.getElementById(selectedLayer);
     if (!el) return;
-    if (attrs.content !== undefined) el.textContent = attrs.content;
-    if (attrs.font    !== undefined) el.setAttribute('font-family', attrs.font);
-    if (attrs.size    !== undefined) el.setAttribute('font-size', String(attrs.size));
-    if (attrs.color   !== undefined) el.setAttribute('fill', attrs.color);
+    const isGroup = el.getAttribute('data-text-layer') === '1';
+    const textEl = isGroup ? el.querySelector('text') : el;
+    if (!textEl) return;
+    if (attrs.content !== undefined) {
+      const tp = textEl.querySelector('textPath');
+      if (tp) tp.textContent = attrs.content;
+      else textEl.textContent = attrs.content;
+    }
+    if (attrs.font  !== undefined) textEl.setAttribute('font-family', attrs.font);
+    if (attrs.size  !== undefined) textEl.setAttribute('font-size', String(attrs.size));
+    if (attrs.color !== undefined) textEl.setAttribute('fill', attrs.color);
+    if (attrs.curve !== undefined && isGroup) {
+      el.setAttribute('data-curve', String(attrs.curve));
+      const arcEl = el.querySelector('path');
+      if (arcEl) {
+        const cx = Number(el.getAttribute('data-cx') ?? 0);
+        const cy = Number(el.getAttribute('data-cy') ?? 0);
+        const halfW = Number(el.getAttribute('data-halfw') ?? 100);
+        arcEl.setAttribute('d', computeArcPath(cx, cy, halfW, attrs.curve));
+      }
+    }
     const content = new XMLSerializer().serializeToString(doc.documentElement);
     setActiveSvg((prev) => {
       if (!prev) return null;
@@ -462,29 +529,137 @@ export function SvgDropZone() {
     const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
     const svg = doc.documentElement;
 
-    // Find center of viewBox (or fall back to 50% of width/height attributes)
     const vb = svg.getAttribute('viewBox')?.trim().split(/[\s,]+/).map(Number);
     const cx = vb && vb.length === 4 ? vb[0] + vb[2] / 2 : Number(svg.getAttribute('width') || 200) / 2;
     const cy = vb && vb.length === 4 ? vb[1] + vb[3] / 2 : Number(svg.getAttribute('height') || 200) / 2;
+    const vbW = vb && vb.length === 4 ? vb[2] : Number(svg.getAttribute('width') || 400);
 
     const id = `_text_${Date.now()}`;
-    const el = doc.createElementNS('http://www.w3.org/2000/svg', 'text');
-    el.id = id;
-    el.setAttribute('x', String(cx));
-    el.setAttribute('y', String(cy));
-    el.setAttribute('text-anchor', 'middle');
-    el.setAttribute('dominant-baseline', 'middle');
-    el.setAttribute('font-family', textForm.font);
-    el.setAttribute('font-size', String(textForm.size));
-    el.setAttribute('fill', textForm.color);
-    el.textContent = textForm.content.trim();
-    svg.appendChild(el);
+    const textContent = textForm.content.trim();
+
+    if (textForm.curve !== 0) {
+      // Curved text: <g> wrapping an invisible arc path + <text><textPath>
+      // Both share the group transform so dragging keeps them in sync
+      const halfW = vbW * 0.35;
+      const arcId = `_arc_${id}`;
+      const g = doc.createElementNS('http://www.w3.org/2000/svg', 'g');
+      g.id = id;
+      g.setAttribute('data-name', textContent);
+      g.setAttribute('data-text-layer', '1');
+      g.setAttribute('data-curve', String(textForm.curve));
+      g.setAttribute('data-cx', String(cx));
+      g.setAttribute('data-cy', String(cy));
+      g.setAttribute('data-halfw', String(halfW));
+
+      const arcEl = doc.createElementNS('http://www.w3.org/2000/svg', 'path');
+      arcEl.id = arcId;
+      arcEl.setAttribute('d', computeArcPath(cx, cy, halfW, textForm.curve));
+      arcEl.setAttribute('fill', 'none');
+      arcEl.setAttribute('stroke', 'none');
+      g.appendChild(arcEl);
+
+      const textEl = doc.createElementNS('http://www.w3.org/2000/svg', 'text');
+      textEl.setAttribute('font-family', textForm.font);
+      textEl.setAttribute('font-size', String(textForm.size));
+      textEl.setAttribute('fill', textForm.color);
+      const textPathEl = doc.createElementNS('http://www.w3.org/2000/svg', 'textPath');
+      textPathEl.setAttribute('href', `#${arcId}`);
+      textPathEl.setAttribute('startOffset', '50%');
+      textPathEl.setAttribute('text-anchor', 'middle');
+      textPathEl.textContent = textContent;
+      textEl.appendChild(textPathEl);
+      g.appendChild(textEl);
+      svg.appendChild(g);
+    } else {
+      const el = doc.createElementNS('http://www.w3.org/2000/svg', 'text');
+      el.id = id;
+      el.setAttribute('x', String(cx));
+      el.setAttribute('y', String(cy));
+      el.setAttribute('text-anchor', 'middle');
+      el.setAttribute('dominant-baseline', 'middle');
+      el.setAttribute('font-family', textForm.font);
+      el.setAttribute('font-size', String(textForm.size));
+      el.setAttribute('fill', textForm.color);
+      el.textContent = textContent;
+      svg.appendChild(el);
+    }
 
     const content = new XMLSerializer().serializeToString(svg);
-    const newLayer = { id, label: textForm.content.trim() };
+    const newLayer = { id, label: textContent };
     setActiveSvg((prev) => (prev ? { ...prev, content, layers: [...prev.layers, newLayer] } : null));
     setSelectedLayer(id);
   }, [activeSvg, textForm]);
+
+  // ── Strip text ────────────────────────────────────────────────────────────
+
+  const stripTextFromSvg = useCallback(() => {
+    if (!activeSvg || !selectedLayer) return;
+    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+    const el = doc.getElementById(selectedLayer);
+    if (!el) return;
+    el.querySelectorAll('text, tspan, flowRoot, flowPara').forEach((t) => t.remove());
+    const content = new XMLSerializer().serializeToString(doc.documentElement);
+    setActiveSvg((prev) => (prev ? { ...prev, content } : null));
+  }, [activeSvg, selectedLayer]);
+
+  // ── AI layer actions ───────────────────────────────────────────────────────
+
+  const runAiLayerAction = useCallback(async () => {
+    if (!activeSvg || !selectedLayer) return;
+    const layerId = selectedLayer;
+    setAiLoading(true);
+    setAiError(null);
+    try {
+      const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+      const layerEl = doc.getElementById(layerId);
+      if (!layerEl) throw new Error('Layer not found');
+      const svgString = new XMLSerializer().serializeToString(layerEl);
+
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': process.env.EXPO_PUBLIC_CLAUDE_API_KEY ?? '',
+          'anthropic-version': '2023-06-01',
+          'anthropic-dangerous-direct-browser-access': 'true',
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-6',
+          max_tokens: 1000,
+          messages: [{
+            role: 'user',
+            content: `Here is an SVG. Return ONLY the SVG with all text and text-derived paths removed, keeping only the icon/graphic elements. SVG: ${svgString}`,
+          }],
+        }),
+      });
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({})) as { error?: { message?: string } };
+        throw new Error(errData.error?.message ?? `API error ${response.status}`);
+      }
+
+      const data = await response.json() as { content: Array<{ type: string; text: string }> };
+      let resultSvg = data.content?.[0]?.text ?? '';
+
+      // Strip markdown code fences if Claude wrapped the response
+      resultSvg = resultSvg.replace(/^```(?:xml|svg)?\s*/im, '').replace(/```\s*$/m, '').trim();
+
+      const wrapperSvg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">${resultSvg}</svg>`;
+      const parsedWrapper = new DOMParser().parseFromString(wrapperSvg, 'image/svg+xml');
+      if (parsedWrapper.querySelector('parsererror')) throw new Error('AI returned invalid SVG');
+      const newEl = parsedWrapper.documentElement.firstElementChild;
+      if (!newEl) throw new Error('AI returned an empty response');
+
+      const imported = doc.importNode(newEl, true);
+      layerEl.parentNode?.replaceChild(imported, layerEl);
+      const content = new XMLSerializer().serializeToString(doc.documentElement);
+      setActiveSvg((prev) => (prev ? { ...prev, content } : null));
+    } catch (err) {
+      setAiError(err instanceof Error ? err.message : 'AI action failed');
+    } finally {
+      setAiLoading(false);
+    }
+  }, [activeSvg, selectedLayer]);
 
   // ── Reset ──────────────────────────────────────────────────────────────────
 
@@ -501,6 +676,8 @@ export function SvgDropZone() {
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => () => revokePrev(activeSvg), []);
+
+  useEffect(() => { setAiError(null); }, [selectedLayer]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') clear(); };
@@ -586,13 +763,28 @@ export function SvgDropZone() {
               <span className="text-zinc-400 text-sm font-mono truncate">
                 {isLoading && !activeSvg ? 'Loading…' : activeSvg?.name}
               </span>
-              <button
-                onClick={clear}
-                className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-200 transition-colors px-2 py-1 rounded hover:bg-zinc-800"
-              >
-                Open new file
-                <kbd className="text-zinc-700 text-[10px] font-mono">ESC</kbd>
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={stripTextFromSvg}
+                  disabled={!selectedLayer}
+                  title="Strip text elements from selected layer"
+                  className={cn(
+                    'text-xs px-2 py-1 rounded transition-colors font-mono',
+                    selectedLayer
+                      ? 'text-amber-500 hover:text-amber-300 hover:bg-amber-950/40'
+                      : 'text-zinc-500 cursor-not-allowed'
+                  )}
+                >
+                  strip text
+                </button>
+                <button
+                  onClick={clear}
+                  className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-200 transition-colors px-2 py-1 rounded hover:bg-zinc-800"
+                >
+                  Open new file
+                  <kbd className="text-zinc-700 text-[10px] font-mono">ESC</kbd>
+                </button>
+              </div>
             </div>
 
             {/* Canvas row: SVG + layers panel */}
@@ -603,12 +795,19 @@ export function SvgDropZone() {
                 ref={svgCanvasRef}
                 onClick={handleCanvasClick}
                 onMouseDown={handleCanvasMouseDown}
-                className="flex-1 overflow-auto flex items-center justify-center min-w-0"
+                className="relative flex-1 overflow-auto flex items-center justify-center min-w-0"
                 style={{
                   backgroundImage: 'radial-gradient(circle, #3f3f46 1px, transparent 1px)',
                   backgroundSize: '20px 20px',
                 }}
               >
+                {aiLoading && (
+                  <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-zinc-950/60 backdrop-blur-[2px]">
+                    <SparklesIcon className="size-10 text-indigo-400 animate-pulse" />
+                    <span className="mt-3 text-sm text-zinc-300 tracking-wide">Thinking…</span>
+                  </div>
+                )}
+
                 {isLoading && !activeSvg ? (
                   <div className="w-8 h-8 rounded-full border-2 border-zinc-700 border-t-zinc-400 animate-spin" />
                 ) : activeSvg ? (
@@ -699,6 +898,29 @@ export function SvgDropZone() {
                         title="Text color"
                       />
                     </div>
+                    {/* Curve slider — always in add mode; in edit mode only for curved layers */}
+                    {(!selectedTextProps || selectedTextProps.curve !== null) && (
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[10px] text-zinc-500 w-8 shrink-0">Curve</span>
+                        <input
+                          type="range"
+                          min={-100}
+                          max={100}
+                          step={5}
+                          value={selectedTextProps ? (selectedTextProps.curve as number) : textForm.curve}
+                          onChange={(e) => {
+                            const v = Number(e.target.value);
+                            selectedTextProps
+                              ? updateTextLayer({ curve: v })
+                              : setTextForm((f) => ({ ...f, curve: v }));
+                          }}
+                          className="flex-1 accent-zinc-400"
+                        />
+                        <span className="text-[10px] text-zinc-500 w-7 text-right tabular-nums">
+                          {selectedTextProps ? (selectedTextProps.curve as number) : textForm.curve}
+                        </span>
+                      </div>
+                    )}
                     {!selectedTextProps && (
                       <button
                         onClick={addTextLayer}
@@ -714,6 +936,35 @@ export function SvgDropZone() {
                       </button>
                     )}
                   </div>
+
+                  {/* AI Actions — visible only when a layer is selected */}
+                  {selectedLayer && (
+                    <div className="px-2 py-2 border-b border-zinc-800 shrink-0 flex flex-col gap-1.5">
+                      <div className="flex items-center gap-1 px-1">
+                        <SparklesIcon className="size-3 text-indigo-400" />
+                        <span className="text-[10px] font-semibold text-zinc-400 uppercase tracking-widest">
+                          AI Actions
+                        </span>
+                      </div>
+
+                      {aiError && (
+                        <p className="text-[10px] text-red-400 px-1 break-all leading-tight">{aiError}</p>
+                      )}
+
+                      <button
+                        onClick={runAiLayerAction}
+                        disabled={aiLoading}
+                        className={cn(
+                          'w-full rounded text-xs font-medium py-1.5 transition-colors',
+                          aiLoading
+                            ? 'bg-zinc-800/40 text-zinc-600 cursor-wait'
+                            : 'bg-indigo-900/60 hover:bg-indigo-800/60 text-indigo-300'
+                        )}
+                      >
+                        {aiLoading ? 'AI processing…' : 'Strip text (AI)'}
+                      </button>
+                    </div>
+                  )}
 
                   <div
                     ref={layerListRef}
@@ -774,9 +1025,6 @@ export function SvgDropZone() {
                             onPointerDown={(e) => {
                               if (e.button !== 0) return;
                               setSelectedLayer(layer.id);
-                              layerListRef.current?.setPointerCapture(e.pointerId);
-                              panelDragIdRef.current       = layer.id;
-                              panelDropPositionRef.current = null;
                             }}
                             onClick={() => {
                               if (panelReorderDoneRef.current) {
@@ -797,6 +1045,21 @@ export function SvgDropZone() {
                             {dropAfter && (
                               <div className="pointer-events-none absolute bottom-0 left-1 right-1 h-0.5 translate-y-1/2 rounded-full bg-blue-500 z-10" />
                             )}
+
+                            {/* Drag handle */}
+                            <span
+                              onPointerDown={(e) => {
+                                if (e.button !== 0) return;
+                                e.stopPropagation();
+                                setSelectedLayer(layer.id);
+                                layerListRef.current?.setPointerCapture(e.pointerId);
+                                panelDragIdRef.current       = layer.id;
+                                panelDropPositionRef.current = null;
+                              }}
+                              className="shrink-0 cursor-grab opacity-0 group-hover:opacity-100 text-zinc-500 hover:text-zinc-300 transition-opacity"
+                            >
+                              <GripIcon className="size-2" />
+                            </span>
 
                             <button
                               onPointerDown={(e) => e.stopPropagation()}
