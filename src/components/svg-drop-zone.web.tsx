@@ -106,6 +106,12 @@ function computeArcPath(cx: number, cy: number, halfW: number, curve: number): s
   return `M ${cx - halfW} ${cy} A ${r} ${r} 0 0 ${sweep} ${cx + halfW} ${cy}`;
 }
 
+function hashString(s: string): string {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) { h = (((h << 5) + h) ^ s.charCodeAt(i)) >>> 0; }
+  return h.toString(36);
+}
+
 function svgToBase64Png(svgString: string, width: number, height: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const blob = new Blob([svgString], { type: 'image/svg+xml' });
@@ -196,6 +202,7 @@ export function SvgDropZone() {
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError]   = useState<string | null>(null);
   const dragMovedRef            = useRef(false);
+  const aiCacheRef              = useRef<Map<string, string>>(new Map());
   // Panel drag — use refs so onPointerMove/Up handlers always see current values
   const panelDragIdRef          = useRef<string | null>(null);
   const panelDropPositionRef    = useRef<{ targetId: string; before: boolean } | null>(null);
@@ -614,6 +621,20 @@ export function SvgDropZone() {
       const layerEl = doc.getElementById(layerId);
       if (!layerEl) throw new Error('Layer not found');
       const svgString = new XMLSerializer().serializeToString(layerEl);
+      const cacheKey = `strip-text:${hashString(svgString)}`;
+      const cached = aiCacheRef.current.get(cacheKey);
+      if (cached) {
+        const wrapperSvgC = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">${cached}</svg>`;
+        const parsedC = new DOMParser().parseFromString(wrapperSvgC, 'image/svg+xml');
+        const newElC = parsedC.documentElement.firstElementChild;
+        if (newElC) {
+          const importedC = doc.importNode(newElC, true);
+          layerEl.parentNode?.replaceChild(importedC, layerEl);
+          const content = new XMLSerializer().serializeToString(doc.documentElement);
+          setActiveSvg((prev) => (prev ? { ...prev, content } : null));
+          return;
+        }
+      }
 
       const response = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
@@ -643,6 +664,7 @@ export function SvgDropZone() {
 
       // Strip markdown code fences if Claude wrapped the response
       resultSvg = resultSvg.replace(/^```(?:xml|svg)?\s*/im, '').replace(/```\s*$/m, '').trim();
+      aiCacheRef.current.set(cacheKey, resultSvg);
 
       const wrapperSvg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">${resultSvg}</svg>`;
       const parsedWrapper = new DOMParser().parseFromString(wrapperSvg, 'image/svg+xml');
