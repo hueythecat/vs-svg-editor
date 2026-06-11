@@ -216,6 +216,9 @@ export function SvgDropZone() {
   const [fontSuggestion, setFontSuggestion]   = useState<string | null>(null);
   const [suggestedFontName, setSuggestedFontName] = useState<string | null>(null);
   const [extraFonts, setExtraFonts]           = useState<string[]>([]);
+  const [imageFonts, setImageFonts]           = useState<Array<{ font: string; reason: string }> | null>(null);
+  const [imageFontsLoading, setImageFontsLoading] = useState(false);
+  const [showImageFonts, setShowImageFonts]   = useState(false);
   const [taxonomy, setTaxonomy]           = useState<TaxonomyGroup[] | null>(null);
   const [taxonomyLoading, setTaxonomyLoading] = useState(false);
   const [taxonomyOpen, setTaxonomyOpen]   = useState(false);
@@ -489,6 +492,42 @@ export function SvgDropZone() {
     URL.revokeObjectURL(url);
   }, [activeSvg, hiddenLayers]);
 
+  // ── Background layer detection ────────────────────────────────────────────
+
+  const backgroundLayerId = useMemo(() => {
+    if (!activeSvg || activeSvg.layers.length === 0) return null;
+    // Bottom visual layer = first in SVG document order = layers[0]
+    const candidate = activeSvg.layers[0];
+    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+    const svgRoot = doc.documentElement;
+    const vb = (svgRoot.getAttribute('viewBox') ?? '').trim().split(/[\s,]+/).map(Number);
+    if (vb.length < 4) return null;
+    const [, , vw, vh] = vb;
+    const viewBoxArea = vw * vh;
+    const el = doc.getElementById(candidate.id);
+    if (!el) return null;
+    const children = Array.from(el.children).filter((c) => !['defs','title','desc'].includes(c.tagName.toLowerCase()));
+    if (children.length === 0 || children.length > 6) return null;
+    for (const child of children) {
+      const tag = child.tagName.toLowerCase();
+      if (tag === 'rect') {
+        const w = parseFloat(child.getAttribute('width') ?? '0');
+        const h = parseFloat(child.getAttribute('height') ?? '0');
+        if (w * h >= viewBoxArea * 0.75) return candidate.id;
+      }
+      if (tag === 'circle') {
+        const r = parseFloat(child.getAttribute('r') ?? '0');
+        if (Math.PI * r * r >= viewBoxArea * 0.75) return candidate.id;
+      }
+      if (tag === 'ellipse') {
+        const rx = parseFloat(child.getAttribute('rx') ?? '0');
+        const ry = parseFloat(child.getAttribute('ry') ?? '0');
+        if (Math.PI * rx * ry >= viewBoxArea * 0.75) return candidate.id;
+      }
+    }
+    return null;
+  }, [activeSvg?.content]);
+
   // ── Selected text layer properties ────────────────────────────────────────
 
   const selectedTextProps = useMemo(() => {
@@ -645,7 +684,7 @@ export function SvgDropZone() {
     let changed = false;
 
     activeSvg.layers.forEach(({ id }) => {
-      if (id === selectedLayer) return;
+      if (id === selectedLayer || id === backgroundLayerId) return;
       const liveEl = svgEl.getElementById(id);
       if (!liveEl) return;
       const center = toSvgPoint(liveEl);
@@ -662,6 +701,69 @@ export function SvgDropZone() {
     const content = new XMLSerializer().serializeToString(doc.documentElement);
     setActiveSvg((prev) => (prev ? { ...prev, content } : null));
   }, [activeSvg, selectedLayer]);
+
+  // ── Load + register a Google Font ─────────────────────────────────────────
+
+  const addGoogleFont = useCallback((fontName: string) => {
+    setExtraFonts((prev) => prev.includes(fontName) ? prev : [...prev, fontName]);
+    const linkId = `gfont-${fontName.replace(/\s+/g, '-')}`;
+    if (!document.getElementById(linkId)) {
+      const link = document.createElement('link');
+      link.id = linkId; link.rel = 'stylesheet';
+      link.href = `https://fonts.googleapis.com/css2?family=${fontName.replace(/\s+/g, '+')}:wght@400;700&display=swap`;
+      document.head.appendChild(link);
+    }
+  }, []);
+
+  // ── Image-level font suggestions ──────────────────────────────────────────
+
+  const suggestFontsForImage = useCallback(async () => {
+    if (!activeSvg) return;
+    setImageFontsLoading(true);
+    setShowImageFonts(true);
+    try {
+      const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+      const root = doc.documentElement;
+      const vb = (root.getAttribute('viewBox') ?? '0 0 800 600').trim().split(/[\s,]+/).map(Number);
+      const vw = vb[2] ?? 800;
+      const vh = vb[3] ?? 600;
+      const scale = Math.min(1, 1024 / Math.max(vw, vh, 1));
+      const pngBase64 = await svgToBase64Png(activeSvg.content, Math.round(vw * scale), Math.round(vh * scale));
+
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': process.env.EXPO_PUBLIC_CLAUDE_API_KEY ?? '',
+          'anthropic-version': '2023-06-01',
+          'anthropic-dangerous-direct-browser-access': 'true',
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-6',
+          max_tokens: 1000,
+          messages: [{
+            role: 'user',
+            content: [
+              { type: 'image', source: { type: 'base64', media_type: 'image/png', data: pngBase64 } },
+              { type: 'text', text: `Look at this design image. Suggest 5 Google Fonts that would complement its visual style, mood, colour palette, and aesthetic. Consider the overall feel of the design.
+Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"brief reason"}]}` },
+            ],
+          }],
+        }),
+      });
+
+      const data = await res.json() as { content?: Array<{ text?: string }> };
+      const raw = data.content?.[0]?.text ?? '';
+      const parsed = JSON.parse(raw) as { suggestions: Array<{ font: string; reason: string }> };
+      console.log('Image font suggestions:', parsed.suggestions);
+      setImageFonts(parsed.suggestions ?? []);
+    } catch (err) {
+      console.error('Font suggestion failed:', err);
+      setImageFonts([]);
+    } finally {
+      setImageFontsLoading(false);
+    }
+  }, [activeSvg]);
 
   // ── Strip text ────────────────────────────────────────────────────────────
 
@@ -758,16 +860,7 @@ Return JSON only, no markdown.`
           console.log('Font suggestion:', parsed);
           if (parsed.font) {
             setSuggestedFontName(parsed.font);
-            setExtraFonts((prev) => prev.includes(parsed.font!) ? prev : [...prev, parsed.font!]);
-            // Load from Google Fonts so it renders in the dropdown and text layers
-            const linkId = `gfont-${parsed.font.replace(/\s+/g, '-')}`;
-            if (!document.getElementById(linkId)) {
-              const link = document.createElement('link');
-              link.id = linkId;
-              link.rel = 'stylesheet';
-              link.href = `https://fonts.googleapis.com/css2?family=${parsed.font.replace(/\s+/g, '+')}:wght@400;700&display=swap`;
-              document.head.appendChild(link);
-            }
+            addGoogleFont(parsed.font);
           }
           setFontSuggestion(parsed.font ? `${parsed.font} — ${parsed.reason}` : parsed.reason);
         } catch {
@@ -818,6 +911,8 @@ Return JSON only, no markdown.`
   useEffect(() => { setAiError(null); setFontSuggestion(null); setSuggestedFontName(null); }, [selectedLayer]);
 
   useEffect(() => {
+    setImageFonts(null);
+    setShowImageFonts(false);
     if (!activeSvg) { setTaxonomy(null); return; }
     setTaxonomy([
       { type: 'background', elements: ['solid dark circular background'] },
@@ -924,6 +1019,15 @@ Return JSON only, no markdown.`
                   </button>
                 )}
                 <button
+                  onClick={suggestFontsForImage}
+                  disabled={imageFontsLoading || imageFonts !== null}
+                  className="flex items-center gap-1.5 text-xs text-zinc-300 px-2 py-1 rounded border border-zinc-600 transition-colors hover:bg-zinc-800"
+                  style={imageFontsLoading ? { opacity: 0.5 } : undefined}
+                >
+                  <SparklesIcon className="size-3" />
+                  {imageFontsLoading ? 'Thinking…' : 'Suggest fonts'}
+                </button>
+                <button
                   onClick={clear}
                   className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-200 transition-colors px-2 py-1 rounded hover:bg-zinc-800"
                 >
@@ -932,6 +1036,42 @@ Return JSON only, no markdown.`
                 </button>
               </div>
             </div>
+
+            {/* Font suggestions panel */}
+            {showImageFonts && (
+              <div className="shrink-0 border-b border-zinc-800 bg-zinc-900/80 px-4 py-2 flex flex-col gap-2">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-1.5">
+                    <SparklesIcon className="size-3 text-indigo-400" />
+                    <span className="text-[10px] font-semibold text-zinc-400 uppercase tracking-widest">Font suggestions</span>
+                  </div>
+                  <button onClick={() => setShowImageFonts(false)} className="text-zinc-600 hover:text-zinc-300 text-xs transition-colors">✕</button>
+                </div>
+                {imageFontsLoading && (
+                  <div className="flex items-center gap-2 py-1">
+                    <div className="size-3 rounded-full border border-zinc-600 border-t-zinc-400 animate-spin shrink-0" />
+                    <span className="text-xs text-zinc-500">Analysing design…</span>
+                  </div>
+                )}
+                {imageFonts && imageFonts.length > 0 && (
+                  <div className="flex flex-wrap gap-2">
+                    {imageFonts.map(({ font, reason }) => (
+                      <div key={font} className="flex items-center gap-1.5 rounded bg-zinc-800 px-2 py-1">
+                        <span className="text-xs text-zinc-200" style={{ fontFamily: font }}>{font}</span>
+                        <span className="text-[10px] text-zinc-500 hidden sm:inline">— {reason}</span>
+                        <button
+                          onClick={() => addGoogleFont(font)}
+                          title="Add to font list"
+                          className="text-zinc-500 hover:text-zinc-200 transition-colors text-xs ml-1"
+                        >
+                          +
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Canvas row: SVG + layers panel */}
             <div className="flex flex-1 min-h-0">
@@ -1234,6 +1374,7 @@ Return JSON only, no markdown.`
                         const hidden     = hiddenLayers.has(layer.id);
                         const isSelected = selectedLayer === layer.id;
                         const isDragged  = dragLayerId === layer.id;
+                        const isCanvas   = layer.id === backgroundLayerId;
                         const dropBefore = dropPosition?.targetId === layer.id && dropPosition.before;
                         const dropAfter  = dropPosition?.targetId === layer.id && !dropPosition.before;
                         return (
@@ -1290,9 +1431,14 @@ Return JSON only, no markdown.`
                                 : <EyeIcon className="size-3.5" />
                               }
                             </button>
-                            <span className="text-xs text-zinc-300 truncate leading-snug">
-                              {layer.label}
+                            <span className="text-xs text-zinc-300 truncate leading-snug flex-1 min-w-0">
+                              {isCanvas ? 'Canvas' : layer.label}
                             </span>
+                            {isCanvas && (
+                              <span className="shrink-0 text-[9px] font-semibold uppercase tracking-wider text-zinc-500 bg-zinc-800 px-1 py-0.5 rounded">
+                                bg
+                              </span>
+                            )}
                           </div>
                         );
                       })
