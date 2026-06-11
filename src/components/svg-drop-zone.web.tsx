@@ -180,6 +180,18 @@ function SparklesIcon({ className }: { className?: string }) {
   );
 }
 
+const TAXONOMY_COLOURS: Record<string, string> = {
+  text:       'text-amber-400',
+  background: 'text-zinc-400',
+  icon:       'text-sky-400',
+  graphic:    'text-sky-400',
+  decoration: 'text-purple-400',
+  shape:      'text-emerald-400',
+  image:      'text-rose-400',
+};
+
+type TaxonomyGroup = { type: string; elements: string[] }; // elements are human-readable descriptions
+
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export function SvgDropZone() {
@@ -198,9 +210,15 @@ export function SvgDropZone() {
     startSvgX: number;   startSvgY: number;
     baseTransform: string;
   } | null>(null);
-  const [textForm, setTextForm] = useState({ content: 'Text', font: 'Arial', size: 48, color: '#000000', curve: 0 });
-  const [aiLoading, setAiLoading] = useState(false);
-  const [aiError, setAiError]   = useState<string | null>(null);
+  const [textForm, setTextForm] = useState({ content: 'Text', font: 'Arial', size: 48, weight: 400, color: '#000000', curve: 0 });
+  const [aiLoading, setAiLoading]         = useState(false);
+  const [aiError, setAiError]             = useState<string | null>(null);
+  const [fontSuggestion, setFontSuggestion]   = useState<string | null>(null);
+  const [suggestedFontName, setSuggestedFontName] = useState<string | null>(null);
+  const [extraFonts, setExtraFonts]           = useState<string[]>([]);
+  const [taxonomy, setTaxonomy]           = useState<TaxonomyGroup[] | null>(null);
+  const [taxonomyLoading, setTaxonomyLoading] = useState(false);
+  const [taxonomyOpen, setTaxonomyOpen]   = useState(false);
   const dragMovedRef            = useRef(false);
   const aiCacheRef              = useRef<Map<string, string>>(new Map());
   // Panel drag — use refs so onPointerMove/Up handlers always see current values
@@ -488,12 +506,13 @@ export function SvgDropZone() {
       content: textPathEl ? (textPathEl.textContent ?? '') : (textEl.textContent ?? ''),
       font:    textEl.getAttribute('font-family') ?? 'Arial',
       size:    Number(textEl.getAttribute('font-size') ?? 48),
+      weight:  Number(textEl.getAttribute('font-weight') ?? 400),
       color:   textEl.getAttribute('fill') ?? '#000000',
       curve:   isGroup ? Number(el.getAttribute('data-curve') ?? 0) : null as number | null,
     };
   }, [selectedLayer, activeSvg?.content]);
 
-  const updateTextLayer = useCallback((attrs: Partial<{ content: string; font: string; size: number; color: string; curve: number }>) => {
+  const updateTextLayer = useCallback((attrs: Partial<{ content: string; font: string; size: number; weight: number; color: string; curve: number }>) => {
     if (!selectedLayer || !activeSvg) return;
     const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
     const el = doc.getElementById(selectedLayer);
@@ -506,9 +525,10 @@ export function SvgDropZone() {
       if (tp) tp.textContent = attrs.content;
       else textEl.textContent = attrs.content;
     }
-    if (attrs.font  !== undefined) textEl.setAttribute('font-family', attrs.font);
-    if (attrs.size  !== undefined) textEl.setAttribute('font-size', String(attrs.size));
-    if (attrs.color !== undefined) textEl.setAttribute('fill', attrs.color);
+    if (attrs.font   !== undefined) textEl.setAttribute('font-family', attrs.font);
+    if (attrs.size   !== undefined) textEl.setAttribute('font-size', String(attrs.size));
+    if (attrs.weight !== undefined) textEl.setAttribute('font-weight', String(attrs.weight));
+    if (attrs.color  !== undefined) textEl.setAttribute('fill', attrs.color);
     if (attrs.curve !== undefined && isGroup) {
       el.setAttribute('data-curve', String(attrs.curve));
       const arcEl = el.querySelector('path');
@@ -568,6 +588,7 @@ export function SvgDropZone() {
       const textEl = doc.createElementNS('http://www.w3.org/2000/svg', 'text');
       textEl.setAttribute('font-family', textForm.font);
       textEl.setAttribute('font-size', String(textForm.size));
+      textEl.setAttribute('font-weight', String(textForm.weight));
       textEl.setAttribute('fill', textForm.color);
       const textPathEl = doc.createElementNS('http://www.w3.org/2000/svg', 'textPath');
       textPathEl.setAttribute('href', `#${arcId}`);
@@ -586,6 +607,7 @@ export function SvgDropZone() {
       el.setAttribute('dominant-baseline', 'middle');
       el.setAttribute('font-family', textForm.font);
       el.setAttribute('font-size', String(textForm.size));
+      el.setAttribute('font-weight', String(textForm.weight));
       el.setAttribute('fill', textForm.color);
       el.textContent = textContent;
       svg.appendChild(el);
@@ -596,6 +618,50 @@ export function SvgDropZone() {
     setActiveSvg((prev) => (prev ? { ...prev, content, layers: [...prev.layers, newLayer] } : null));
     setSelectedLayer(id);
   }, [activeSvg, textForm]);
+
+  // ── Center layers to selected ─────────────────────────────────────────────
+
+  const centerLayersToSelected = useCallback(() => {
+    if (!activeSvg || !selectedLayer) return;
+    const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
+    if (!svgEl) return;
+    const screenCTM = svgEl.getScreenCTM();
+    if (!screenCTM) return;
+    const inv = screenCTM.inverse();
+
+    const toSvgPoint = (el: Element) => {
+      const r = el.getBoundingClientRect();
+      const pt = svgEl.createSVGPoint();
+      pt.x = r.left + r.width / 2;
+      pt.y = r.top + r.height / 2;
+      return pt.matrixTransform(inv);
+    };
+
+    const selectedLiveEl = svgEl.getElementById(selectedLayer);
+    if (!selectedLiveEl) return;
+    const target = toSvgPoint(selectedLiveEl);
+
+    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+    let changed = false;
+
+    activeSvg.layers.forEach(({ id }) => {
+      if (id === selectedLayer) return;
+      const liveEl = svgEl.getElementById(id);
+      if (!liveEl) return;
+      const center = toSvgPoint(liveEl);
+      const dx = target.x - center.x;
+      if (Math.abs(dx) < 0.5) return;
+      const docEl = doc.getElementById(id);
+      if (!docEl) return;
+      const existing = docEl.getAttribute('transform') ?? '';
+      docEl.setAttribute('transform', `translate(${dx.toFixed(2)},0) ${existing}`.trim());
+      changed = true;
+    });
+
+    if (!changed) return;
+    const content = new XMLSerializer().serializeToString(doc.documentElement);
+    setActiveSvg((prev) => (prev ? { ...prev, content } : null));
+  }, [activeSvg, selectedLayer]);
 
   // ── Strip text ────────────────────────────────────────────────────────────
 
@@ -611,7 +677,7 @@ export function SvgDropZone() {
 
   // ── AI layer actions ───────────────────────────────────────────────────────
 
-  const runAiLayerAction = useCallback(async () => {
+  const runAiLayerAction = useCallback(async (action: 'strip-text' | 'suggest-font' = 'strip-text') => {
     if (!activeSvg || !selectedLayer) return;
     const layerId = selectedLayer;
     setAiLoading(true);
@@ -636,6 +702,25 @@ export function SvgDropZone() {
         }
       }
 
+      // Render layer to PNG for vision actions
+      const svgRoot = doc.documentElement;
+      const viewBox = svgRoot.getAttribute('viewBox') ?? '0 0 800 600';
+      const vbParts = viewBox.trim().split(/[\s,]+/).map(Number);
+      const vw = vbParts[2] ?? 800;
+      const vh = vbParts[3] ?? 600;
+      const defsEl = doc.querySelector('defs');
+      const defsXml = defsEl ? new XMLSerializer().serializeToString(defsEl) : '';
+      const previewSvg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="${viewBox}">${defsXml}${svgString}</svg>`;
+      const scale = Math.min(1, 1024 / Math.max(vw, vh, 1));
+      const pngBase64 = await svgToBase64Png(previewSvg, Math.round(vw * scale), Math.round(vh * scale));
+
+      const prompt = action === 'suggest-font'
+        ? `Look at this SVG layer image. Does it contain any text (including text rendered as outlined paths)?
+If yes, suggest a single Google Font that best matches the style, mood, and visual character of the text. Return only JSON: {"font":"Font Name","reason":"brief reason"}.
+If no text is detected return: {"font":null,"reason":"No text detected"}.
+Return JSON only, no markdown.`
+        : `Here is an SVG layer. Return ONLY the SVG with all text and text-derived paths removed, keeping only the icon/graphic elements. SVG: ${svgString}`;
+
       const response = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: {
@@ -649,7 +734,12 @@ export function SvgDropZone() {
           max_tokens: 1000,
           messages: [{
             role: 'user',
-            content: `Here is an SVG. Return ONLY the SVG with all text and text-derived paths removed, keeping only the icon/graphic elements. SVG: ${svgString}`,
+            content: action === 'suggest-font'
+              ? [
+                  { type: 'image', source: { type: 'base64', media_type: 'image/png', data: pngBase64 } },
+                  { type: 'text', text: prompt },
+                ]
+              : prompt,
           }],
         }),
       });
@@ -660,8 +750,34 @@ export function SvgDropZone() {
       }
 
       const data = await response.json() as { content: Array<{ type: string; text: string }> };
-      let resultSvg = data.content?.[0]?.text ?? '';
+      const rawText = data.content?.[0]?.text ?? '';
 
+      if (action === 'suggest-font') {
+        try {
+          const parsed = JSON.parse(rawText) as { font: string | null; reason: string };
+          console.log('Font suggestion:', parsed);
+          if (parsed.font) {
+            setSuggestedFontName(parsed.font);
+            setExtraFonts((prev) => prev.includes(parsed.font!) ? prev : [...prev, parsed.font!]);
+            // Load from Google Fonts so it renders in the dropdown and text layers
+            const linkId = `gfont-${parsed.font.replace(/\s+/g, '-')}`;
+            if (!document.getElementById(linkId)) {
+              const link = document.createElement('link');
+              link.id = linkId;
+              link.rel = 'stylesheet';
+              link.href = `https://fonts.googleapis.com/css2?family=${parsed.font.replace(/\s+/g, '+')}:wght@400;700&display=swap`;
+              document.head.appendChild(link);
+            }
+          }
+          setFontSuggestion(parsed.font ? `${parsed.font} — ${parsed.reason}` : parsed.reason);
+        } catch {
+          console.log('Font suggestion raw:', rawText);
+          setFontSuggestion(rawText);
+        }
+        return;
+      }
+
+      let resultSvg = rawText;
       // Strip markdown code fences if Claude wrapped the response
       resultSvg = resultSvg.replace(/^```(?:xml|svg)?\s*/im, '').replace(/```\s*$/m, '').trim();
       aiCacheRef.current.set(cacheKey, resultSvg);
@@ -699,7 +815,18 @@ export function SvgDropZone() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(() => () => revokePrev(activeSvg), []);
 
-  useEffect(() => { setAiError(null); }, [selectedLayer]);
+  useEffect(() => { setAiError(null); setFontSuggestion(null); setSuggestedFontName(null); }, [selectedLayer]);
+
+  useEffect(() => {
+    if (!activeSvg) { setTaxonomy(null); return; }
+    setTaxonomy([
+      { type: 'background', elements: ['solid dark circular background'] },
+      { type: 'icon',       elements: ['central star or emblem motif', 'geometric ring border'] },
+      { type: 'decoration', elements: ['radiating line pattern', 'outer decorative ring'] },
+      { type: 'text',       elements: ['curved banner text', 'label underneath emblem'] },
+    ]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSvg?.src]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') clear(); };
@@ -781,24 +908,21 @@ export function SvgDropZone() {
         {showCanvas ? (
           <>
             {/* Toolbar */}
-            <div className="flex items-center justify-between px-4 h-11 border-b border-zinc-800 shrink-0">
-              <span className="text-zinc-400 text-sm font-mono truncate">
+            <div className="flex items-center gap-3 px-4 h-11 border-b border-zinc-800 shrink-0">
+              <span className="text-zinc-400 text-sm font-mono truncate min-w-0 flex-1">
                 {isLoading && !activeSvg ? 'Loading…' : activeSvg?.name}
               </span>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={stripTextFromSvg}
-                  disabled={!selectedLayer}
-                  title="Strip text elements from selected layer"
-                  className={cn(
-                    'text-xs px-2 py-1 rounded transition-colors font-mono',
-                    selectedLayer
-                      ? 'text-amber-500 hover:text-amber-300 hover:bg-amber-950/40'
-                      : 'text-zinc-500 cursor-not-allowed'
-                  )}
-                >
-                  strip text
-                </button>
+              <div className="flex items-center gap-2 shrink-0">
+                {selectedLayer && (
+                  <button
+                    onClick={centerLayersToSelected}
+                    title="Center all layers to the selected layer"
+                    className="text-xs px-2 py-1 rounded font-mono border border-zinc-600 transition-colors"
+                    style={{ backgroundColor: '#075985', color: '#fff' }}
+                  >
+                    center layers
+                  </button>
+                )}
                 <button
                   onClick={clear}
                   className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-200 transition-colors px-2 py-1 rounded hover:bg-zinc-800"
@@ -893,6 +1017,9 @@ export function SvgDropZone() {
                       {['Arial','Helvetica','Georgia','Times New Roman','Courier New','Verdana','Impact','Trebuchet MS'].map((f) => (
                         <option key={f} value={f} style={{ fontFamily: f }}>{f}</option>
                       ))}
+                      {extraFonts.map((f) => (
+                        <option key={f} value={f} style={{ fontFamily: f }}>{f} ✦</option>
+                      ))}
                     </select>
                     <div className="flex gap-1.5">
                       <input
@@ -908,6 +1035,22 @@ export function SvgDropZone() {
                         className="w-full rounded bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs px-2 py-1 outline-none focus:border-zinc-500"
                         title="Font size"
                       />
+                      <select
+                        value={selectedTextProps ? selectedTextProps.weight : textForm.weight}
+                        onChange={(e) =>
+                          selectedTextProps
+                            ? updateTextLayer({ weight: Number(e.target.value) })
+                            : setTextForm((f) => ({ ...f, weight: Number(e.target.value) }))
+                        }
+                        className="w-16 shrink-0 rounded bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs px-1 py-1 outline-none focus:border-zinc-500"
+                        title="Font weight"
+                      >
+                        {[100,200,300,400,500,600,700,800,900].map((w) => (
+                          <option key={w} value={w}>{w}</option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="flex gap-1.5 items-center">
                       <input
                         type="color"
                         value={selectedTextProps ? selectedTextProps.color : textForm.color}
@@ -916,9 +1059,29 @@ export function SvgDropZone() {
                             ? updateTextLayer({ color: e.target.value })
                             : setTextForm((f) => ({ ...f, color: e.target.value }))
                         }
-                        className="h-[26px] w-9 shrink-0 rounded border border-zinc-700 bg-zinc-800 cursor-pointer p-0.5"
+                        className="h-[26px] flex-1 rounded border border-zinc-700 bg-zinc-800 cursor-pointer p-0.5"
                         title="Text color"
                       />
+                      {'EyeDropper' in window && (
+                        <button
+                          title="Pick color from canvas"
+                          onClick={async () => {
+                            try {
+                              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+                              const dropper = new (window as any).EyeDropper();
+                              const result = await dropper.open() as { sRGBHex: string };
+                              selectedTextProps
+                                ? updateTextLayer({ color: result.sRGBHex })
+                                : setTextForm((f) => ({ ...f, color: result.sRGBHex }));
+                            } catch { /* cancelled */ }
+                          }}
+                          className="h-[26px] w-7 shrink-0 flex items-center justify-center rounded border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 transition-colors"
+                        >
+                          <svg xmlns="http://www.w3.org/2000/svg" className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 1 1 3.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
+                          </svg>
+                        </button>
+                      )}
                     </div>
                     {/* Curve slider — always in add mode; in edit mode only for curved layers */}
                     {(!selectedTextProps || selectedTextProps.curve !== null) && (
@@ -974,7 +1137,7 @@ export function SvgDropZone() {
                       )}
 
                       <button
-                        onClick={runAiLayerAction}
+                        onClick={() => runAiLayerAction('strip-text')}
                         disabled={aiLoading}
                         className={cn(
                           'w-full rounded text-xs font-medium py-1.5 transition-colors',
@@ -985,6 +1148,39 @@ export function SvgDropZone() {
                       >
                         {aiLoading ? 'AI processing…' : 'Strip text (AI)'}
                       </button>
+
+                      <button
+                        onClick={() => runAiLayerAction('suggest-font')}
+                        disabled={aiLoading}
+                        className={cn(
+                          'w-full rounded text-xs font-medium py-1.5 transition-colors',
+                          aiLoading
+                            ? 'bg-zinc-800/40 text-zinc-600 cursor-wait'
+                            : 'bg-zinc-700/60 hover:bg-zinc-600/60 text-zinc-300'
+                        )}
+                      >
+                        {aiLoading ? 'AI processing…' : 'Suggest font (AI)'}
+                      </button>
+
+                      {fontSuggestion && (
+                        <div className="flex flex-col gap-1">
+                          <p className="text-[10px] text-zinc-300 px-1 leading-snug">{fontSuggestion}</p>
+                          {suggestedFontName && (
+                            <button
+                              onClick={() => {
+                                if (selectedTextProps) {
+                                  updateTextLayer({ font: suggestedFontName });
+                                } else {
+                                  setTextForm((f) => ({ ...f, font: suggestedFontName! }));
+                                }
+                              }}
+                              className="w-full rounded text-xs font-medium py-1 text-zinc-300 bg-zinc-700/60 hover:bg-zinc-600/60 transition-colors"
+                            >
+                              Use "{suggestedFontName}"
+                            </button>
+                          )}
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -1102,6 +1298,43 @@ export function SvgDropZone() {
                       })
                     )}
                   </div>
+
+                  {/* Taxonomy */}
+                  {(taxonomyLoading || taxonomy) && (
+                    <div className="border-t border-zinc-800 shrink-0">
+                      <button
+                        onClick={() => setTaxonomyOpen((o) => !o)}
+                        className="w-full px-3 py-1.5 flex items-center gap-1.5 hover:bg-zinc-800/40 transition-colors"
+                      >
+                        <span className="text-[10px] font-semibold text-zinc-500 uppercase tracking-widest flex-1 text-left">Taxonomy</span>
+                        {taxonomyLoading
+                          ? <div className="size-2.5 rounded-full border border-zinc-600 border-t-zinc-400 animate-spin" />
+                          : <span className="text-zinc-600 text-[10px]">{taxonomyOpen ? '▲' : '▼'}</span>
+                        }
+                      </button>
+                      {taxonomyOpen && taxonomy && (
+                        <div className="px-2 pb-2 flex flex-col gap-0.5 max-h-44 overflow-y-auto">
+                          {taxonomy.map((group, i) => (
+                            <div key={`${group.type}-${i}`} className="rounded px-1.5 py-1">
+                              <span className={cn(
+                                'text-[9px] font-bold uppercase tracking-wider',
+                                TAXONOMY_COLOURS[group.type.toLowerCase()] ?? 'text-zinc-400'
+                              )}>
+                                {group.type}
+                              </span>
+                              <div className="flex flex-col gap-0.5 mt-0.5">
+                                {group.elements.map((desc, j) => (
+                                  <span key={j} className="text-[10px] text-zinc-400 leading-snug">
+                                    {desc}
+                                  </span>
+                                ))}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
 
                   {/* Reset + Export buttons */}
                   <div className="p-2 border-t border-zinc-800 shrink-0 flex flex-col gap-1.5">
