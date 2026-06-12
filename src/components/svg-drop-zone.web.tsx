@@ -213,6 +213,7 @@ export function SvgDropZone() {
   const [textForm, setTextForm] = useState({ content: 'Text', font: 'Arial', size: 48, weight: 400, color: '#000000', curve: 0 });
   const [aiLoading, setAiLoading]         = useState(false);
   const [aiError, setAiError]             = useState<string | null>(null);
+  const [aiStatusMsg, setAiStatusMsg]     = useState<string>('Thinking…');
   const [fontSuggestion, setFontSuggestion]   = useState<string | null>(null);
   const [suggestedFontName, setSuggestedFontName] = useState<string | null>(null);
   const [extraFonts, setExtraFonts]           = useState<string[]>([]);
@@ -795,113 +796,200 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
     const layerId = selectedLayer;
     setAiLoading(true);
     setAiError(null);
+    setAiStatusMsg('Thinking…');
     try {
       const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
       const layerEl = doc.getElementById(layerId);
       if (!layerEl) throw new Error('Layer not found');
       const svgString = new XMLSerializer().serializeToString(layerEl);
-      const cacheKey = `strip-text:${hashString(svgString)}`;
-      const cached = aiCacheRef.current.get(cacheKey);
-      if (cached) {
-        const wrapperSvgC = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">${cached}</svg>`;
-        const parsedC = new DOMParser().parseFromString(wrapperSvgC, 'image/svg+xml');
-        const newElC = parsedC.documentElement.firstElementChild;
-        if (newElC) {
-          const importedC = doc.importNode(newElC, true);
-          layerEl.parentNode?.replaceChild(importedC, layerEl);
-          const content = new XMLSerializer().serializeToString(doc.documentElement);
-          setActiveSvg((prev) => (prev ? { ...prev, content } : null));
-          return;
-        }
-      }
 
-      // Render layer to PNG for vision actions
+      // Render layer to PNG for vision
       const svgRoot = doc.documentElement;
       const viewBox = svgRoot.getAttribute('viewBox') ?? '0 0 800 600';
       const vbParts = viewBox.trim().split(/[\s,]+/).map(Number);
-      const vw = vbParts[2] ?? 800;
-      const vh = vbParts[3] ?? 600;
+      const vbX = vbParts[0] ?? 0;
+      const vbY = vbParts[1] ?? 0;
+      const vw  = vbParts[2] ?? 800;
+      const vh  = vbParts[3] ?? 600;
       const defsEl = doc.querySelector('defs');
       const defsXml = defsEl ? new XMLSerializer().serializeToString(defsEl) : '';
       const previewSvg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="${viewBox}">${defsXml}${svgString}</svg>`;
       const scale = Math.min(1, 1024 / Math.max(vw, vh, 1));
       const pngBase64 = await svgToBase64Png(previewSvg, Math.round(vw * scale), Math.round(vh * scale));
 
-      const prompt = action === 'suggest-font'
-        ? `Look at this SVG layer image. Does it contain any text (including text rendered as outlined paths)?
+      const apiHeaders = {
+        'Content-Type': 'application/json',
+        'x-api-key': process.env.EXPO_PUBLIC_CLAUDE_API_KEY ?? '',
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
+      };
+
+      // ── Suggest font ───────────────────────────────────────────────────────
+      if (action === 'suggest-font') {
+        const response = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: apiHeaders,
+          body: JSON.stringify({
+            model: 'claude-sonnet-4-6',
+            max_tokens: 1000,
+            messages: [{
+              role: 'user',
+              content: [
+                { type: 'image', source: { type: 'base64', media_type: 'image/png', data: pngBase64 } },
+                { type: 'text', text: `Look at this SVG layer image. Does it contain any text (including text rendered as outlined paths)?
 If yes, suggest a single Google Font that best matches the style, mood, and visual character of the text. Return only JSON: {"font":"Font Name","reason":"brief reason"}.
 If no text is detected return: {"font":null,"reason":"No text detected"}.
-Return JSON only, no markdown.`
-        : `Here is an SVG layer. Return ONLY the SVG with all text and text-derived paths removed, keeping only the icon/graphic elements. SVG: ${svgString}`;
-
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': process.env.EXPO_PUBLIC_CLAUDE_API_KEY ?? '',
-          'anthropic-version': '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-6',
-          max_tokens: 1000,
-          messages: [{
-            role: 'user',
-            content: action === 'suggest-font'
-              ? [
-                  { type: 'image', source: { type: 'base64', media_type: 'image/png', data: pngBase64 } },
-                  { type: 'text', text: prompt },
-                ]
-              : prompt,
-          }],
-        }),
-      });
-
-      if (!response.ok) {
-        const errData = await response.json().catch(() => ({})) as { error?: { message?: string } };
-        throw new Error(errData.error?.message ?? `API error ${response.status}`);
-      }
-
-      const data = await response.json() as { content: Array<{ type: string; text: string }> };
-      const rawText = data.content?.[0]?.text ?? '';
-
-      if (action === 'suggest-font') {
+Return JSON only, no markdown.` },
+              ],
+            }],
+          }),
+        });
+        if (!response.ok) {
+          const e = await response.json().catch(() => ({})) as { error?: { message?: string } };
+          throw new Error(e.error?.message ?? `API error ${response.status}`);
+        }
+        const data = await response.json() as { content: Array<{ type: string; text: string }> };
+        const rawText = data.content?.[0]?.text ?? '';
         try {
           const parsed = JSON.parse(rawText) as { font: string | null; reason: string };
-          console.log('Font suggestion:', parsed);
-          if (parsed.font) {
-            setSuggestedFontName(parsed.font);
-            addGoogleFont(parsed.font);
-          }
+          if (parsed.font) { setSuggestedFontName(parsed.font); addGoogleFont(parsed.font); }
           setFontSuggestion(parsed.font ? `${parsed.font} — ${parsed.reason}` : parsed.reason);
         } catch {
-          console.log('Font suggestion raw:', rawText);
           setFontSuggestion(rawText);
         }
         return;
       }
 
-      let resultSvg = rawText;
-      // Strip markdown code fences if Claude wrapped the response
-      resultSvg = resultSvg.replace(/^```(?:xml|svg)?\s*/im, '').replace(/```\s*$/m, '').trim();
-      aiCacheRef.current.set(cacheKey, resultSvg);
+      // ── Strip text (combined detect + strip + replace) ─────────────────────
+      type TextRow = {
+        yFraction: number; xFraction: number;
+        font: string; sizeFraction: number;
+        weight: number; color: string; content: string;
+      };
+      type StripResult = { hasText: boolean; rows: TextRow[]; strippedSvg: string };
 
-      const wrapperSvg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">${resultSvg}</svg>`;
-      const parsedWrapper = new DOMParser().parseFromString(wrapperSvg, 'image/svg+xml');
-      if (parsedWrapper.querySelector('parsererror')) throw new Error('AI returned invalid SVG');
-      const newEl = parsedWrapper.documentElement.firstElementChild;
-      if (!newEl) throw new Error('AI returned an empty response');
+      const cacheKey = `strip-text-v2:${hashString(svgString)}`;
+      let parsed: StripResult;
 
-      const imported = doc.importNode(newEl, true);
+      const cachedRaw = aiCacheRef.current.get(cacheKey);
+      if (cachedRaw) {
+        parsed = JSON.parse(cachedRaw) as StripResult;
+      } else {
+        setAiStatusMsg('Detecting text…');
+        const response = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: apiHeaders,
+          body: JSON.stringify({
+            model: 'claude-sonnet-4-6',
+            max_tokens: 8192,
+            messages: [{
+              role: 'user',
+              content: [
+                { type: 'image', source: { type: 'base64', media_type: 'image/png', data: pngBase64 } },
+                { type: 'text', text: `Analyze this SVG layer image and its source code.
+
+TASK 1 — Text detection: Examine the image carefully. Detect ALL text present, including text rendered as outlined or filled path shapes (not just SVG <text> elements). For each distinct line or row of text, estimate:
+- yFraction: vertical center as a fraction of image height (0.0 = top edge, 1.0 = bottom edge)
+- xFraction: horizontal center as a fraction of image width (0.0 = left, 1.0 = right)
+- font: name of the closest matching Google Font
+- sizeFraction: font cap-height as a fraction of image height (e.g. 0.08 if text height ≈ 8% of image)
+- weight: CSS font-weight integer (100, 200, 300, 400, 500, 600, 700, 800, or 900)
+- color: dominant text fill color as CSS hex (e.g. "#ffffff")
+- content: the exact text string if legible, else ""
+
+TASK 2 — SVG stripping: Return the SVG source code below with ALL text-related content removed: <text>, <tspan>, <flowRoot> elements AND any path or shape groups that visually render as outlined or filled text characters. Preserve every non-text graphic, decorative, and structural element unchanged.
+
+SVG source:
+${svgString}
+
+Respond with ONLY a valid JSON object — no markdown, no code fences, no explanation:
+{"hasText":true,"rows":[{"yFraction":0.5,"xFraction":0.5,"font":"Impact","sizeFraction":0.08,"weight":700,"color":"#ffffff","content":"HELLO"}],"strippedSvg":"<g id=\\"layer_1\\">...</g>"}` },
+              ],
+            }],
+          }),
+        });
+
+        if (!response.ok) {
+          const e = await response.json().catch(() => ({})) as { error?: { message?: string } };
+          throw new Error(e.error?.message ?? `API error ${response.status}`);
+        }
+
+        const data = await response.json() as { content: Array<{ type: string; text: string }> };
+        const rawText = (data.content?.[0]?.text ?? '')
+          .replace(/^```(?:json)?\s*/im, '').replace(/```\s*$/m, '').trim();
+
+        try {
+          parsed = JSON.parse(rawText) as StripResult;
+        } catch {
+          const svgMatch = rawText.match(/<(?:g|svg)[\s\S]*?<\/(?:g|svg)>/);
+          if (svgMatch) {
+            parsed = { hasText: false, rows: [], strippedSvg: svgMatch[0] };
+          } else {
+            throw new Error('AI returned an unreadable response');
+          }
+        }
+
+        aiCacheRef.current.set(cacheKey, JSON.stringify(parsed));
+      }
+
+      // Apply stripped SVG
+      setAiStatusMsg('Applying changes…');
+      const strippedStr = parsed.strippedSvg
+        .replace(/^```(?:xml|svg)?\s*/im, '').replace(/```\s*$/m, '').trim();
+      const wrapper = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">${strippedStr}</svg>`;
+      const wrapperDoc = new DOMParser().parseFromString(wrapper, 'image/svg+xml');
+      if (wrapperDoc.querySelector('parsererror')) throw new Error('AI returned invalid SVG');
+      const newLayerEl = wrapperDoc.documentElement.firstElementChild;
+      if (!newLayerEl) throw new Error('AI returned an empty SVG');
+
+      const imported = doc.importNode(newLayerEl, true);
       layerEl.parentNode?.replaceChild(imported, layerEl);
+
+      // For each detected text row, create a replacement text layer at the same visual position
+      const newTextLayers: SvgLayer[] = [];
+      if (parsed.hasText && parsed.rows.length > 0) {
+        parsed.rows.forEach((row, i) => {
+          const cx = vbX + row.xFraction * vw;
+          const cy = vbY + row.yFraction * vh;
+          const fontSize = Math.max(8, Math.round(row.sizeFraction * vh));
+          const label = row.content.trim() || 'Text';
+          const newId = `_text_${Date.now()}_${i}`;
+
+          const textEl = doc.createElementNS('http://www.w3.org/2000/svg', 'text');
+          textEl.id = newId;
+          textEl.setAttribute('x', String(cx));
+          textEl.setAttribute('y', String(cy));
+          textEl.setAttribute('text-anchor', 'middle');
+          textEl.setAttribute('dominant-baseline', 'middle');
+          textEl.setAttribute('font-family', row.font || 'Arial');
+          textEl.setAttribute('font-size', String(fontSize));
+          textEl.setAttribute('font-weight', String(row.weight || 400));
+          textEl.setAttribute('fill', row.color || '#000000');
+          textEl.textContent = label;
+          doc.documentElement.appendChild(textEl);
+          newTextLayers.push({ id: newId, label });
+          addGoogleFont(row.font);
+        });
+      }
+
       const content = new XMLSerializer().serializeToString(doc.documentElement);
-      setActiveSvg((prev) => (prev ? { ...prev, content } : null));
+      setActiveSvg((prev) => {
+        if (!prev) return null;
+        return {
+          ...prev,
+          content,
+          layers: newTextLayers.length > 0 ? [...prev.layers, ...newTextLayers] : prev.layers,
+        };
+      });
+      if (newTextLayers.length > 0) setSelectedLayer(newTextLayers[0].id);
+
     } catch (err) {
       setAiError(err instanceof Error ? err.message : 'AI action failed');
     } finally {
       setAiLoading(false);
+      setAiStatusMsg('Thinking…');
     }
-  }, [activeSvg, selectedLayer]);
+  }, [activeSvg, selectedLayer, addGoogleFont]);
 
   // ── Reset ──────────────────────────────────────────────────────────────────
 
@@ -1101,7 +1189,7 @@ Return JSON only, no markdown.`
                 {aiLoading && (
                   <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-zinc-950/60 backdrop-blur-[2px]">
                     <SparklesIcon className="size-10 text-indigo-400 animate-pulse" />
-                    <span className="mt-3 text-sm text-zinc-300 tracking-wide">Thinking…</span>
+                    <span className="mt-3 text-sm text-zinc-300 tracking-wide">{aiStatusMsg}</span>
                   </div>
                 )}
 
