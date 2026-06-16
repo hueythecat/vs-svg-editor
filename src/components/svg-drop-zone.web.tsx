@@ -292,6 +292,11 @@ export function SvgDropZone() {
   const [textFormOpen, setTextFormOpen]   = useState(true);
   const [aiActionsOpen, setAiActionsOpen] = useState(true);
   const [colorReplaceOpen, setColorReplaceOpen] = useState(true);
+  const [inlineEdit, setInlineEdit] = useState<{
+    layerId: string;
+    left: number; top: number; width: number; height: number;
+    fontSize: number; fontFamily: string; fontWeight: number; color: string;
+  } | null>(null);
   const dragMovedRef            = useRef(false);
   const aiCacheRef              = useRef<Map<string, string>>(new Map());
   // Panel drag — use refs so onPointerMove/Up handlers always see current values
@@ -455,6 +460,47 @@ export function SvgDropZone() {
       baseTransforms,
     });
   }, [selectedLayers, activeSvg]);
+
+  const handleCanvasDblClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (!activeSvg?.layers.length) return;
+    const canvasEl = svgCanvasRef.current;
+    const svgEl = canvasEl?.querySelector('svg') as SVGSVGElement | null;
+    if (!svgEl || !canvasEl) return;
+    const layerIds = new Set(activeSvg.layers.map((l) => l.id));
+    let target = e.target as Element | null;
+    while (target && target !== (svgEl as Element)) {
+      if (target.parentElement === (svgEl as Element) && layerIds.has(target.id)) {
+        const isTextLayer =
+          target.getAttribute('data-text-layer') === '1' ||
+          target.tagName.toLowerCase() === 'text' ||
+          !!target.querySelector('text');
+        if (!isTextLayer) return;
+        selectOne(target.id);
+        const textEl = (target.tagName.toLowerCase() === 'text'
+          ? target
+          : target.querySelector('text')) as SVGTextElement | null;
+        if (!textEl) return;
+        const textRect = textEl.getBoundingClientRect();
+        const canvasRect = canvasEl.getBoundingClientRect();
+        const ctm = svgEl.getScreenCTM();
+        const svgFontSize = parseFloat(textEl.getAttribute('font-size') ?? '16');
+        const fontSize = ctm ? svgFontSize * ctm.a : svgFontSize;
+        setInlineEdit({
+          layerId: target.id,
+          left:   textRect.left - canvasRect.left + canvasEl.scrollLeft,
+          top:    textRect.top  - canvasRect.top  + canvasEl.scrollTop,
+          width:  Math.max(textRect.width,  80),
+          height: Math.max(textRect.height, fontSize * 1.4),
+          fontSize,
+          fontFamily: textEl.getAttribute('font-family') ?? 'Arial',
+          fontWeight: parseFloat(textEl.getAttribute('font-weight') ?? '400'),
+          color: textEl.getAttribute('fill') ?? '#000000',
+        });
+        return;
+      }
+      target = target.parentElement;
+    }
+  }, [activeSvg, selectOne]);
 
   // Global mouse listeners while a canvas drag is active
   useEffect(() => {
@@ -901,8 +947,9 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
 
   // ── Color replace ─────────────────────────────────────────────────────────
 
-  const replaceColorInLayer = useCallback(() => {
+  const replaceColorInLayer = useCallback((overrideTo?: string) => {
     if (!activeSvg || !selectedLayer || !colorReplaceFrom) return;
+    const applyTo = overrideTo ?? colorReplaceTo;
     const normalFrom = normalizeColor(colorReplaceFrom);
     const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
     const layerEl = doc.getElementById(selectedLayer);
@@ -916,7 +963,7 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
       const result = css.replace(
         /(fill|stroke|color|stop-color|flood-color|lighting-color)\s*:\s*([^;{}]+)/gi,
         (_, prop: string, val: string) => {
-          if (normalizeColor(val.trim()) === normalFrom) { changed = true; return `${prop}: ${colorReplaceTo}`; }
+          if (normalizeColor(val.trim()) === normalFrom) { changed = true; return `${prop}: ${applyTo}`; }
           return `${prop}: ${val}`;
         },
       );
@@ -927,7 +974,7 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
     const processEl = (el: Element) => {
       COLOR_ATTRS.forEach((attr) => {
         const val = el.getAttribute(attr);
-        if (val && normalizeColor(val) === normalFrom) el.setAttribute(attr, colorReplaceTo);
+        if (val && normalizeColor(val) === normalFrom) el.setAttribute(attr, applyTo);
       });
       const style = el.getAttribute('style');
       if (style) {
@@ -939,31 +986,51 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
     processEl(layerEl);
     layerEl.querySelectorAll('*').forEach((el) => processEl(el));
 
-    // Also replace inside <style> blocks — these define CSS classes used by elements in the layer.
-    // SVG CSS is document-scoped so we search the whole document's style elements.
-    // We only replace class rules whose selectors are actually used within the selected layer.
+    // For CSS class rules in <style> blocks: the rules are document-scoped, so rewriting
+    // them would affect every layer sharing that class. Instead, add inline style overrides
+    // on the specific elements within this layer — inline styles win specificity, leaving
+    // all other layers untouched.
     const layerClassNames = new Set<string>();
     [layerEl, ...Array.from(layerEl.querySelectorAll('[class]'))].forEach((el) => {
       el.getAttribute('class')?.split(/\s+/).forEach((c) => c && layerClassNames.add(c));
     });
 
+    // Build map: className → set of CSS property names that carry the "from" color
+    const classProps = new Map<string, Set<string>>();
     doc.querySelectorAll('style').forEach((styleEl) => {
-      const css = styleEl.textContent;
-      if (!css) return;
-      // Only process rules whose selector matches a class used in the layer
-      const newCss = css.replace(
-        /([^{}]+)\{([^{}]*)\}/g,
-        (block, selector: string, declarations: string) => {
-          const selectorUsed = selector.split(',').some((s) =>
-            [...layerClassNames].some((cls) => s.includes(`.${cls}`))
-          );
-          if (!selectorUsed) return block;
-          const { result, changed } = replaceInCss(declarations);
-          return changed ? `${selector}{${result}}` : block;
-        },
-      );
-      if (newCss !== css) styleEl.textContent = newCss;
+      const css = styleEl.textContent ?? '';
+      for (const ruleMatch of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+        const selectors = ruleMatch[1].split(',');
+        const declarations = ruleMatch[2];
+        [...layerClassNames].forEach((cls) => {
+          if (!selectors.some((s) => s.includes(`.${cls}`))) return;
+          for (const dm of declarations.matchAll(/(fill|stroke|color|stop-color|flood-color|lighting-color)\s*:\s*([^;{}]+)/gi)) {
+            if (normalizeColor(dm[2].trim()) === normalFrom) {
+              if (!classProps.has(cls)) classProps.set(cls, new Set());
+              classProps.get(cls)!.add(dm[1].toLowerCase());
+            }
+          }
+        });
+      }
     });
+
+    if (classProps.size > 0) {
+      [layerEl, ...Array.from(layerEl.querySelectorAll('*'))].forEach((el) => {
+        const classes = (el.getAttribute('class') ?? '').split(/\s+/).filter(Boolean);
+        const propsToSet = new Set<string>();
+        classes.forEach((cls) => classProps.get(cls)?.forEach((p) => propsToSet.add(p)));
+        if (propsToSet.size === 0) return;
+        // Merge new values into existing inline style without duplicating properties
+        const styleMap = new Map<string, string>();
+        (el.getAttribute('style') ?? '').split(';').forEach((decl) => {
+          const idx = decl.indexOf(':');
+          if (idx === -1) return;
+          styleMap.set(decl.slice(0, idx).trim().toLowerCase(), decl.slice(idx + 1).trim());
+        });
+        propsToSet.forEach((prop) => styleMap.set(prop, applyTo));
+        el.setAttribute('style', [...styleMap.entries()].map(([p, v]) => `${p}: ${v}`).join('; '));
+      });
+    }
 
     const content = new XMLSerializer().serializeToString(doc.documentElement);
     setActiveSvg((prev) => (prev ? { ...prev, content } : null));
@@ -1288,36 +1355,54 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
         {showCanvas ? (
           <>
             {/* Toolbar */}
-            <div className="flex items-center gap-3 px-4 h-11 border-b border-zinc-800 shrink-0">
-              <span className="text-zinc-400 text-sm font-mono truncate min-w-0 flex-1">
-                {isLoading && !activeSvg ? 'Loading…' : activeSvg?.name}
-              </span>
-              <div className="flex items-center gap-2 shrink-0">
+            <div className="flex items-center gap-2 px-4 h-11 border-b border-zinc-800 shrink-0">
+              {/* Filename + dirty dot */}
+              <div className="flex items-center gap-1.5 min-w-0 flex-1">
+                <span className="text-zinc-400 text-sm font-mono truncate">
+                  {isLoading && !activeSvg ? 'Loading…' : activeSvg?.name}
+                </span>
+                {isDirty && (
+                  <span className="size-1.5 rounded-full bg-amber-400 shrink-0 inline-block" title="Unsaved changes" />
+                )}
+              </div>
+
+              <div className="flex items-center gap-1.5 shrink-0">
+                {/* Center layers — icon button */}
                 {selectedLayer && (
                   <button
                     onClick={centerLayersToSelected}
-                    title="Center all layers to the selected layer"
-                    className="text-xs px-2 py-1 rounded font-mono border border-zinc-600 transition-colors"
-                    style={{ backgroundColor: '#075985', color: '#fff' }}
+                    title="Center all layers to selected"
+                    className="h-7 w-7 flex items-center justify-center rounded border border-zinc-700 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
                   >
-                    center layers
+                    <svg xmlns="http://www.w3.org/2000/svg" className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+                      <circle cx="12" cy="12" r="3" />
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v2m0 14v2M3 12h2m14 0h2" />
+                    </svg>
                   </button>
                 )}
+
+                {/* Export */}
                 <button
-                  onClick={suggestFontsForImage}
-                  disabled={imageFontsLoading || imageFonts !== null}
-                  className="flex items-center gap-1.5 text-xs text-zinc-300 px-2 py-1 rounded border border-zinc-600 transition-colors hover:bg-zinc-800"
-                  style={imageFontsLoading ? { opacity: 0.5 } : undefined}
+                  onClick={exportSvg}
+                  className="h-7 flex items-center gap-1.5 px-2.5 rounded border border-zinc-700 text-zinc-300 hover:text-zinc-100 hover:bg-zinc-800 text-xs font-medium transition-colors"
                 >
-                  <SparklesIcon className="size-3" />
-                  {imageFontsLoading ? 'Thinking…' : 'Suggest fonts'}
+                  <svg xmlns="http://www.w3.org/2000/svg" className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
+                  </svg>
+                  {activeSvg && hiddenLayers.size > 0
+                    ? `Export (${activeSvg.layers.length - hiddenLayers.size}/${activeSvg.layers.length})`
+                    : 'Export'}
                 </button>
+
+                {/* Close */}
                 <button
                   onClick={clear}
-                  className="flex items-center gap-1.5 text-xs text-zinc-500 hover:text-zinc-200 transition-colors px-2 py-1 rounded hover:bg-zinc-800"
+                  title="Close file (ESC)"
+                  className="h-7 w-7 flex items-center justify-center rounded border border-zinc-700 text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
                 >
-                  Open new file
-                  <kbd className="text-zinc-700 text-[10px] font-mono">ESC</kbd>
+                  <svg xmlns="http://www.w3.org/2000/svg" className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
+                  </svg>
                 </button>
               </div>
             </div>
@@ -1340,10 +1425,9 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                 )}
                 {imageFonts && imageFonts.length > 0 && (
                   <div className="flex flex-wrap gap-2">
-                    {imageFonts.map(({ font, reason }) => (
+                    {imageFonts.map(({ font }) => (
                       <div key={font} className="flex items-center gap-1.5 rounded bg-zinc-800 px-2 py-1">
                         <span className="text-xs text-zinc-200" style={{ fontFamily: font }}>{font}</span>
-                        <span className="text-[10px] text-zinc-500 hidden sm:inline">— {reason}</span>
                         <button
                           onClick={() => addGoogleFont(font)}
                           title="Add to font list"
@@ -1366,6 +1450,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                 ref={svgCanvasRef}
                 onClick={handleCanvasClick}
                 onMouseDown={handleCanvasMouseDown}
+                onDoubleClick={handleCanvasDblClick}
                 className="relative flex-1 overflow-auto flex items-center justify-center min-w-0"
                 style={{
                   backgroundImage: 'radial-gradient(circle, #3f3f46 1px, transparent 1px)',
@@ -1400,6 +1485,43 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                     />
                   </>
                 ) : null}
+
+                {inlineEdit && selectedTextProps && (
+                  <input
+                    autoFocus
+                    type="text"
+                    value={selectedTextProps.content}
+                    onChange={(e) => updateTextLayer({ content: e.target.value })}
+                    onBlur={() => setInlineEdit(null)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Escape' || e.key === 'Enter') {
+                        setInlineEdit(null);
+                        e.preventDefault();
+                      }
+                    }}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => e.stopPropagation()}
+                    style={{
+                      position: 'absolute',
+                      left:      inlineEdit.left,
+                      top:       inlineEdit.top,
+                      minWidth:  inlineEdit.width,
+                      height:    inlineEdit.height,
+                      fontSize:  inlineEdit.fontSize,
+                      fontFamily: inlineEdit.fontFamily,
+                      fontWeight: inlineEdit.fontWeight,
+                      color:     inlineEdit.color,
+                      background: 'rgba(0,0,0,0.55)',
+                      border:    '1.5px solid #3b82f6',
+                      borderRadius: 3,
+                      outline:   'none',
+                      padding:   '0 6px',
+                      zIndex:    20,
+                      textAlign: 'center',
+                      lineHeight: 1,
+                    }}
+                  />
+                )}
               </div>
 
               {/* ── Layers panel ─────────────────────────────────────── */}
@@ -1576,72 +1698,85 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                   </div>}
                   </div>
 
-                  {/* AI Actions — visible only when a layer is selected */}
-                  {selectedLayer && (
-                    <div className="border-b border-zinc-800 shrink-0">
-                      <button
-                        onClick={() => setAiActionsOpen((o) => !o)}
-                        className="w-full px-3 py-1.5 flex items-center gap-1.5 hover:bg-zinc-800/40 transition-colors"
-                      >
-                        <SparklesIcon className="size-3 text-indigo-400" />
-                        <span className="text-[10px] font-semibold text-zinc-400 uppercase tracking-widest flex-1 text-left">
-                          AI Actions
-                        </span>
-                        <span className="text-zinc-600 text-[10px]">{aiActionsOpen ? '▲' : '▼'}</span>
-                      </button>
+                  {/* AI Actions — always visible */}
+                  <div className="border-b border-zinc-800 shrink-0">
+                    <button
+                      onClick={() => setAiActionsOpen((o) => !o)}
+                      className="w-full px-3 py-1.5 flex items-center gap-1.5 hover:bg-zinc-800/40 transition-colors"
+                    >
+                      <SparklesIcon className="size-3 text-indigo-400" />
+                      <span className="text-[10px] font-semibold text-zinc-400 uppercase tracking-widest flex-1 text-left">
+                        AI Actions
+                      </span>
+                      <span className="text-zinc-600 text-[10px]">{aiActionsOpen ? '▲' : '▼'}</span>
+                    </button>
                     {aiActionsOpen && <div className="px-2 pb-2 flex flex-col gap-1.5">
-                      {aiError && (
-                        <p className="text-[10px] text-red-400 px-1 break-all leading-tight">{aiError}</p>
-                      )}
-
+                      {/* Whole-image font suggestion — always available */}
                       <button
-                        onClick={() => runAiLayerAction('strip-text')}
-                        disabled={aiLoading}
+                        onClick={suggestFontsForImage}
+                        disabled={imageFontsLoading || imageFonts !== null}
                         className={cn(
-                          'w-full rounded text-xs font-medium py-1.5 transition-colors',
-                          aiLoading
-                            ? 'bg-zinc-800/40 text-zinc-600 cursor-wait'
-                            : 'bg-indigo-900/60 hover:bg-indigo-800/60 text-indigo-300'
-                        )}
-                      >
-                        {aiLoading ? 'AI processing…' : 'Strip text (AI)'}
-                      </button>
-
-                      <button
-                        onClick={() => runAiLayerAction('suggest-font')}
-                        disabled={aiLoading}
-                        className={cn(
-                          'w-full rounded text-xs font-medium py-1.5 transition-colors',
-                          aiLoading
-                            ? 'bg-zinc-800/40 text-zinc-600 cursor-wait'
+                          'w-full rounded text-xs font-medium py-1.5 transition-colors flex items-center justify-center gap-1.5',
+                          imageFontsLoading || imageFonts !== null
+                            ? 'bg-zinc-800/40 text-zinc-600 cursor-not-allowed'
                             : 'bg-zinc-700/60 hover:bg-zinc-600/60 text-zinc-300'
                         )}
                       >
-                        {aiLoading ? 'AI processing…' : 'Suggest font (AI)'}
+                        <SparklesIcon className="size-3" />
+                        {imageFontsLoading ? 'Thinking…' : 'Suggest fonts for SVG'}
                       </button>
 
-                      {fontSuggestion && (
-                        <div className="flex flex-col gap-1">
-                          <p className="text-[10px] text-zinc-300 px-1 leading-snug">{fontSuggestion}</p>
-                          {suggestedFontName && (
-                            <button
-                              onClick={() => {
-                                if (selectedTextProps) {
-                                  updateTextLayer({ font: suggestedFontName });
-                                } else {
-                                  setTextForm((f) => ({ ...f, font: suggestedFontName! }));
-                                }
-                              }}
-                              className="w-full rounded text-xs font-medium py-1 text-zinc-300 bg-zinc-700/60 hover:bg-zinc-600/60 transition-colors"
-                            >
-                              Use "{suggestedFontName}"
-                            </button>
+                      {/* Layer-specific actions */}
+                      {selectedLayer && <>
+                        {aiError && (
+                          <p className="text-[10px] text-red-400 px-1 break-all leading-tight">{aiError}</p>
+                        )}
+                        <button
+                          onClick={() => runAiLayerAction('strip-text')}
+                          disabled={aiLoading}
+                          className={cn(
+                            'w-full rounded text-xs font-medium py-1.5 transition-colors',
+                            aiLoading
+                              ? 'bg-zinc-800/40 text-zinc-600 cursor-wait'
+                              : 'bg-indigo-900/60 hover:bg-indigo-800/60 text-indigo-300'
                           )}
-                        </div>
-                      )}
+                        >
+                          {aiLoading ? 'AI processing…' : 'Strip text (AI)'}
+                        </button>
+                        <button
+                          onClick={() => runAiLayerAction('suggest-font')}
+                          disabled={aiLoading}
+                          className={cn(
+                            'w-full rounded text-xs font-medium py-1.5 transition-colors',
+                            aiLoading
+                              ? 'bg-zinc-800/40 text-zinc-600 cursor-wait'
+                              : 'bg-zinc-700/60 hover:bg-zinc-600/60 text-zinc-300'
+                          )}
+                        >
+                          {aiLoading ? 'AI processing…' : 'Suggest font for layer'}
+                        </button>
+                        {fontSuggestion && (
+                          <div className="flex flex-col gap-1">
+                            <p className="text-[10px] text-zinc-300 px-1 leading-snug">{fontSuggestion}</p>
+                            {suggestedFontName && (
+                              <button
+                                onClick={() => {
+                                  if (selectedTextProps) {
+                                    updateTextLayer({ font: suggestedFontName });
+                                  } else {
+                                    setTextForm((f) => ({ ...f, font: suggestedFontName! }));
+                                  }
+                                }}
+                                className="w-full rounded text-xs font-medium py-1 text-zinc-300 bg-zinc-700/60 hover:bg-zinc-600/60 transition-colors"
+                              >
+                                Use "{suggestedFontName}"
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </>}
                     </div>}
-                    </div>
-                  )}
+                  </div>
 
                   {/* Color Replace — visible for non-text layers only */}
                   {selectedLayer && !selectedTextProps && (
@@ -1684,48 +1819,69 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                         </div>
                       </div>
 
-                      {/* To row */}
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-[10px] text-zinc-500 w-7 shrink-0">To</span>
-                        <input
-                          type="color"
-                          value={colorReplaceTo}
-                          onChange={(e) => setColorReplaceTo(e.target.value)}
-                          className="h-[26px] flex-1 rounded border border-zinc-700 bg-zinc-800 cursor-pointer p-0.5"
-                          title="Replacement color"
-                        />
-                        {'EyeDropper' in window && (
-                          <button
-                            title="Sample 'to' color from canvas"
-                            onClick={async () => {
-                              try {
-                                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                                const dropper = new (window as any).EyeDropper();
-                                const result = await dropper.open() as { sRGBHex: string };
-                                setColorReplaceTo(result.sRGBHex);
-                              } catch { /* cancelled */ }
+                      {/* To — same swatch style; clicking immediately applies */}
+                      <div className="flex flex-col gap-1">
+                        <span className="text-[10px] text-zinc-500 px-1">
+                          To {!colorReplaceFrom && <span className="text-zinc-600">(pick From first)</span>}
+                        </span>
+                        <div className="flex flex-wrap gap-1.5 px-1 items-start">
+                          {layerColors.map((color) => (
+                            <button
+                              key={color}
+                              title={color}
+                              onClick={() => {
+                                setColorReplaceTo(color);
+                                replaceColorInLayer(color);
+                                setColorReplaceFrom('');
+                              }}
+                              disabled={!colorReplaceFrom}
+                              style={{
+                                backgroundColor: color,
+                                width: '2rem',
+                                height: '2rem',
+                                flexShrink: 0,
+                                borderRadius: '3px',
+                                border: '2px solid #52525b',
+                                cursor: colorReplaceFrom ? 'pointer' : 'not-allowed',
+                                opacity: colorReplaceFrom ? 1 : 0.4,
+                                transition: 'transform 0.1s, opacity 0.1s',
+                              }}
+                            />
+                          ))}
+                          {/* Custom colour picker swatch */}
+                          <label
+                            title="Custom colour"
+                            style={{
+                              position: 'relative',
+                              width: '2rem',
+                              height: '2rem',
+                              flexShrink: 0,
+                              borderRadius: '3px',
+                              border: '2px dashed #52525b',
+                              cursor: colorReplaceFrom ? 'pointer' : 'not-allowed',
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              backgroundColor: colorReplaceTo,
+                              opacity: colorReplaceFrom ? 1 : 0.4,
                             }}
-                            className="h-[26px] w-7 shrink-0 flex items-center justify-center rounded border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 transition-colors"
                           >
-                            <svg xmlns="http://www.w3.org/2000/svg" className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
-                              <path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 1 1 3.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-                            </svg>
-                          </button>
-                        )}
+                            <span style={{ fontSize: '14px', color: 'rgba(255,255,255,0.8)', fontWeight: 'bold', lineHeight: 1, pointerEvents: 'none' }}>+</span>
+                            <input
+                              type="color"
+                              value={colorReplaceTo}
+                              disabled={!colorReplaceFrom}
+                              onChange={(e) => {
+                                const c = e.target.value;
+                                setColorReplaceTo(c);
+                                replaceColorInLayer(c);
+                                setColorReplaceFrom('');
+                              }}
+                              style={{ position: 'absolute', opacity: 0, width: '100%', height: '100%', cursor: 'inherit' }}
+                            />
+                          </label>
+                        </div>
                       </div>
-
-                      <button
-                        onClick={replaceColorInLayer}
-                        disabled={!colorReplaceFrom}
-                        className={cn(
-                          'w-full rounded text-xs font-medium py-1.5 transition-colors',
-                          colorReplaceFrom
-                            ? 'bg-zinc-700 hover:bg-zinc-600 text-zinc-200'
-                            : 'bg-zinc-800/40 text-zinc-600 cursor-not-allowed'
-                        )}
-                      >
-                        Replace in layer
-                      </button>
                     </div>}
                     </div>
                   )}
@@ -1897,13 +2053,13 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                     </div>
                   )}
 
-                  {/* Reset + Export buttons */}
-                  <div className="p-2 border-t border-zinc-800 shrink-0 flex flex-col gap-1.5">
+                  {/* Revert */}
+                  <div className="px-2 py-2 border-t border-zinc-800 shrink-0">
                     <button
                       onClick={resetSvg}
                       disabled={!isDirty}
                       className={cn(
-                        'w-full flex items-center justify-center gap-1.5 rounded-md text-xs font-medium py-2 transition-colors',
+                        'w-full flex items-center justify-center gap-1.5 rounded-md text-xs font-medium py-1.5 transition-colors',
                         isDirty
                           ? 'bg-zinc-800/60 hover:bg-red-900/40 text-zinc-400 hover:text-red-300 cursor-pointer'
                           : 'bg-zinc-800/30 text-zinc-600 cursor-not-allowed'
@@ -1912,18 +2068,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                       <svg xmlns="http://www.w3.org/2000/svg" className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                         <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
                       </svg>
-                      Reset
-                    </button>
-                    <button
-                      onClick={exportSvg}
-                      className="w-full flex items-center justify-center gap-1.5 rounded-md bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-zinc-100 text-xs font-medium py-2 transition-colors"
-                    >
-                      <svg xmlns="http://www.w3.org/2000/svg" className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
-                      </svg>
-                      {hiddenLayers.size > 0
-                        ? `Export (${activeSvg.layers.length - hiddenLayers.size} layers)`
-                        : 'Export SVG'}
+                      Revert changes
                     </button>
                   </div>
                 </aside>
