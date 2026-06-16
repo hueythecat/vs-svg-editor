@@ -934,8 +934,17 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
       const data = await res.json() as { content?: Array<{ text?: string }> };
       const raw = data.content?.[0]?.text ?? '';
       const parsed = JSON.parse(raw) as { suggestions: Array<{ font: string; reason: string }> };
-      console.log('Image font suggestions:', parsed.suggestions);
-      setImageFonts(parsed.suggestions ?? []);
+      const suggestions = parsed.suggestions ?? [];
+      suggestions.forEach(({ font }) => {
+        const linkId = `gfont-${font.replace(/\s+/g, '-')}`;
+        if (!document.getElementById(linkId)) {
+          const link = document.createElement('link');
+          link.id = linkId; link.rel = 'stylesheet';
+          link.href = `https://fonts.googleapis.com/css2?family=${font.replace(/\s+/g, '+')}:wght@400;700&display=swap`;
+          document.head.appendChild(link);
+        }
+      });
+      setImageFonts(suggestions);
     } catch (err) {
       console.error('Font suggestion failed:', err);
       setImageFonts([]);
@@ -1711,70 +1720,49 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                       <span className="text-zinc-600 text-[10px]">{aiActionsOpen ? '▲' : '▼'}</span>
                     </button>
                     {aiActionsOpen && <div className="px-2 pb-2 flex flex-col gap-1.5">
-                      {/* Whole-image font suggestion — always available */}
-                      <button
-                        onClick={suggestFontsForImage}
-                        disabled={imageFontsLoading || imageFonts !== null}
-                        className={cn(
-                          'w-full rounded text-xs font-medium py-1.5 transition-colors flex items-center justify-center gap-1.5',
-                          imageFontsLoading || imageFonts !== null
-                            ? 'bg-zinc-800/40 text-zinc-600 cursor-not-allowed'
-                            : 'bg-zinc-700/60 hover:bg-zinc-600/60 text-zinc-300'
-                        )}
+                      <select
+                        value=""
+                        disabled={aiLoading || imageFontsLoading}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          if (v === 'suggest-fonts') suggestFontsForImage();
+                          else if (v === 'strip-text') runAiLayerAction('strip-text');
+                          else if (v === 'suggest-font') runAiLayerAction('suggest-font');
+                        }}
+                        className="w-full rounded bg-zinc-800 border border-zinc-700 text-zinc-300 text-xs px-2 py-1.5 outline-none focus:border-zinc-500 cursor-pointer disabled:opacity-50 disabled:cursor-wait"
                       >
-                        <SparklesIcon className="size-3" />
-                        {imageFontsLoading ? 'Thinking…' : 'Suggest fonts for SVG'}
-                      </button>
+                        <option value="" disabled hidden>
+                          {aiLoading || imageFontsLoading ? 'Processing…' : 'Choose an action…'}
+                        </option>
+                        <option value="suggest-fonts" disabled={imageFonts !== null}>
+                          Suggest fonts for SVG
+                        </option>
+                        {selectedLayer && <option value="strip-text">Strip text — layer (AI)</option>}
+                        {selectedLayer && <option value="suggest-font">Suggest font — layer (AI)</option>}
+                      </select>
 
-                      {/* Layer-specific actions */}
-                      {selectedLayer && <>
-                        {aiError && (
-                          <p className="text-[10px] text-red-400 px-1 break-all leading-tight">{aiError}</p>
-                        )}
-                        <button
-                          onClick={() => runAiLayerAction('strip-text')}
-                          disabled={aiLoading}
-                          className={cn(
-                            'w-full rounded text-xs font-medium py-1.5 transition-colors',
-                            aiLoading
-                              ? 'bg-zinc-800/40 text-zinc-600 cursor-wait'
-                              : 'bg-indigo-900/60 hover:bg-indigo-800/60 text-indigo-300'
+                      {aiError && (
+                        <p className="text-[10px] text-red-400 px-1 break-all leading-tight">{aiError}</p>
+                      )}
+                      {fontSuggestion && (
+                        <div className="flex flex-col gap-1">
+                          <p className="text-[10px] text-zinc-300 px-1 leading-snug">{fontSuggestion}</p>
+                          {suggestedFontName && (
+                            <button
+                              onClick={() => {
+                                if (selectedTextProps) {
+                                  updateTextLayer({ font: suggestedFontName });
+                                } else {
+                                  setTextForm((f) => ({ ...f, font: suggestedFontName! }));
+                                }
+                              }}
+                              className="w-full rounded text-xs font-medium py-1 text-zinc-300 bg-zinc-700/60 hover:bg-zinc-600/60 transition-colors"
+                            >
+                              Use "{suggestedFontName}"
+                            </button>
                           )}
-                        >
-                          {aiLoading ? 'AI processing…' : 'Strip text (AI)'}
-                        </button>
-                        <button
-                          onClick={() => runAiLayerAction('suggest-font')}
-                          disabled={aiLoading}
-                          className={cn(
-                            'w-full rounded text-xs font-medium py-1.5 transition-colors',
-                            aiLoading
-                              ? 'bg-zinc-800/40 text-zinc-600 cursor-wait'
-                              : 'bg-zinc-700/60 hover:bg-zinc-600/60 text-zinc-300'
-                          )}
-                        >
-                          {aiLoading ? 'AI processing…' : 'Suggest font for layer'}
-                        </button>
-                        {fontSuggestion && (
-                          <div className="flex flex-col gap-1">
-                            <p className="text-[10px] text-zinc-300 px-1 leading-snug">{fontSuggestion}</p>
-                            {suggestedFontName && (
-                              <button
-                                onClick={() => {
-                                  if (selectedTextProps) {
-                                    updateTextLayer({ font: suggestedFontName });
-                                  } else {
-                                    setTextForm((f) => ({ ...f, font: suggestedFontName! }));
-                                  }
-                                }}
-                                className="w-full rounded text-xs font-medium py-1 text-zinc-300 bg-zinc-700/60 hover:bg-zinc-600/60 transition-colors"
-                              >
-                                Use "{suggestedFontName}"
-                              </button>
-                            )}
-                          </div>
-                        )}
-                      </>}
+                        </div>
+                      )}
                     </div>}
                   </div>
 
