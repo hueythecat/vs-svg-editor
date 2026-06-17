@@ -21,10 +21,14 @@ interface ActiveSvg {
 // ─── Samples ─────────────────────────────────────────────────────────────────
 
 const SAMPLES = [
-  { label: 'Vector 33133625', name: 'vectorstock_33133625.svg',  src: '/samples/vectorstock_33133625.svg' },
-  { label: 'Vector 51876595', name: 'vectorstock_51876595.svg',  src: '/samples/vectorstock_51876595.svg' },
-  { label: 'Vector 956069',   name: 'vectorstock_956069.svg',    src: '/samples/vectorstock_956069.svg' },
-  { label: 'Element 15',      name: 'element_15.svg',           src: '/samples/element_15.svg' },
+  { label: 'Lighthouse',   name: 'vectorstock_956069.svg',    src: '/samples/vectorstock_956069.svg' },
+  { label: 'Sandwich',     name: 'vectorstock_51876595.svg',  src: '/samples/vectorstock_51876595.svg' },
+  { label: 'Logo',         name: 'vectorstock_20086499.svg',  src: '/samples/vectorstock_20086499.svg' },
+  { label: 'Emblem',       name: 'vectorstock_23333135.svg',  src: '/samples/vectorstock_23333135.svg' },
+  { label: 'Gradient Art', name: 'vectorstock_23517236.svg',  src: '/samples/vectorstock_23517236.svg' },
+  { label: 'Illustration', name: 'vectorstock_33133625.svg',  src: '/samples/vectorstock_33133625.svg' },
+  { label: 'Badge',        name: 'vectorstock_14306497.svg',  src: '/samples/vectorstock_14306497.svg' },
+  { label: 'Candle',       name: 'vectorstock_19973486.svg',  src: '/samples/vectorstock_19973486.svg' },
 ] as const;
 
 type SampleName = (typeof SAMPLES)[number]['name'];
@@ -96,6 +100,29 @@ function bboxInRootSpace(svgEl: SVGSVGElement, el: SVGGraphicsElement): DOMRect 
   } catch {
     return null;
   }
+}
+
+// Return the direct <text id="..."> child of layerEl that contains the click target,
+// or null if the click didn't land inside any identified text child.
+function findClickedSubText(layerEl: Element, clickTarget: EventTarget | null): Element | null {
+  if (!(clickTarget instanceof Element)) return null;
+  for (const child of Array.from(layerEl.children)) {
+    if (child.tagName.toLowerCase() === 'text' && child.id &&
+        (child === clickTarget || child.contains(clickTarget))) {
+      return child;
+    }
+  }
+  return null;
+}
+
+function applyTranslateDelta(existing: string, dx: number, dy: number): string {
+  const m = existing.match(/^translate\(\s*([-\d.]+)(?:[,\s]+([-\d.]+))?\s*\)/);
+  if (m) {
+    const x = parseFloat(m[1]) + dx;
+    const y = parseFloat(m[2] ?? '0') + dy;
+    return `translate(${x}, ${y})${existing.slice(m[0].length)}`;
+  }
+  return `translate(${dx}, ${dy}) ${existing}`.trim();
 }
 
 // Arc path for curved text: sweep=1→arch up, sweep=0→arch down
@@ -291,12 +318,16 @@ export function SvgDropZone() {
   const [taxonomyOpen, setTaxonomyOpen]   = useState(false);
   const [textFormOpen, setTextFormOpen]   = useState(true);
   const [aiActionsOpen, setAiActionsOpen] = useState(true);
+  const [removeTextQuery, setRemoveTextQuery] = useState('');
+  const [showRemoveTextInput, setShowRemoveTextInput] = useState(false);
+  const [textCheckResult, setTextCheckResult] = useState<{ heading: string; subheading: string } | null>(null);
   const [colorReplaceOpen, setColorReplaceOpen] = useState(true);
   const [inlineEdit, setInlineEdit] = useState<{
     layerId: string;
     left: number; top: number; width: number; height: number;
     fontSize: number; fontFamily: string; fontWeight: number; color: string;
   } | null>(null);
+  const [selectedSubElId, setSelectedSubElId] = useState<string | null>(null);
   const dragMovedRef            = useRef(false);
   const aiCacheRef              = useRef<Map<string, string>>(new Map());
   // Panel drag — use refs so onPointerMove/Up handlers always see current values
@@ -371,6 +402,7 @@ export function SvgDropZone() {
   const selectOne = useCallback((id: string | null) => {
     setSelectedLayer(id);
     setSelectedLayers(id ? new Set([id]) : new Set());
+    setSelectedSubElId(null);
   }, []);
 
   const clear = useCallback(() => {
@@ -379,6 +411,7 @@ export function SvgDropZone() {
     setHiddenLayers(new Set());
     setSelectedLayer(null);
     setSelectedLayers(new Set());
+    setSelectedSubElId(null);
   }, [revokePrev]);
 
   // ── Layer toggle ───────────────────────────────────────────────────────────
@@ -402,6 +435,7 @@ export function SvgDropZone() {
     while (el && el !== (svgEl as Element)) {
       if (el.parentElement === (svgEl as Element) && layerIds.has(el.id)) {
         const clickedId = el.id;
+        const subElId = findClickedSubText(el, e.target)?.id ?? null;
         if (e.shiftKey) {
           setSelectedLayers((prev) => {
             const next = new Set(prev);
@@ -409,10 +443,16 @@ export function SvgDropZone() {
             return next;
           });
           setSelectedLayer(clickedId);
+          setSelectedSubElId(null);
+        } else if (subElId) {
+          setSelectedLayer(clickedId);
+          setSelectedLayers(new Set([clickedId]));
+          setSelectedSubElId(subElId);
         } else {
           const next = selectedLayer === clickedId ? null : clickedId;
           setSelectedLayer(next);
           setSelectedLayers(next ? new Set([next]) : new Set());
+          setSelectedSubElId(null);
         }
         return;
       }
@@ -441,7 +481,6 @@ export function SvgDropZone() {
     }
     if (!hit) return;
 
-    e.preventDefault();
     const pt = svgEl.createSVGPoint();
     pt.x = e.clientX; pt.y = e.clientY;
     const svgPt = pt.matrixTransform(svgEl.getScreenCTM()!.inverse());
@@ -476,17 +515,26 @@ export function SvgDropZone() {
           !!target.querySelector('text');
         if (!isTextLayer) return;
         selectOne(target.id);
-        const textEl = (target.tagName.toLowerCase() === 'text'
-          ? target
-          : target.querySelector('text')) as SVGTextElement | null;
+        // For plain groups with multiple <text> children, find which one was clicked
+        let textEl: SVGTextElement | null = null;
+        let subElId: string | null = null;
+        if (target.tagName.toLowerCase() === 'text') {
+          textEl = target as SVGTextElement;
+        } else if (target.getAttribute('data-text-layer') === '1') {
+          textEl = target.querySelector('text') as SVGTextElement | null;
+        } else {
+          const found = findClickedSubText(target, e.target);
+          if (found) { textEl = found as SVGTextElement; subElId = found.id || null; }
+        }
         if (!textEl) return;
+        if (subElId) setSelectedSubElId(subElId);
         const textRect = textEl.getBoundingClientRect();
         const canvasRect = canvasEl.getBoundingClientRect();
         const ctm = svgEl.getScreenCTM();
         const svgFontSize = parseFloat(textEl.getAttribute('font-size') ?? '16');
         const fontSize = ctm ? svgFontSize * ctm.a : svgFontSize;
         setInlineEdit({
-          layerId: target.id,
+          layerId: subElId ?? target.id,
           left:   textRect.left - canvasRect.left + canvasEl.scrollLeft,
           top:    textRect.top  - canvasRect.top  + canvasEl.scrollTop,
           width:  Math.max(textRect.width,  80),
@@ -571,7 +619,8 @@ export function SvgDropZone() {
     const container = document.createElementNS(ns, 'g');
     container.id = '__svghl__';
     container.setAttribute('pointer-events', 'none');
-    [...selectedLayers].forEach((id) => {
+
+    const addRect = (id: string, color: string, dashArray: string) => {
       const targetEl = svgEl.querySelector(`#${CSS.escape(id)}`);
       if (!targetEl) return;
       const bbox = bboxInRootSpace(svgEl, targetEl as SVGGraphicsElement);
@@ -582,14 +631,18 @@ export function SvgDropZone() {
       rect.setAttribute('width',  String(bbox.width  + pad * 2));
       rect.setAttribute('height', String(bbox.height + pad * 2));
       rect.setAttribute('fill', 'none');
-      rect.setAttribute('stroke', '#3b82f6');
+      rect.setAttribute('stroke', color);
       rect.setAttribute('stroke-width', '2');
-      rect.setAttribute('stroke-dasharray', '6 4');
+      rect.setAttribute('stroke-dasharray', dashArray);
       rect.setAttribute('vector-effect', 'non-scaling-stroke');
       container.appendChild(rect);
-    });
+    };
+
+    [...selectedLayers].forEach((id) => addRect(id, '#3b82f6', '6 4'));
+    if (selectedSubElId) addRect(selectedSubElId, '#f59e0b', '4 3');
+
     if (container.children.length) svgEl.appendChild(container);
-  }, [selectedLayers, activeSvg?.content, canvasDrag]);
+  }, [selectedLayers, selectedSubElId, activeSvg?.content, canvasDrag]);
 
   // ── Layer reorder ──────────────────────────────────────────────────────────
 
@@ -702,9 +755,46 @@ export function SvgDropZone() {
     return extractLayerColors(layerEl, doc);
   }, [selectedLayer, activeSvg?.content]);
 
-  const selectedTextProps = useMemo(() => {
-    if (!selectedLayer || !activeSvg) return null;
+  // Map from layer id → sub-text children, for groups that contain multiple <text id="…"> elements
+  const subLayerMap = useMemo(() => {
+    const map = new Map<string, { id: string; label: string }[]>();
+    if (!activeSvg) return map;
     const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+    for (const layer of activeSvg.layers) {
+      const el = doc.getElementById(layer.id);
+      if (!el || el.tagName.toLowerCase() !== 'g') continue;
+      const texts = Array.from(el.children).filter(
+        (c) => c.tagName.toLowerCase() === 'text' && c.id
+      );
+      if (texts.length > 1) {
+        map.set(layer.id, texts.map((c) => ({
+          id: c.id,
+          label: c.textContent?.trim() || c.id,
+        })));
+      }
+    }
+    return map;
+  }, [activeSvg?.content]);
+
+  const selectedTextProps = useMemo(() => {
+    if (!activeSvg) return null;
+    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+
+    if (selectedSubElId) {
+      const textEl = doc.getElementById(selectedSubElId);
+      if (!textEl || textEl.tagName.toLowerCase() !== 'text') return null;
+      return {
+        content: textEl.textContent ?? '',
+        font:    textEl.getAttribute('font-family') ?? 'Arial',
+        size:    Number(textEl.getAttribute('font-size') ?? 48),
+        weight:  Number(textEl.getAttribute('font-weight') ?? 400),
+        color:   textEl.getAttribute('fill') ?? '#000000',
+        curve:   null as number | null,
+        letterSpacing: parseFloat((textEl.getAttribute('letter-spacing') ?? '0').replace('em', '')) || 0,
+      };
+    }
+
+    if (!selectedLayer) return null;
     const el = doc.getElementById(selectedLayer);
     if (!el) return null;
     const isGroup = el.getAttribute('data-text-layer') === '1';
@@ -722,11 +812,30 @@ export function SvgDropZone() {
       curve:         isGroup ? Number(el.getAttribute('data-curve') ?? 0) : null as number | null,
       letterSpacing: parseFloat((textEl.getAttribute('letter-spacing') ?? '0').replace('em', '')) || 0,
     };
-  }, [selectedLayer, activeSvg?.content]);
+  }, [selectedLayer, selectedSubElId, activeSvg?.content]);
 
   const updateTextLayer = useCallback((attrs: Partial<{ content: string; font: string; size: number; weight: number; color: string; curve: number; letterSpacing: number }>) => {
-    if (!selectedLayer || !activeSvg) return;
+    if (!activeSvg) return;
     const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+
+    if (selectedSubElId) {
+      const textEl = doc.getElementById(selectedSubElId);
+      if (!textEl) return;
+      if (attrs.content !== undefined) textEl.textContent = attrs.content;
+      if (attrs.font    !== undefined) textEl.setAttribute('font-family', attrs.font);
+      if (attrs.size    !== undefined) textEl.setAttribute('font-size', String(attrs.size));
+      if (attrs.weight  !== undefined) textEl.setAttribute('font-weight', String(attrs.weight));
+      if (attrs.color   !== undefined) textEl.setAttribute('fill', attrs.color);
+      if (attrs.letterSpacing !== undefined) {
+        if (attrs.letterSpacing === 0) textEl.removeAttribute('letter-spacing');
+        else textEl.setAttribute('letter-spacing', `${attrs.letterSpacing}em`);
+      }
+      const content = new XMLSerializer().serializeToString(doc.documentElement);
+      setActiveSvg((prev) => prev ? { ...prev, content } : null);
+      return;
+    }
+
+    if (!selectedLayer) return;
     const el = doc.getElementById(selectedLayer);
     if (!el) return;
     const isGroup = el.getAttribute('data-text-layer') === '1';
@@ -763,7 +872,7 @@ export function SvgDropZone() {
         : prev.layers;
       return { ...prev, content, layers };
     });
-  }, [selectedLayer, activeSvg]);
+  }, [selectedLayer, selectedSubElId, activeSvg]);
 
   // ── Add text layer ─────────────────────────────────────────────────────────
 
@@ -1047,7 +1156,7 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
 
   // ── AI layer actions ───────────────────────────────────────────────────────
 
-  const runAiLayerAction = useCallback(async (action: 'strip-text' | 'suggest-font' = 'strip-text') => {
+  const runAiLayerAction = useCallback(async (action: 'strip-text' | 'suggest-font' | 'remove-specific-text' | 'check-text' = 'strip-text', query = '') => {
     if (!activeSvg || !selectedLayer) return;
     const layerId = selectedLayer;
     setAiLoading(true);
@@ -1116,16 +1225,133 @@ Return JSON only, no markdown.` },
         return;
       }
 
-      // ── Strip text (combined detect + strip + replace) ─────────────────────
+      // ── Check text ─────────────────────────────────────────────────────────
+      if (action === 'check-text') {
+        setAiStatusMsg('Reading text…');
+        const response = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: apiHeaders,
+          body: JSON.stringify({
+            model: 'claude-sonnet-4-6',
+            max_tokens: 512,
+            messages: [{
+              role: 'user',
+              content: [
+                { type: 'image', source: { type: 'base64', media_type: 'image/png', data: pngBase64 } },
+                { type: 'text', text: `Look at this SVG layer image. Identify the main text content.
+Return ONLY a JSON object with these two fields:
+- "heading": the primary / largest text (the main title or headline). Empty string if none.
+- "subheading": secondary text beneath or supporting the heading (tagline, subtitle, date, etc.). Empty string if none.
+
+No markdown, no code fences, no explanation. Example:
+{"heading":"GRAND OPENING","subheading":"Saturday June 21st"}` },
+              ],
+            }],
+          }),
+        });
+        if (!response.ok) {
+          const e = await response.json().catch(() => ({})) as { error?: { message?: string } };
+          throw new Error(e.error?.message ?? `API error ${response.status}`);
+        }
+        const data = await response.json() as { content: Array<{ type: string; text: string }> };
+        const rawText = (data.content?.[0]?.text ?? '')
+          .replace(/^```(?:json)?\s*/im, '').replace(/```\s*$/m, '').trim();
+        try {
+          const parsed = JSON.parse(rawText) as { heading: string; subheading: string };
+          setTextCheckResult(parsed);
+        } catch {
+          setTextCheckResult({ heading: rawText, subheading: '' });
+        }
+        return;
+      }
+
+      // ── Remove specific text ────────────────────────────────────────────────
+      if (action === 'remove-specific-text') {
+        setAiStatusMsg('Finding text…');
+        const response = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: apiHeaders,
+          body: JSON.stringify({
+            model: 'claude-sonnet-4-6',
+            max_tokens: 8192,
+            messages: [{
+              role: 'user',
+              content: [
+                { type: 'image', source: { type: 'base64', media_type: 'image/png', data: pngBase64 } },
+                { type: 'text', text: `You are editing an SVG layer. Find and remove ONLY the text matching: "${query}"
+
+Look at the image and the SVG source. Remove only the elements that render that specific text — including <text>, <tspan>, <flowRoot> elements and any path/shape groups that visually form those characters. Leave all other content completely unchanged.
+
+SVG source:
+${svgString}
+
+Respond with ONLY a valid JSON object — no markdown, no code fences:
+{"strippedSvg":"<g id=\\"layer_1\\">...</g>"}` },
+              ],
+            }],
+          }),
+        });
+        if (!response.ok) {
+          const e = await response.json().catch(() => ({})) as { error?: { message?: string } };
+          throw new Error(e.error?.message ?? `API error ${response.status}`);
+        }
+        const data = await response.json() as { content: Array<{ type: string; text: string }> };
+        const rawText = (data.content?.[0]?.text ?? '')
+          .replace(/^```(?:json)?\s*/im, '').replace(/```\s*$/m, '').trim();
+        let strippedSvg: string;
+        try {
+          const parsedSpecific = JSON.parse(rawText) as { strippedSvg: string };
+          strippedSvg = parsedSpecific.strippedSvg;
+        } catch {
+          const svgMatch = rawText.match(/<(?:g|svg)[\s\S]*?<\/(?:g|svg)>/);
+          if (svgMatch) strippedSvg = svgMatch[0];
+          else throw new Error('AI returned an unreadable response');
+        }
+        setAiStatusMsg('Applying changes…');
+        const strippedStrS = strippedSvg.replace(/^```(?:xml|svg)?\s*/im, '').replace(/```\s*$/m, '').trim();
+        const wrapperS = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">${strippedStrS}</svg>`;
+        const wrapperDocS = new DOMParser().parseFromString(wrapperS, 'image/svg+xml');
+        if (wrapperDocS.querySelector('parsererror')) throw new Error('AI returned invalid SVG');
+        const newLayerElS = wrapperDocS.documentElement.firstElementChild;
+        if (!newLayerElS) throw new Error('AI returned an empty SVG');
+        const importedS = doc.importNode(newLayerElS, true);
+        layerEl.parentNode?.replaceChild(importedS, layerEl);
+        const contentS = new XMLSerializer().serializeToString(doc.documentElement);
+        setActiveSvg((prev) => prev ? { ...prev, content: contentS } : null);
+        setShowRemoveTextInput(false);
+        setRemoveTextQuery('');
+        return;
+      }
+
+      // ── Strip text (detect + index-based removal) ─────────────────────────
       type TextRow = {
         yFraction: number; xFraction: number;
         font: string; sizeFraction: number;
         weight: number; color: string; content: string;
         letterSpacing: number;
       };
-      type StripResult = { hasText: boolean; rows: TextRow[]; strippedSvg: string };
+      type StripResult = { hasText: boolean; rows: TextRow[]; removeIds: string[] };
 
-      const cacheKey = `strip-text-v2:${hashString(svgString)}`;
+      // Label every shape/group element with a temporary data-ai-idx so Claude
+      // can reference them by index instead of reconstructing the full SVG.
+      const SHAPE_TAGS = new Set(['path','g','circle','rect','ellipse','polygon','polyline','line','text','tspan','use']);
+      let aiIdx = 0;
+      const aiIdMap = new Map<string, Element>();
+      const markEls = (el: Element) => {
+        for (const child of Array.from(el.children)) {
+          const tag = child.tagName.toLowerCase().replace(/.*:/, '');
+          if (SHAPE_TAGS.has(tag)) {
+            const sid = String(aiIdx++);
+            child.setAttribute('data-ai-idx', sid);
+            aiIdMap.set(sid, child);
+          }
+          markEls(child);
+        }
+      };
+      markEls(layerEl);
+      const markedSvgString = new XMLSerializer().serializeToString(layerEl);
+
+      const cacheKey = `strip-text-v3:${hashString(svgString)}`;
       let parsed: StripResult;
 
       const cachedRaw = aiCacheRef.current.get(cacheKey);
@@ -1155,13 +1381,13 @@ TASK 1 — Text detection: Examine the image carefully. Detect ALL text present,
 - content: the exact text string if legible, else ""
 - letterSpacing: estimated CSS letter-spacing in em units (e.g. 0.0 for normal, 0.1 for slightly wide, 0.3 for very wide/spaced-out, negative values for condensed)
 
-TASK 2 — SVG stripping: Return the SVG source code below with ALL text-related content removed: <text>, <tspan>, <flowRoot> elements AND any path or shape groups that visually render as outlined or filled text characters. Preserve every non-text graphic, decorative, and structural element unchanged.
+TASK 2 — Text element identification: Every SVG element in the source has a data-ai-idx attribute. Identify which elements visually render as text — including <text>/<tspan> elements AND <path>/<g> elements whose shapes form letter or word outlines. IMPORTANT: if a <g> group contains child paths that together form a word, return the group's data-ai-idx (not the individual letter path indices). Return every text element's data-ai-idx in "removeIds".
 
 SVG source:
-${svgString}
+${markedSvgString}
 
 Respond with ONLY a valid JSON object — no markdown, no code fences, no explanation:
-{"hasText":true,"rows":[{"yFraction":0.5,"xFraction":0.5,"font":"Impact","sizeFraction":0.08,"weight":700,"color":"#ffffff","content":"HELLO","letterSpacing":0.05}],"strippedSvg":"<g id=\\"layer_1\\">...</g>"}` },
+{"hasText":true,"rows":[{"yFraction":0.5,"xFraction":0.5,"font":"Impact","sizeFraction":0.08,"weight":700,"color":"#ffffff","content":"HELLO","letterSpacing":0.05}],"removeIds":["3","9"]}` },
               ],
             }],
           }),
@@ -1178,56 +1404,89 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
 
         try {
           parsed = JSON.parse(rawText) as StripResult;
+          if (!Array.isArray(parsed.removeIds)) parsed.removeIds = [];
         } catch {
-          const svgMatch = rawText.match(/<(?:g|svg)[\s\S]*?<\/(?:g|svg)>/);
-          if (svgMatch) {
-            parsed = { hasText: false, rows: [], strippedSvg: svgMatch[0] };
-          } else {
-            throw new Error('AI returned an unreadable response');
-          }
+          throw new Error('AI returned an unreadable response');
         }
 
         aiCacheRef.current.set(cacheKey, JSON.stringify(parsed));
       }
 
-      // Apply stripped SVG
+      // Remove identified text elements directly from the DOM
       setAiStatusMsg('Applying changes…');
-      const strippedStr = parsed.strippedSvg
-        .replace(/^```(?:xml|svg)?\s*/im, '').replace(/```\s*$/m, '').trim();
-      const wrapper = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">${strippedStr}</svg>`;
-      const wrapperDoc = new DOMParser().parseFromString(wrapper, 'image/svg+xml');
-      if (wrapperDoc.querySelector('parsererror')) throw new Error('AI returned invalid SVG');
-      const newLayerEl = wrapperDoc.documentElement.firstElementChild;
-      if (!newLayerEl) throw new Error('AI returned an empty SVG');
+      for (const sid of parsed.removeIds) {
+        const el = aiIdMap.get(sid);
+        el?.parentNode?.removeChild(el);
+      }
+      // Clean up temporary index attributes from remaining elements
+      for (const [, el] of aiIdMap) {
+        el.removeAttribute('data-ai-idx');
+      }
 
-      const imported = doc.importNode(newLayerEl, true);
-      layerEl.parentNode?.replaceChild(imported, layerEl);
-
-      // For each detected text row, create a replacement text layer at the same visual position
+      // Group rows that share the same horizontal band (yFraction within 3%) into one layer
       const newTextLayers: SvgLayer[] = [];
       if (parsed.hasText && parsed.rows.length > 0) {
-        parsed.rows.forEach((row, i) => {
-          const cx = vbX + row.xFraction * vw;
-          const cy = vbY + row.yFraction * vh;
-          const fontSize = Math.max(8, Math.round(row.sizeFraction * vh));
-          const label = row.content.trim() || 'Text';
-          const newId = `_text_${Date.now()}_${i}`;
+        const Y_THRESHOLD = 0.03;
+        const groups: (typeof parsed.rows)[] = [];
+        const sorted = [...parsed.rows].sort((a, b) => a.yFraction - b.yFraction);
+        for (const row of sorted) {
+          const last = groups[groups.length - 1];
+          if (last && Math.abs(row.yFraction - last[0].yFraction) <= Y_THRESHOLD) {
+            last.push(row);
+          } else {
+            groups.push([row]);
+          }
+        }
 
-          const textEl = doc.createElementNS('http://www.w3.org/2000/svg', 'text');
-          textEl.id = newId;
-          textEl.setAttribute('x', String(cx));
-          textEl.setAttribute('y', String(cy));
-          textEl.setAttribute('text-anchor', 'middle');
-          textEl.setAttribute('dominant-baseline', 'middle');
-          textEl.setAttribute('font-family', row.font || 'Arial');
-          textEl.setAttribute('font-size', String(fontSize));
-          textEl.setAttribute('font-weight', String(row.weight || 400));
-          textEl.setAttribute('fill', row.color || '#000000');
-          if (row.letterSpacing) textEl.setAttribute('letter-spacing', `${row.letterSpacing}em`);
-          textEl.textContent = label;
-          doc.documentElement.appendChild(textEl);
+        groups.forEach((group, gi) => {
+          const newId = `_text_${Date.now()}_${gi}`;
+          const label = group.map((r) => r.content.trim()).filter(Boolean).join(' ') || 'Text';
+          group.forEach(({ font }) => addGoogleFont(font));
+
+          if (group.length === 1) {
+            const row = group[0];
+            const cx = vbX + row.xFraction * vw;
+            const cy = vbY + row.yFraction * vh;
+            const fontSize = Math.max(8, Math.round(row.sizeFraction * vh));
+            const textEl = doc.createElementNS('http://www.w3.org/2000/svg', 'text');
+            textEl.id = newId;
+            textEl.setAttribute('x', String(cx));
+            textEl.setAttribute('y', String(cy));
+            textEl.setAttribute('text-anchor', 'middle');
+            textEl.setAttribute('dominant-baseline', 'middle');
+            textEl.setAttribute('font-family', row.font || 'Arial');
+            textEl.setAttribute('font-size', String(fontSize));
+            textEl.setAttribute('font-weight', String(row.weight || 400));
+            textEl.setAttribute('fill', row.color || '#000000');
+            if (row.letterSpacing) textEl.setAttribute('letter-spacing', `${row.letterSpacing}em`);
+            textEl.textContent = label;
+            doc.documentElement.appendChild(textEl);
+          } else {
+            const g = doc.createElementNS('http://www.w3.org/2000/svg', 'g');
+            g.id = newId;
+            g.setAttribute('data-name', label);
+            group.forEach((row, si) => {
+              const cx = vbX + row.xFraction * vw;
+              const cy = vbY + row.yFraction * vh;
+              const fontSize = Math.max(8, Math.round(row.sizeFraction * vh));
+              const textEl = doc.createElementNS('http://www.w3.org/2000/svg', 'text');
+              textEl.id = `${newId}_${si}`;
+              textEl.setAttribute('x', String(cx));
+              textEl.setAttribute('y', String(cy));
+              textEl.setAttribute('text-anchor', 'middle');
+              textEl.setAttribute('dominant-baseline', 'middle');
+              textEl.setAttribute('font-family', row.font || 'Arial');
+              textEl.setAttribute('font-size', String(fontSize));
+              textEl.setAttribute('font-weight', String(row.weight || 400));
+              textEl.setAttribute('fill', row.color || '#000000');
+              if (row.letterSpacing) textEl.setAttribute('letter-spacing', `${row.letterSpacing}em`);
+              textEl.textContent = row.content.trim() || 'Text';
+              g.appendChild(textEl);
+            });
+            doc.documentElement.appendChild(g);
+          }
+
           newTextLayers.push({ id: newId, label });
-          addGoogleFont(row.font);
         });
       }
 
@@ -1268,7 +1527,8 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
 
   useEffect(() => {
     setAiError(null); setFontSuggestion(null); setSuggestedFontName(null);
-    setColorReplaceFrom('');
+    setColorReplaceFrom(''); setSelectedSubElId(null);
+    setShowRemoveTextInput(false); setRemoveTextQuery(''); setTextCheckResult(null);
   }, [selectedLayer]);
 
   useEffect(() => {
@@ -1289,6 +1549,31 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [clear]);
+
+  useEffect(() => {
+    if (!selectedLayers.size && !selectedSubElId) return;
+    const onArrow = (e: KeyboardEvent) => {
+      if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) return;
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      e.preventDefault();
+      const step = e.shiftKey ? 10 : 1;
+      const dx = e.key === 'ArrowRight' ? step : e.key === 'ArrowLeft' ? -step : 0;
+      const dy = e.key === 'ArrowDown'  ? step : e.key === 'ArrowUp'   ? -step : 0;
+      setActiveSvg((prev) => {
+        if (!prev) return null;
+        const doc = new DOMParser().parseFromString(prev.content, 'image/svg+xml');
+        const ids = selectedSubElId ? [selectedSubElId] : [...selectedLayers];
+        ids.forEach((id) => {
+          const el = doc.getElementById(id);
+          if (!el) return;
+          el.setAttribute('transform', applyTranslateDelta(el.getAttribute('transform') ?? '', dx, dy));
+        });
+        return { ...prev, content: new XMLSerializer().serializeToString(doc.documentElement) };
+      });
+    };
+    window.addEventListener('keydown', onArrow);
+    return () => window.removeEventListener('keydown', onArrow);
+  }, [selectedLayers, selectedSubElId]);
 
   // ── File drag handlers (drop zone) ─────────────────────────────────────────
 
@@ -1324,7 +1609,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     <div className="flex h-screen bg-zinc-950 overflow-hidden">
 
       {/* ── Left sidebar ─────────────────────────────────────────────── */}
-      <aside className="w-44 shrink-0 flex flex-col border-r border-zinc-800 bg-zinc-900/60">
+      <aside className="w-56 shrink-0 flex flex-col border-r border-zinc-800 bg-zinc-900/60">
         <div className="px-3 py-2.5 border-b border-zinc-800">
           <span className="text-[10px] font-semibold text-zinc-500 uppercase tracking-widest">
             Samples
@@ -1344,8 +1629,17 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                   isLoading && 'opacity-50 cursor-wait'
                 )}
               >
-                <div className="w-full aspect-square rounded-md overflow-hidden bg-zinc-950/60">
-                  <img src={sample.src} alt={sample.label} className="w-full h-full object-contain p-1.5" />
+                <div className="w-full aspect-square rounded-md overflow-hidden bg-zinc-950/60 relative">
+                  <div className="absolute inset-0 bg-zinc-800 animate-pulse rounded-md" />
+                  <img
+                    src={sample.src}
+                    alt={sample.label}
+                    className="relative w-full h-full object-contain p-1.5"
+                    onLoad={(e) => {
+                      const placeholder = (e.currentTarget.previousSibling as HTMLElement | null);
+                      if (placeholder) placeholder.style.display = 'none';
+                    }}
+                  />
                 </div>
                 <span className={cn(
                   'text-[11px] truncate w-full leading-tight transition-colors',
@@ -1728,6 +2022,8 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                           if (v === 'suggest-fonts') suggestFontsForImage();
                           else if (v === 'strip-text') runAiLayerAction('strip-text');
                           else if (v === 'suggest-font') runAiLayerAction('suggest-font');
+                          else if (v === 'remove-specific-text') { setShowRemoveTextInput(true); setRemoveTextQuery(''); }
+                          else if (v === 'check-text') { setTextCheckResult(null); runAiLayerAction('check-text'); }
                         }}
                         className="w-full rounded bg-zinc-800 border border-zinc-700 text-zinc-300 text-xs px-2 py-1.5 outline-none focus:border-zinc-500 cursor-pointer disabled:opacity-50 disabled:cursor-wait"
                       >
@@ -1739,7 +2035,50 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                         </option>
                         {selectedLayer && <option value="strip-text">Strip text — layer (AI)</option>}
                         {selectedLayer && <option value="suggest-font">Suggest font — layer (AI)</option>}
+                        {selectedLayer && <option value="remove-specific-text">Remove specific text — layer (AI)</option>}
+                        {selectedLayer && <option value="check-text">Check text — layer (AI)</option>}
                       </select>
+
+                      {showRemoveTextInput && selectedLayer && (
+                        <div className="flex gap-1">
+                          <input
+                            type="text"
+                            placeholder="Text to remove…"
+                            value={removeTextQuery}
+                            onChange={(e) => setRemoveTextQuery(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter' && removeTextQuery.trim() && !aiLoading)
+                                runAiLayerAction('remove-specific-text', removeTextQuery.trim());
+                            }}
+                            disabled={aiLoading}
+                            autoFocus
+                            className="flex-1 min-w-0 rounded bg-zinc-800 border border-zinc-700 text-zinc-300 text-xs px-2 py-1 outline-none focus:border-zinc-500 disabled:opacity-50"
+                          />
+                          <button
+                            onClick={() => {
+                              if (removeTextQuery.trim() && !aiLoading)
+                                runAiLayerAction('remove-specific-text', removeTextQuery.trim());
+                            }}
+                            disabled={!removeTextQuery.trim() || aiLoading}
+                            className="shrink-0 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs px-2 py-1 transition-colors"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      )}
+
+                      {textCheckResult && (
+                        <div className="rounded bg-zinc-800/60 border border-zinc-700 px-2 py-1.5 flex flex-col gap-0.5">
+                          {textCheckResult.heading ? (
+                            <p className="text-[11px] font-semibold text-zinc-200 leading-snug">{textCheckResult.heading}</p>
+                          ) : (
+                            <p className="text-[10px] text-zinc-500 italic leading-snug">No heading detected</p>
+                          )}
+                          {textCheckResult.subheading ? (
+                            <p className="text-[10px] text-zinc-400 leading-snug">{textCheckResult.subheading}</p>
+                          ) : null}
+                        </div>
+                      )}
 
                       {aiError && (
                         <p className="text-[10px] text-red-400 px-1 break-all leading-tight">{aiError}</p>
@@ -1928,8 +2267,8 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                         const dropBefore = dropPosition?.targetId === layer.id && dropPosition.before;
                         const dropAfter  = dropPosition?.targetId === layer.id && !dropPosition.before;
                         return (
+                          <React.Fragment key={layer.id}>
                           <div
-                            key={layer.id}
                             data-layer-id={layer.id}
                             onPointerDown={(e) => {
                               if (e.button !== 0) return;
@@ -1999,6 +2338,36 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                               </span>
                             )}
                           </div>
+                          {/* Sub-layer rows for multi-text groups */}
+                          {subLayerMap.get(layer.id)?.map((sub) => {
+                            const isSubSelected = selectedSubElId === sub.id;
+                            return (
+                              <button
+                                key={sub.id}
+                                onPointerDown={(e) => e.stopPropagation()}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  selectOne(layer.id);
+                                  setSelectedSubElId(sub.id);
+                                }}
+                                className={cn(
+                                  'w-full flex items-center gap-1.5 pl-8 pr-2 py-1 rounded-md text-left transition-colors',
+                                  isSubSelected
+                                    ? 'bg-amber-500/15 ring-1 ring-inset ring-amber-500/40'
+                                    : 'hover:bg-zinc-800/60'
+                                )}
+                              >
+                                <span className="shrink-0 size-1.5 rounded-full bg-zinc-600" />
+                                <span className={cn(
+                                  'text-[11px] truncate leading-snug flex-1 min-w-0',
+                                  isSubSelected ? 'text-amber-300' : 'text-zinc-500'
+                                )}>
+                                  {sub.label}
+                                </span>
+                              </button>
+                            );
+                          })}
+                          </React.Fragment>
                         );
                       })
                     )}
