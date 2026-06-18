@@ -150,6 +150,39 @@ function normalizeColor(color: string): string {
 
 const COLOR_PAINT_ATTRS = ['fill', 'stroke', 'stop-color', 'flood-color', 'lighting-color'];
 
+// Returns the gradient element that actually owns <stop> children, following xlink:href / href chains.
+function resolveGradient(id: string, doc: Document): Element | null {
+  const el = doc.getElementById(id);
+  if (!el) return null;
+  const href = el.getAttribute('xlink:href') ?? el.getAttribute('href') ?? '';
+  if (href.startsWith('#')) return doc.getElementById(href.slice(1)) ?? el;
+  return el;
+}
+
+// Collects IDs of all gradients (linearGradient / radialGradient) referenced by a layer via
+// direct fill/stroke attrs, inline styles, and CSS class rules.
+function collectLayerGradientIds(layerEl: Element, layerClasses: Set<string>, doc: Document): Set<string> {
+  const ids = new Set<string>();
+  const addRef = (val: string) => {
+    const m = val.trim().match(/^url\(#(.+)\)$/);
+    if (m) ids.add(m[1]);
+  };
+  [layerEl, ...Array.from(layerEl.querySelectorAll('*'))].forEach((el) => {
+    ['fill', 'stroke'].forEach((a) => { const v = el.getAttribute(a); if (v) addRef(v); });
+    const style = el.getAttribute('style') ?? '';
+    for (const m of style.matchAll(/(fill|stroke)\s*:\s*(url\(#[^)]+\))/gi)) addRef(m[2]);
+  });
+  doc.querySelectorAll('style').forEach((styleEl) => {
+    const css = styleEl.textContent ?? '';
+    for (const rm of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      const used = rm[1].split(',').some((s) => [...layerClasses].some((cls) => s.includes(`.${cls}`)));
+      if (!used) continue;
+      for (const dm of rm[2].matchAll(/(fill|stroke)\s*:\s*(url\(#[^)]+\))/gi)) addRef(dm[2]);
+    }
+  });
+  return ids;
+}
+
 function extractLayerColors(layerEl: Element, doc: Document): string[] {
   const seen = new Set<string>();
 
@@ -191,6 +224,15 @@ function extractLayerColors(layerEl: Element, doc: Document): string[] {
         addColor(dm[2].trim());
       }
     }
+  });
+
+  // Extract stop colors from any gradients referenced by the layer
+  collectLayerGradientIds(layerEl, layerClasses, doc).forEach((id) => {
+    const source = resolveGradient(id, doc);
+    source?.querySelectorAll('stop').forEach((stop) => {
+      const sc = stop.getAttribute('stop-color');
+      if (sc) addColor(sc);
+    });
   });
 
   return [...seen];
@@ -330,6 +372,9 @@ export function SvgDropZone() {
   const [selectedSubElId, setSelectedSubElId] = useState<string | null>(null);
   const dragMovedRef            = useRef(false);
   const aiCacheRef              = useRef<Map<string, string>>(new Map());
+  const colorBaselineRef        = useRef<string | null>(null);
+  const undoStackRef             = useRef<Array<{ content: string; layers: SvgLayer[] }>>([]);
+  const [undoCount, setUndoCount] = useState(0);
   // Panel drag — use refs so onPointerMove/Up handlers always see current values
   const panelDragIdRef          = useRef<string | null>(null);
   const panelDropPositionRef    = useRef<{ targetId: string; before: boolean } | null>(null);
@@ -344,6 +389,18 @@ export function SvgDropZone() {
     if (svg?.objectUrl) URL.revokeObjectURL(svg.objectUrl);
   }, []);
 
+  const snapshotForUndo = useCallback((content: string, layers: SvgLayer[]) => {
+    undoStackRef.current = [...undoStackRef.current.slice(-9), { content, layers }];
+    setUndoCount(undoStackRef.current.length);
+  }, []);
+
+  const undo = useCallback(() => {
+    const prev = undoStackRef.current.pop();
+    setUndoCount(undoStackRef.current.length);
+    if (!prev) return;
+    setActiveSvg((p) => p ? { ...p, content: prev.content, layers: prev.layers } : null);
+  }, []);
+
   const applyParsed = useCallback(
     (raw: string, name: string, src: string, objectUrl?: string) => {
       const cleaned = stripScripts(raw);
@@ -353,6 +410,8 @@ export function SvgDropZone() {
       setSelectedLayer(null);
       setSelectedLayers(new Set());
       setIsLoading(false);
+      undoStackRef.current = [];
+      setUndoCount(0);
       // Default font size = ~8% of the smallest viewBox dimension
       const svgEl = new DOMParser().parseFromString(content, 'image/svg+xml').documentElement;
       const vb = svgEl.getAttribute('viewBox')?.trim().split(/[\s,]+/).map(Number);
@@ -492,13 +551,14 @@ export function SvgDropZone() {
       if (layerEl) baseTransforms[id] = layerEl.getAttribute('transform') ?? '';
     });
 
+    snapshotForUndo(activeSvg!.content, activeSvg!.layers);
     setCanvasDrag({
       layerIds: [...selectedLayers],
       startClientX: e.clientX, startClientY: e.clientY,
       startSvgX: svgPt.x,      startSvgY: svgPt.y,
       baseTransforms,
     });
-  }, [selectedLayers, activeSvg]);
+  }, [selectedLayers, activeSvg, snapshotForUndo]);
 
   const handleCanvasDblClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (!activeSvg?.layers.length) return;
@@ -648,6 +708,7 @@ export function SvgDropZone() {
 
   const reorderLayers = useCallback((fromId: string, toId: string, panelBefore: boolean) => {
     if (!activeSvg || fromId === toId) return;
+    snapshotForUndo(activeSvg.content, activeSvg.layers);
 
     // Work in panel order (reversed document order: panel[0] = topmost layer)
     const panelLayers = [...activeSvg.layers].reverse();
@@ -677,7 +738,7 @@ export function SvgDropZone() {
 
     const content = new XMLSerializer().serializeToString(svg);
     setActiveSvg((prev) => (prev ? { ...prev, content, layers: newDocLayers } : null));
-  }, [activeSvg]);
+  }, [activeSvg, snapshotForUndo]);
 
   // ── Export ─────────────────────────────────────────────────────────────────
 
@@ -878,6 +939,7 @@ export function SvgDropZone() {
 
   const addTextLayer = useCallback(() => {
     if (!activeSvg || !textForm.content.trim()) return;
+    snapshotForUndo(activeSvg.content, activeSvg.layers);
     const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
     const svg = doc.documentElement;
 
@@ -944,7 +1006,7 @@ export function SvgDropZone() {
     const newLayer = { id, label: textContent };
     setActiveSvg((prev) => (prev ? { ...prev, content, layers: [...prev.layers, newLayer] } : null));
     setSelectedLayer(id);
-  }, [activeSvg, textForm]);
+  }, [activeSvg, textForm, snapshotForUndo]);
 
   // ── Center layers to selected ─────────────────────────────────────────────
 
@@ -1063,13 +1125,66 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
   }, [activeSvg]);
 
 
+  // ── Taxonomy analysis ─────────────────────────────────────────────────────
+
+  const runTaxonomyAnalysis = useCallback(async () => {
+    if (!activeSvg) return;
+    setTaxonomyLoading(true);
+    setTaxonomy(null);
+    setTaxonomyOpen(true);
+    try {
+      const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+      const root = doc.documentElement;
+      const vb = (root.getAttribute('viewBox') ?? '0 0 800 600').trim().split(/[\s,]+/).map(Number);
+      const vw = vb[2] ?? 800;
+      const vh = vb[3] ?? 600;
+      const scale = Math.min(1, 1024 / Math.max(vw, vh, 1));
+      const pngBase64 = await svgToBase64Png(activeSvg.content, Math.round(vw * scale), Math.round(vh * scale));
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': process.env.EXPO_PUBLIC_CLAUDE_API_KEY ?? '',
+          'anthropic-version': '2023-06-01',
+          'anthropic-dangerous-direct-browser-access': 'true',
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-6',
+          max_tokens: 512,
+          messages: [{
+            role: 'user',
+            content: [
+              { type: 'image', source: { type: 'base64', media_type: 'image/png', data: pngBase64 } },
+              { type: 'text', text: `Analyze this SVG design and classify its visual elements into taxonomy groups.
+
+Use ONLY these type values: background, text, icon, graphic, decoration, shape, image.
+
+Return ONLY valid JSON — no markdown, no explanation:
+{"groups":[{"type":"background","elements":["solid dark fill"]},{"type":"text","elements":["curved top banner"]}]}` },
+            ],
+          }],
+        }),
+      });
+      if (!res.ok) throw new Error(`API ${res.status}`);
+      const data = await res.json() as { content?: Array<{ text?: string }> };
+      const raw = (data.content?.[0]?.text ?? '').replace(/^```(?:json)?\s*/im, '').replace(/```\s*$/m, '').trim();
+      const parsed = JSON.parse(raw) as { groups: TaxonomyGroup[] };
+      setTaxonomy(parsed.groups ?? []);
+    } catch (err) {
+      console.error('Taxonomy analysis failed:', err);
+      setTaxonomy([]);
+    } finally {
+      setTaxonomyLoading(false);
+    }
+  }, [activeSvg]);
+
   // ── Color replace ─────────────────────────────────────────────────────────
 
   const replaceColorInLayer = useCallback((overrideTo?: string) => {
     if (!activeSvg || !selectedLayer || !colorReplaceFrom) return;
     const applyTo = overrideTo ?? colorReplaceTo;
     const normalFrom = normalizeColor(colorReplaceFrom);
-    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+    const doc = new DOMParser().parseFromString(colorBaselineRef.current ?? activeSvg.content, 'image/svg+xml');
     const layerEl = doc.getElementById(selectedLayer);
     if (!layerEl) return;
 
@@ -1150,6 +1265,15 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
       });
     }
 
+    // Replace stop colors in gradients referenced by this layer
+    collectLayerGradientIds(layerEl, layerClassNames, doc).forEach((id) => {
+      const source = resolveGradient(id, doc);
+      source?.querySelectorAll('stop').forEach((stop) => {
+        const sc = stop.getAttribute('stop-color');
+        if (sc && normalizeColor(sc) === normalFrom) stop.setAttribute('stop-color', applyTo);
+      });
+    });
+
     const content = new XMLSerializer().serializeToString(doc.documentElement);
     setActiveSvg((prev) => (prev ? { ...prev, content } : null));
   }, [activeSvg, selectedLayer, colorReplaceFrom, colorReplaceTo]);
@@ -1162,6 +1286,12 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
     setAiLoading(true);
     setAiError(null);
     setAiStatusMsg('Thinking…');
+    setTextCheckResult(null);
+    setFontSuggestion(null);
+    setSuggestedFontName(null);
+    if (action === 'strip-text' || action === 'remove-specific-text') {
+      snapshotForUndo(activeSvg.content, activeSvg.layers);
+    }
     try {
       const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
       const layerEl = doc.getElementById(layerId);
@@ -1267,26 +1397,44 @@ No markdown, no code fences, no explanation. Example:
 
       // ── Remove specific text ────────────────────────────────────────────────
       if (action === 'remove-specific-text') {
+        // Annotate elements with temporary IDs so Claude can reference by index
+        const RST_SHAPE_TAGS = new Set(['path','g','circle','rect','ellipse','polygon','polyline','line','text','tspan','use']);
+        let rstIdx = 0;
+        const rstIdMap = new Map<string, Element>();
+        const rstMarkEls = (el: Element) => {
+          for (const child of Array.from(el.children)) {
+            const tag = child.tagName.toLowerCase().replace(/.*:/, '');
+            if (RST_SHAPE_TAGS.has(tag)) {
+              const sid = String(rstIdx++);
+              child.setAttribute('data-ai-idx', sid);
+              rstIdMap.set(sid, child);
+            }
+            rstMarkEls(child);
+          }
+        };
+        rstMarkEls(layerEl);
+        const rstMarkedSvg = new XMLSerializer().serializeToString(layerEl);
+
         setAiStatusMsg('Finding text…');
         const response = await fetch('https://api.anthropic.com/v1/messages', {
           method: 'POST',
           headers: apiHeaders,
           body: JSON.stringify({
             model: 'claude-sonnet-4-6',
-            max_tokens: 8192,
+            max_tokens: 1024,
             messages: [{
               role: 'user',
               content: [
                 { type: 'image', source: { type: 'base64', media_type: 'image/png', data: pngBase64 } },
                 { type: 'text', text: `You are editing an SVG layer. Find and remove ONLY the text matching: "${query}"
 
-Look at the image and the SVG source. Remove only the elements that render that specific text — including <text>, <tspan>, <flowRoot> elements and any path/shape groups that visually form those characters. Leave all other content completely unchanged.
+Every SVG element has a data-ai-idx attribute. Identify which elements render that specific text — including <text>/<tspan> elements AND path/group elements whose shapes form those letters. If a <g> group's children together form the target word, return the group's index (not the individual child paths).
 
 SVG source:
-${svgString}
+${rstMarkedSvg}
 
 Respond with ONLY a valid JSON object — no markdown, no code fences:
-{"strippedSvg":"<g id=\\"layer_1\\">...</g>"}` },
+{"removeIds":["3","9"]}` },
               ],
             }],
           }),
@@ -1298,26 +1446,17 @@ Respond with ONLY a valid JSON object — no markdown, no code fences:
         const data = await response.json() as { content: Array<{ type: string; text: string }> };
         const rawText = (data.content?.[0]?.text ?? '')
           .replace(/^```(?:json)?\s*/im, '').replace(/```\s*$/m, '').trim();
-        let strippedSvg: string;
+        let removeIds: string[];
         try {
-          const parsedSpecific = JSON.parse(rawText) as { strippedSvg: string };
-          strippedSvg = parsedSpecific.strippedSvg;
+          removeIds = (JSON.parse(rawText) as { removeIds: string[] }).removeIds ?? [];
         } catch {
-          const svgMatch = rawText.match(/<(?:g|svg)[\s\S]*?<\/(?:g|svg)>/);
-          if (svgMatch) strippedSvg = svgMatch[0];
-          else throw new Error('AI returned an unreadable response');
+          throw new Error('AI returned an unreadable response');
         }
         setAiStatusMsg('Applying changes…');
-        const strippedStrS = strippedSvg.replace(/^```(?:xml|svg)?\s*/im, '').replace(/```\s*$/m, '').trim();
-        const wrapperS = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">${strippedStrS}</svg>`;
-        const wrapperDocS = new DOMParser().parseFromString(wrapperS, 'image/svg+xml');
-        if (wrapperDocS.querySelector('parsererror')) throw new Error('AI returned invalid SVG');
-        const newLayerElS = wrapperDocS.documentElement.firstElementChild;
-        if (!newLayerElS) throw new Error('AI returned an empty SVG');
-        const importedS = doc.importNode(newLayerElS, true);
-        layerEl.parentNode?.replaceChild(importedS, layerEl);
-        const contentS = new XMLSerializer().serializeToString(doc.documentElement);
-        setActiveSvg((prev) => prev ? { ...prev, content: contentS } : null);
+        for (const sid of removeIds) rstIdMap.get(sid)?.parentNode?.removeChild(rstIdMap.get(sid)!);
+        for (const [, el] of rstIdMap) el.removeAttribute('data-ai-idx');
+        const contentRST = new XMLSerializer().serializeToString(doc.documentElement);
+        setActiveSvg((prev) => prev ? { ...prev, content: contentRST } : null);
         setShowRemoveTextInput(false);
         setRemoveTextQuery('');
         return;
@@ -1351,7 +1490,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences:
       markEls(layerEl);
       const markedSvgString = new XMLSerializer().serializeToString(layerEl);
 
-      const cacheKey = `strip-text-v3:${hashString(svgString)}`;
+      const cacheKey = `strip-text-v5:${hashString(svgString)}`;
       let parsed: StripResult;
 
       const cachedRaw = aiCacheRef.current.get(cacheKey);
@@ -1379,7 +1518,7 @@ TASK 1 — Text detection: Examine the image carefully. Detect ALL text present,
 - weight: CSS font-weight integer (100, 200, 300, 400, 500, 600, 700, 800, or 900)
 - color: dominant text fill color as CSS hex (e.g. "#ffffff")
 - content: the exact text string if legible, else ""
-- letterSpacing: estimated CSS letter-spacing in em units (e.g. 0.0 for normal, 0.1 for slightly wide, 0.3 for very wide/spaced-out, negative values for condensed)
+- letterSpacing: CSS letter-spacing in em units. Default to 0.0 (normal) if you are not certain — only use a non-zero value when you can clearly see unusually wide or condensed tracking (e.g. 0.1 slightly wide, 0.3 very wide, -0.05 condensed)
 
 TASK 2 — Text element identification: Every SVG element in the source has a data-ai-idx attribute. Identify which elements visually render as text — including <text>/<tspan> elements AND <path>/<g> elements whose shapes form letter or word outlines. IMPORTANT: if a <g> group contains child paths that together form a word, return the group's data-ai-idx (not the individual letter path indices). Return every text element's data-ai-idx in "removeIds".
 
@@ -1438,6 +1577,9 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
           }
         }
 
+        const LS_OPTIONS = [-0.1, -0.05, 0, 0.05, 0.1, 0.15, 0.2, 0.3];
+        const snapLS = (v: number) => LS_OPTIONS.reduce((a, b) => Math.abs(b - v) < Math.abs(a - v) ? b : a);
+
         groups.forEach((group, gi) => {
           const newId = `_text_${Date.now()}_${gi}`;
           const label = group.map((r) => r.content.trim()).filter(Boolean).join(' ') || 'Text';
@@ -1458,7 +1600,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
             textEl.setAttribute('font-size', String(fontSize));
             textEl.setAttribute('font-weight', String(row.weight || 400));
             textEl.setAttribute('fill', row.color || '#000000');
-            if (row.letterSpacing) textEl.setAttribute('letter-spacing', `${row.letterSpacing}em`);
+            const ls = snapLS(row.letterSpacing ?? 0); if (ls !== 0) textEl.setAttribute('letter-spacing', `${ls}em`);
             textEl.textContent = label;
             doc.documentElement.appendChild(textEl);
           } else {
@@ -1479,7 +1621,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
               textEl.setAttribute('font-size', String(fontSize));
               textEl.setAttribute('font-weight', String(row.weight || 400));
               textEl.setAttribute('fill', row.color || '#000000');
-              if (row.letterSpacing) textEl.setAttribute('letter-spacing', `${row.letterSpacing}em`);
+              const ls = snapLS(row.letterSpacing ?? 0); if (ls !== 0) textEl.setAttribute('letter-spacing', `${ls}em`);
               textEl.textContent = row.content.trim() || 'Text';
               g.appendChild(textEl);
             });
@@ -1507,7 +1649,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
       setAiLoading(false);
       setAiStatusMsg('Thinking…');
     }
-  }, [activeSvg, selectedLayer, addGoogleFont]);
+  }, [activeSvg, selectedLayer, addGoogleFont, snapshotForUndo]);
 
   // ── Reset ──────────────────────────────────────────────────────────────────
 
@@ -1529,18 +1671,15 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     setAiError(null); setFontSuggestion(null); setSuggestedFontName(null);
     setColorReplaceFrom(''); setSelectedSubElId(null);
     setShowRemoveTextInput(false); setRemoveTextQuery(''); setTextCheckResult(null);
+    colorBaselineRef.current = null;
   }, [selectedLayer]);
 
   useEffect(() => {
     setImageFonts(null);
     setShowImageFonts(false);
-    if (!activeSvg) { setTaxonomy(null); return; }
-    setTaxonomy([
-      { type: 'background', elements: ['solid dark circular background'] },
-      { type: 'icon',       elements: ['central star or emblem motif', 'geometric ring border'] },
-      { type: 'decoration', elements: ['radiating line pattern', 'outer decorative ring'] },
-      { type: 'text',       elements: ['curved banner text', 'label underneath emblem'] },
-    ]);
+    setTaxonomy(null);
+    setTaxonomyLoading(false);
+    setTaxonomyOpen(false);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSvg?.src]);
 
@@ -1574,6 +1713,17 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     window.addEventListener('keydown', onArrow);
     return () => window.removeEventListener('keydown', onArrow);
   }, [selectedLayers, selectedSubElId]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.key !== 'z' || e.shiftKey) return;
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      e.preventDefault();
+      undo();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [undo]);
 
   // ── File drag handlers (drop zone) ─────────────────────────────────────────
 
@@ -1680,6 +1830,19 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                     <svg xmlns="http://www.w3.org/2000/svg" className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
                       <circle cx="12" cy="12" r="3" />
                       <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v2m0 14v2M3 12h2m14 0h2" />
+                    </svg>
+                  </button>
+                )}
+
+                {/* Undo */}
+                {undoCount > 0 && (
+                  <button
+                    onClick={undo}
+                    title="Undo (⌘Z)"
+                    className="h-7 w-7 flex items-center justify-center rounded border border-zinc-700 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M9 15 3 9m0 0 6-6M3 9h12a6 6 0 0 1 0 12h-3" />
                     </svg>
                   </button>
                 )}
@@ -2121,13 +2284,22 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
 
                       {/* From — row of swatches extracted from the layer */}
                       <div className="flex flex-col gap-1">
-                        <span className="text-[10px] text-zinc-500 px-1">From</span>
+                        <div className="flex items-center justify-between px-1">
+                          <span className="text-[10px] text-zinc-500">From</span>
+                          {colorReplaceFrom && (
+                            <button
+                              onClick={() => { setColorReplaceFrom(''); colorBaselineRef.current = null; }}
+                              title="Clear selection"
+                              className="text-[10px] text-zinc-600 hover:text-zinc-400 transition-colors leading-none"
+                            >✕</button>
+                          )}
+                        </div>
                         <div className="flex flex-wrap gap-1.5 px-1 items-start">
                           {layerColors.length > 0 ? layerColors.map((color) => (
                             <button
                               key={color}
                               title={color}
-                              onClick={() => setColorReplaceFrom(color)}
+                              onClick={() => { snapshotForUndo(activeSvg!.content, activeSvg!.layers); setColorReplaceFrom(color); colorBaselineRef.current = activeSvg?.content ?? null; }}
                               style={{
                                 backgroundColor: color,
                                 width: '2rem',
@@ -2146,68 +2318,30 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                         </div>
                       </div>
 
-                      {/* To — same swatch style; clicking immediately applies */}
-                      <div className="flex flex-col gap-1">
-                        <span className="text-[10px] text-zinc-500 px-1">
+                      {/* To — colour picker only */}
+                      <div className="flex items-center gap-2 px-1">
+                        <span className="text-[10px] text-zinc-500 shrink-0">
                           To {!colorReplaceFrom && <span className="text-zinc-600">(pick From first)</span>}
                         </span>
-                        <div className="flex flex-wrap gap-1.5 px-1 items-start">
-                          {layerColors.map((color) => (
-                            <button
-                              key={color}
-                              title={color}
-                              onClick={() => {
-                                setColorReplaceTo(color);
-                                replaceColorInLayer(color);
-                                setColorReplaceFrom('');
-                              }}
-                              disabled={!colorReplaceFrom}
-                              style={{
-                                backgroundColor: color,
-                                width: '2rem',
-                                height: '2rem',
-                                flexShrink: 0,
-                                borderRadius: '3px',
-                                border: '2px solid #52525b',
-                                cursor: colorReplaceFrom ? 'pointer' : 'not-allowed',
-                                opacity: colorReplaceFrom ? 1 : 0.4,
-                                transition: 'transform 0.1s, opacity 0.1s',
-                              }}
-                            />
-                          ))}
-                          {/* Custom colour picker swatch */}
-                          <label
-                            title="Custom colour"
-                            style={{
-                              position: 'relative',
-                              width: '2rem',
-                              height: '2rem',
-                              flexShrink: 0,
-                              borderRadius: '3px',
-                              border: '2px dashed #52525b',
-                              cursor: colorReplaceFrom ? 'pointer' : 'not-allowed',
-                              display: 'flex',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              backgroundColor: colorReplaceTo,
-                              opacity: colorReplaceFrom ? 1 : 0.4,
-                            }}
-                          >
-                            <span style={{ fontSize: '14px', color: 'rgba(255,255,255,0.8)', fontWeight: 'bold', lineHeight: 1, pointerEvents: 'none' }}>+</span>
-                            <input
-                              type="color"
-                              value={colorReplaceTo}
-                              disabled={!colorReplaceFrom}
-                              onChange={(e) => {
-                                const c = e.target.value;
-                                setColorReplaceTo(c);
-                                replaceColorInLayer(c);
-                                setColorReplaceFrom('');
-                              }}
-                              style={{ position: 'absolute', opacity: 0, width: '100%', height: '100%', cursor: 'inherit' }}
-                            />
-                          </label>
-                        </div>
+                        <input
+                          type="color"
+                          value={colorReplaceTo}
+                          disabled={!colorReplaceFrom}
+                          onChange={(e) => {
+                            const c = e.target.value;
+                            setColorReplaceTo(c);
+                            replaceColorInLayer(c);
+                          }}
+                          onBlur={() => {
+                            if (colorReplaceFrom && !layerColors.includes(colorReplaceFrom)) {
+                              setColorReplaceFrom('');
+                              colorBaselineRef.current = null;
+                            }
+                          }}
+                          title="Pick replacement colour"
+                          className="h-8 w-12 rounded cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                          style={{ padding: '1px 2px', background: 'transparent', border: '2px solid #52525b' }}
+                        />
                       </div>
                     </div>}
                     </div>
@@ -2374,41 +2508,56 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                   </div>
 
                   {/* Taxonomy */}
-                  {(taxonomyLoading || taxonomy) && (
-                    <div className="border-t border-zinc-800 shrink-0">
-                      <button
-                        onClick={() => setTaxonomyOpen((o) => !o)}
-                        className="w-full px-3 py-1.5 flex items-center gap-1.5 hover:bg-zinc-800/40 transition-colors"
-                      >
-                        <span className="text-[10px] font-semibold text-zinc-500 uppercase tracking-widest flex-1 text-left">Taxonomy</span>
-                        {taxonomyLoading
-                          ? <div className="size-2.5 rounded-full border border-zinc-600 border-t-zinc-400 animate-spin" />
-                          : <span className="text-zinc-600 text-[10px]">{taxonomyOpen ? '▲' : '▼'}</span>
-                        }
-                      </button>
-                      {taxonomyOpen && taxonomy && (
-                        <div className="px-2 pb-2 flex flex-col gap-0.5 max-h-44 overflow-y-auto">
-                          {taxonomy.map((group, i) => (
-                            <div key={`${group.type}-${i}`} className="rounded px-1.5 py-1">
-                              <span className={cn(
-                                'text-[9px] font-bold uppercase tracking-wider',
-                                TAXONOMY_COLOURS[group.type.toLowerCase()] ?? 'text-zinc-400'
-                              )}>
-                                {group.type}
-                              </span>
-                              <div className="flex flex-col gap-0.5 mt-0.5">
-                                {group.elements.map((desc, j) => (
-                                  <span key={j} className="text-[10px] text-zinc-400 leading-snug">
-                                    {desc}
-                                  </span>
-                                ))}
-                              </div>
+                  <div className="border-t border-zinc-800 shrink-0">
+                    <button
+                      onClick={() => setTaxonomyOpen((o) => !o)}
+                      className="w-full px-3 py-1.5 flex items-center gap-1.5 hover:bg-zinc-800/40 transition-colors"
+                    >
+                      <span className="text-[10px] font-semibold text-zinc-500 uppercase tracking-widest flex-1 text-left">Taxonomy</span>
+                      {taxonomyLoading
+                        ? <div className="size-2.5 rounded-full border border-zinc-600 border-t-zinc-400 animate-spin" />
+                        : <span className="text-zinc-600 text-[10px]">{taxonomyOpen ? '▲' : '▼'}</span>
+                      }
+                    </button>
+                    {taxonomyOpen && (
+                      <div className="px-2 pb-2 flex flex-col gap-0.5 max-h-44 overflow-y-auto">
+                        {taxonomyLoading && (
+                          <div className="flex items-center gap-2 py-1">
+                            <div className="size-3 rounded-full border border-zinc-600 border-t-zinc-400 animate-spin shrink-0" />
+                            <span className="text-[10px] text-zinc-500">Analysing…</span>
+                          </div>
+                        )}
+                        {!taxonomyLoading && taxonomy === null && (
+                          <button
+                            onClick={runTaxonomyAnalysis}
+                            className="text-left text-[10px] text-zinc-500 hover:text-zinc-300 py-1 transition-colors"
+                          >
+                            Analyse structure →
+                          </button>
+                        )}
+                        {taxonomy && taxonomy.length === 0 && (
+                          <p className="text-[10px] text-zinc-600 italic py-1">Could not analyse structure</p>
+                        )}
+                        {taxonomy && taxonomy.length > 0 && taxonomy.map((group, i) => (
+                          <div key={`${group.type}-${i}`} className="rounded px-1.5 py-1">
+                            <span className={cn(
+                              'text-[9px] font-bold uppercase tracking-wider',
+                              TAXONOMY_COLOURS[group.type.toLowerCase()] ?? 'text-zinc-400'
+                            )}>
+                              {group.type}
+                            </span>
+                            <div className="flex flex-col gap-0.5 mt-0.5">
+                              {group.elements.map((desc, j) => (
+                                <span key={j} className="text-[10px] text-zinc-400 leading-snug">
+                                  {desc}
+                                </span>
+                              ))}
                             </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
 
                   {/* Revert */}
                   <div className="px-2 py-2 border-t border-zinc-800 shrink-0">
