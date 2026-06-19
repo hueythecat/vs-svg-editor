@@ -77,6 +77,30 @@ function parseSvg(raw: string): { content: string; layers: SvgLayer[] } {
   }
 }
 
+function hexToHsl(hex: string): [number, number, number] {
+  const r = parseInt(hex.slice(1, 3), 16) / 255;
+  const g = parseInt(hex.slice(3, 5), 16) / 255;
+  const b = parseInt(hex.slice(5, 7), 16) / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  if (max === min) return [0, 0, Math.round(l * 100)];
+  const d = max - min;
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  let h = 0;
+  if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+  else if (max === g) h = ((b - r) / d + 2) / 6;
+  else h = ((r - g) / d + 4) / 6;
+  return [Math.round(h * 360), Math.round(s * 100), Math.round(l * 100)];
+}
+function hslToHex(h: number, s: number, l: number): string {
+  s /= 100; l /= 100;
+  const k = (n: number) => (n + h / 30) % 12;
+  const a = s * Math.min(l, 1 - l);
+  const f = (n: number) => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+  const hex2 = (x: number) => Math.round(x * 255).toString(16).padStart(2, '0');
+  return `#${hex2(f(0))}${hex2(f(8))}${hex2(f(4))}`;
+}
+
 // Returns the element's bounding box in SVG root coordinate space,
 // correctly accounting for the element's own transform attribute.
 function bboxInRootSpace(svgEl: SVGSVGElement, el: SVGGraphicsElement): DOMRect | null {
@@ -125,12 +149,16 @@ function applyTranslateDelta(existing: string, dx: number, dy: number): string {
   return `translate(${dx}, ${dy}) ${existing}`.trim();
 }
 
-// Arc path for curved text: sweep=1→arch up, sweep=0→arch down
+// Arc path for curved text. The arc midpoint is always pinned at cy so the
+// centre character never moves as the curve slider changes.
+// Bowl (curve>0): chord at cy-h (endpoints above cy), arc bottom at cy.
+// Arch (curve<0): chord at cy+h (endpoints below cy), arc peak at cy.
 function computeArcPath(cx: number, cy: number, halfW: number, curve: number): string {
   const h = halfW * Math.abs(curve) / 100;
-  const r = (halfW * halfW) / (2 * h) + h / 2;
+  const r = (halfW * halfW + h * h) / (2 * h);
   const sweep = curve > 0 ? 1 : 0;
-  return `M ${cx - halfW} ${cy} A ${r} ${r} 0 0 ${sweep} ${cx + halfW} ${cy}`;
+  const chordY = curve > 0 ? cy - h : cy + h;
+  return `M ${cx - halfW} ${chordY} A ${r} ${r} 0 0 ${sweep} ${cx + halfW} ${chordY}`;
 }
 
 function normalizeColor(color: string): string {
@@ -357,9 +385,10 @@ export function SvgDropZone() {
   const [showImageFonts, setShowImageFonts]   = useState(false);
   const [taxonomy, setTaxonomy]           = useState<TaxonomyGroup[] | null>(null);
   const [taxonomyLoading, setTaxonomyLoading] = useState(false);
-  const [taxonomyOpen, setTaxonomyOpen]   = useState(false);
-  const [textFormOpen, setTextFormOpen]   = useState(true);
-  const [aiActionsOpen, setAiActionsOpen] = useState(true);
+  const [taxonomyOpen, setTaxonomyOpen]       = useState(false);
+  const [textFormOpen, setTextFormOpen]       = useState(true);
+  const [aiActionsOpen, setAiActionsOpen]     = useState(true);
+  const [suggestFontsOpen, setSuggestFontsOpen] = useState(true);
   const [removeTextQuery, setRemoveTextQuery] = useState('');
   const [showRemoveTextInput, setShowRemoveTextInput] = useState(false);
   const [textCheckResult, setTextCheckResult] = useState<{ heading: string; subheading: string } | null>(null);
@@ -382,6 +411,7 @@ export function SvgDropZone() {
   const layerListRef            = useRef<HTMLDivElement>(null);
   const fileInputRef            = useRef<HTMLInputElement>(null);
   const svgCanvasRef            = useRef<HTMLDivElement>(null);
+  const curveStartCenterYRef    = useRef<number | null>(null);
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -900,8 +930,103 @@ export function SvgDropZone() {
     const el = doc.getElementById(selectedLayer);
     if (!el) return;
     const isGroup = el.getAttribute('data-text-layer') === '1';
-    const textEl = isGroup ? el.querySelector('text') : el;
+    let textEl: Element | null = isGroup ? el.querySelector('text') : el;
     if (!textEl) return;
+
+    // For non-group text elements that need a curve, promote to group first
+    if (attrs.curve !== undefined && !isGroup && el.tagName.toLowerCase() === 'text' && attrs.curve !== 0) {
+      const SVG_NS = 'http://www.w3.org/2000/svg';
+      const svgEl = doc.documentElement;
+      const vb = svgEl.getAttribute('viewBox')?.trim().split(/[\s,]+/).map(Number);
+      const vbW = vb && vb.length === 4 ? vb[2] : Number(svgEl.getAttribute('width') || 400);
+      const cx = Number(el.getAttribute('x') ?? 0);
+      const cy = Number(el.getAttribute('y') ?? 0);
+      const halfW = vbW * 0.35;
+      const gId = el.id;
+      el.removeAttribute('id');
+      const g = doc.createElementNS(SVG_NS, 'g');
+      g.id = gId;
+      g.setAttribute('data-name', el.textContent ?? '');
+      g.setAttribute('data-text-layer', '1');
+      g.setAttribute('data-curve', String(attrs.curve));
+      g.setAttribute('data-cx', String(cx));
+      g.setAttribute('data-cy', String(cy));
+      g.setAttribute('data-halfw', String(halfW));
+      g.setAttribute('data-fontsize', el.getAttribute('font-size') ?? '48');
+      const arcId = `_arc_${gId}`;
+      const defsEl2 = doc.createElementNS(SVG_NS, 'defs');
+      const arcEl = doc.createElementNS(SVG_NS, 'path');
+      arcEl.id = arcId;
+      arcEl.setAttribute('d', computeArcPath(cx, cy, halfW, attrs.curve));
+      defsEl2.appendChild(arcEl);
+      g.appendChild(defsEl2);
+      const newText = doc.createElementNS(SVG_NS, 'text');
+      ['font-family','font-size','font-weight','fill','letter-spacing'].forEach((a) => { const v = el.getAttribute(a); if (v) newText.setAttribute(a, v); });
+      newText.setAttribute('dominant-baseline', 'middle');
+      const tp = doc.createElementNS(SVG_NS, 'textPath');
+      tp.setAttribute('href', `#${arcId}`); tp.setAttribute('startOffset', '50%'); tp.setAttribute('text-anchor', 'middle');
+      tp.textContent = el.textContent ?? '';
+      newText.appendChild(tp); g.appendChild(newText);
+      el.parentNode?.replaceChild(g, el);
+      const content = new XMLSerializer().serializeToString(doc.documentElement);
+      setActiveSvg((prev) => prev ? { ...prev, content } : null);
+      return;
+    }
+
+    if (attrs.curve !== undefined && isGroup) {
+      const currentCurve = Number(el.getAttribute('data-curve') ?? 0);
+      const newCurve = attrs.curve;
+      el.setAttribute('data-curve', String(newCurve));
+      const cx = Number(el.getAttribute('data-cx') ?? 0);
+      const cy = Number(el.getAttribute('data-cy') ?? 0);
+      const halfW = Number(el.getAttribute('data-halfw') ?? 100);
+      const SVG_NS = 'http://www.w3.org/2000/svg';
+      const COPY_ATTRS = ['font-family', 'font-size', 'font-weight', 'fill', 'letter-spacing'];
+
+      if (currentCurve === 0 && newCurve !== 0) {
+        const content = textEl.textContent ?? '';
+        el.removeChild(textEl);
+        const arcId = `_arc_${el.id}`;
+        const defsEl = doc.createElementNS(SVG_NS, 'defs');
+        const arcEl = doc.createElementNS(SVG_NS, 'path');
+        arcEl.id = arcId;
+        arcEl.setAttribute('d', computeArcPath(cx, cy, halfW, newCurve));
+        defsEl.appendChild(arcEl);
+        el.appendChild(defsEl);
+        const newText = doc.createElementNS(SVG_NS, 'text');
+        COPY_ATTRS.forEach((a) => { const v = textEl!.getAttribute(a); if (v) newText.setAttribute(a, v); });
+        newText.setAttribute('dominant-baseline', 'middle');
+        const tp = doc.createElementNS(SVG_NS, 'textPath');
+        tp.setAttribute('href', `#${arcId}`); tp.setAttribute('startOffset', '50%'); tp.setAttribute('text-anchor', 'middle');
+        tp.textContent = content;
+        newText.appendChild(tp); el.appendChild(newText);
+        textEl = newText;
+      } else if (currentCurve !== 0 && newCurve === 0) {
+        const tp = textEl.querySelector('textPath');
+        const content = tp?.textContent ?? textEl.textContent ?? '';
+        // Remove arc — may be directly in group (legacy) or inside <defs>
+        const arcEl = doc.getElementById(`_arc_${el.id}`) ?? el.querySelector('path');
+        if (arcEl) {
+          const arcParent = arcEl.parentNode;
+          arcParent?.removeChild(arcEl);
+          if (arcParent && arcParent.nodeName.toLowerCase() === 'defs' && !arcParent.firstChild) {
+            arcParent.parentNode?.removeChild(arcParent);
+          }
+        }
+        el.removeChild(textEl);
+        const newText = doc.createElementNS(SVG_NS, 'text');
+        newText.setAttribute('x', String(cx)); newText.setAttribute('y', String(cy));
+        newText.setAttribute('text-anchor', 'middle'); newText.setAttribute('dominant-baseline', 'middle');
+        COPY_ATTRS.forEach((a) => { const v = textEl!.getAttribute(a); if (v) newText.setAttribute(a, v); });
+        newText.textContent = content;
+        el.appendChild(newText);
+        textEl = newText;
+      } else if (newCurve !== 0) {
+        const arcEl = doc.getElementById(`_arc_${el.id}`) ?? el.querySelector('path');
+        if (arcEl) arcEl.setAttribute('d', computeArcPath(cx, cy, halfW, newCurve));
+      }
+    }
+
     if (attrs.content !== undefined) {
       const tp = textEl.querySelector('textPath');
       if (tp) tp.textContent = attrs.content;
@@ -914,16 +1039,6 @@ export function SvgDropZone() {
     if (attrs.letterSpacing !== undefined) {
       if (attrs.letterSpacing === 0) textEl.removeAttribute('letter-spacing');
       else textEl.setAttribute('letter-spacing', `${attrs.letterSpacing}em`);
-    }
-    if (attrs.curve !== undefined && isGroup) {
-      el.setAttribute('data-curve', String(attrs.curve));
-      const arcEl = el.querySelector('path');
-      if (arcEl) {
-        const cx = Number(el.getAttribute('data-cx') ?? 0);
-        const cy = Number(el.getAttribute('data-cy') ?? 0);
-        const halfW = Number(el.getAttribute('data-halfw') ?? 100);
-        arcEl.setAttribute('d', computeArcPath(cx, cy, halfW, attrs.curve));
-      }
     }
     const content = new XMLSerializer().serializeToString(doc.documentElement);
     setActiveSvg((prev) => {
@@ -964,19 +1079,21 @@ export function SvgDropZone() {
       g.setAttribute('data-cx', String(cx));
       g.setAttribute('data-cy', String(cy));
       g.setAttribute('data-halfw', String(halfW));
+      g.setAttribute('data-fontsize', String(textForm.size));
 
+      const defsEl = doc.createElementNS('http://www.w3.org/2000/svg', 'defs');
       const arcEl = doc.createElementNS('http://www.w3.org/2000/svg', 'path');
       arcEl.id = arcId;
       arcEl.setAttribute('d', computeArcPath(cx, cy, halfW, textForm.curve));
-      arcEl.setAttribute('fill', 'none');
-      arcEl.setAttribute('stroke', 'none');
-      g.appendChild(arcEl);
+      defsEl.appendChild(arcEl);
+      g.appendChild(defsEl);
 
       const textEl = doc.createElementNS('http://www.w3.org/2000/svg', 'text');
       textEl.setAttribute('font-family', textForm.font);
       textEl.setAttribute('font-size', String(textForm.size));
       textEl.setAttribute('font-weight', String(textForm.weight));
       textEl.setAttribute('fill', textForm.color);
+      textEl.setAttribute('dominant-baseline', 'middle');
       if (textForm.letterSpacing) textEl.setAttribute('letter-spacing', `${textForm.letterSpacing}em`);
       const textPathEl = doc.createElementNS('http://www.w3.org/2000/svg', 'textPath');
       textPathEl.setAttribute('href', `#${arcId}`);
@@ -987,19 +1104,29 @@ export function SvgDropZone() {
       g.appendChild(textEl);
       svg.appendChild(g);
     } else {
-      const el = doc.createElementNS('http://www.w3.org/2000/svg', 'text');
-      el.id = id;
-      el.setAttribute('x', String(cx));
-      el.setAttribute('y', String(cy));
-      el.setAttribute('text-anchor', 'middle');
-      el.setAttribute('dominant-baseline', 'middle');
-      el.setAttribute('font-family', textForm.font);
-      el.setAttribute('font-size', String(textForm.size));
-      el.setAttribute('font-weight', String(textForm.weight));
-      el.setAttribute('fill', textForm.color);
-      if (textForm.letterSpacing) el.setAttribute('letter-spacing', `${textForm.letterSpacing}em`);
-      el.textContent = textContent;
-      svg.appendChild(el);
+      const halfW = vbW * 0.35;
+      const g = doc.createElementNS('http://www.w3.org/2000/svg', 'g');
+      g.id = id;
+      g.setAttribute('data-name', textContent);
+      g.setAttribute('data-text-layer', '1');
+      g.setAttribute('data-curve', '0');
+      g.setAttribute('data-cx', String(cx));
+      g.setAttribute('data-cy', String(cy));
+      g.setAttribute('data-halfw', String(halfW));
+      g.setAttribute('data-fontsize', String(textForm.size));
+      const textEl = doc.createElementNS('http://www.w3.org/2000/svg', 'text');
+      textEl.setAttribute('x', String(cx));
+      textEl.setAttribute('y', String(cy));
+      textEl.setAttribute('text-anchor', 'middle');
+      textEl.setAttribute('dominant-baseline', 'middle');
+      textEl.setAttribute('font-family', textForm.font);
+      textEl.setAttribute('font-size', String(textForm.size));
+      textEl.setAttribute('font-weight', String(textForm.weight));
+      textEl.setAttribute('fill', textForm.color);
+      if (textForm.letterSpacing) textEl.setAttribute('letter-spacing', `${textForm.letterSpacing}em`);
+      textEl.textContent = textContent;
+      g.appendChild(textEl);
+      svg.appendChild(g);
     }
 
     const content = new XMLSerializer().serializeToString(svg);
@@ -1993,6 +2120,40 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
               {/* ── Layers panel ─────────────────────────────────────── */}
               {activeSvg && (
                 <aside className="w-52 shrink-0 flex flex-col border-l border-zinc-800 bg-zinc-900/60">
+
+                  {/* Suggest fonts — collapsible, above layers heading */}
+                  <div className="border-b border-zinc-800 shrink-0">
+                    <button
+                      onClick={() => setSuggestFontsOpen((o) => !o)}
+                      className="w-full px-3 py-1.5 flex items-center gap-1.5 hover:bg-zinc-800/40 transition-colors"
+                    >
+                      <SparklesIcon className="size-3 text-indigo-400" />
+                      <span className="text-[10px] font-semibold text-zinc-400 uppercase tracking-widest flex-1 text-left">
+                        Image Actions
+                      </span>
+                      <span className="text-zinc-600 text-[10px]">{suggestFontsOpen ? '▲' : '▼'}</span>
+                    </button>
+                    {suggestFontsOpen && (
+                      <div className="px-2 pb-2">
+                        <button
+                          onClick={suggestFontsForImage}
+                          disabled={imageFonts !== null || imageFontsLoading}
+                          className={cn(
+                            'w-full flex items-center justify-center gap-1.5 rounded text-xs py-1.5 transition-colors',
+                            imageFonts !== null
+                              ? 'bg-zinc-800/30 text-zinc-600 cursor-not-allowed'
+                              : imageFontsLoading
+                              ? 'bg-zinc-800/30 text-zinc-500 cursor-wait'
+                              : 'bg-zinc-800/60 hover:bg-zinc-700/60 text-zinc-300'
+                          )}
+                        >
+                          {imageFontsLoading && <div className="size-3 rounded-full border border-zinc-600 border-t-zinc-400 animate-spin shrink-0" />}
+                          {imageFontsLoading ? 'Analysing…' : imageFonts !== null ? 'Fonts suggested' : 'Suggest fonts'}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
                   <div className="px-3 py-2.5 border-b border-zinc-800 flex items-center justify-between">
                     <span className="text-[10px] font-semibold text-zinc-500 uppercase tracking-widest">
                       Layers
@@ -2009,7 +2170,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                       className="w-full px-3 py-1.5 flex items-center gap-1.5 hover:bg-zinc-800/40 transition-colors"
                     >
                       <span className="text-[10px] font-semibold text-zinc-500 uppercase tracking-widest flex-1 text-left">
-                        {selectedTextProps ? 'Edit Text' : 'Add Text'}
+                        Text
                       </span>
                       <span className="text-zinc-600 text-[10px]">{textFormOpen ? '▲' : '▼'}</span>
                     </button>
@@ -2079,7 +2240,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                             ? updateTextLayer({ color: e.target.value })
                             : setTextForm((f) => ({ ...f, color: e.target.value }))
                         }
-                        className="h-[26px] flex-1 rounded border border-zinc-700 bg-zinc-800 cursor-pointer p-0.5"
+                        className="h-6 w-6 shrink-0 rounded border border-zinc-700 bg-zinc-800 cursor-pointer p-0.5"
                         title="Text color"
                       />
                       {'EyeDropper' in window && (
@@ -2095,17 +2256,14 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                                 : setTextForm((f) => ({ ...f, color: result.sRGBHex }));
                             } catch { /* cancelled */ }
                           }}
-                          className="h-[26px] w-7 shrink-0 flex items-center justify-center rounded border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 transition-colors"
+                          className="h-6 w-6 shrink-0 flex items-center justify-center rounded border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 transition-colors"
                         >
                           <svg xmlns="http://www.w3.org/2000/svg" className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
                             <path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 1 1 3.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
                           </svg>
                         </button>
                       )}
-                    </div>
-                    {/* Letter spacing */}
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-[10px] text-zinc-500 w-8 shrink-0">Space</span>
+                      <span className="text-[10px] text-zinc-500 shrink-0">Space</span>
                       <select
                         value={selectedTextProps ? selectedTextProps.letterSpacing : textForm.letterSpacing}
                         onChange={(e) => {
@@ -2114,7 +2272,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                             ? updateTextLayer({ letterSpacing: v })
                             : setTextForm((f) => ({ ...f, letterSpacing: v }));
                         }}
-                        className="flex-1 rounded bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs px-2 py-1 outline-none focus:border-zinc-500"
+                        className="flex-1 min-w-0 rounded bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs px-2 py-1 outline-none focus:border-zinc-500"
                       >
                         {([-0.1, -0.05, 0, 0.05, 0.1, 0.15, 0.2, 0.3] as const).map((v) => (
                           <option key={v} value={v}>
@@ -2124,29 +2282,57 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                       </select>
                     </div>
 
-                    {/* Curve slider — always in add mode; in edit mode only for curved layers */}
-                    {(!selectedTextProps || selectedTextProps.curve !== null) && (
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-[10px] text-zinc-500 w-8 shrink-0">Curve</span>
-                        <input
-                          type="range"
-                          min={-100}
-                          max={100}
-                          step={5}
-                          value={selectedTextProps ? (selectedTextProps.curve as number) : textForm.curve}
-                          onChange={(e) => {
-                            const v = Number(e.target.value);
-                            selectedTextProps
-                              ? updateTextLayer({ curve: v })
-                              : setTextForm((f) => ({ ...f, curve: v }));
-                          }}
-                          className="flex-1 accent-zinc-400"
-                        />
-                        <span className="text-[10px] text-zinc-500 w-7 text-right tabular-nums">
-                          {selectedTextProps ? (selectedTextProps.curve as number) : textForm.curve}
-                        </span>
-                      </div>
-                    )}
+                    {/* Curve slider */}
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className="text-[10px] text-zinc-500 w-8 shrink-0">Curve</span>
+                      <input
+                        type="range"
+                        min={-100}
+                        max={100}
+                        step={5}
+                        value={selectedTextProps ? (selectedTextProps.curve ?? 0) : textForm.curve}
+                        onChange={(e) => {
+                          const v = Number(e.target.value);
+                          selectedTextProps
+                            ? updateTextLayer({ curve: v })
+                            : setTextForm((f) => ({ ...f, curve: v }));
+                        }}
+                        onPointerDown={() => {
+                          if (!selectedTextProps || !selectedLayer) return;
+                          const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
+                          const el = svgEl?.getElementById(selectedLayer) as SVGGraphicsElement | null;
+                          if (el && svgEl) {
+                            const bbox = bboxInRootSpace(svgEl, el);
+                            curveStartCenterYRef.current = bbox ? bbox.y + bbox.height / 2 : null;
+                          }
+                        }}
+                        onPointerUp={() => {
+                          if (curveStartCenterYRef.current === null || !selectedLayer || !activeSvg) return;
+                          const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
+                          const el = svgEl?.getElementById(selectedLayer) as SVGGraphicsElement | null;
+                          if (!el || !svgEl) { curveStartCenterYRef.current = null; return; }
+                          const bbox = bboxInRootSpace(svgEl, el as SVGGraphicsElement);
+                          if (!bbox) { curveStartCenterYRef.current = null; return; }
+                          const delta = curveStartCenterYRef.current - (bbox.y + bbox.height / 2);
+                          curveStartCenterYRef.current = null;
+                          if (Math.abs(delta) < 0.5) return;
+                          const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+                          const groupEl = doc.getElementById(selectedLayer);
+                          if (!groupEl) return;
+                          const cur = groupEl.getAttribute('transform') ?? '';
+                          const m = cur.match(/translate\(\s*([^,\s)]+)[\s,]+([^,\s)]+)\s*\)/);
+                          const tx = m ? parseFloat(m[1]) : 0;
+                          const ty = m ? parseFloat(m[2]) : 0;
+                          groupEl.setAttribute('transform', `translate(${tx}, ${ty + delta})`);
+                          const content = new XMLSerializer().serializeToString(doc.documentElement);
+                          setActiveSvg((prev) => prev ? { ...prev, content } : null);
+                        }}
+                        className="flex-1 min-w-0 accent-zinc-400"
+                      />
+                      <span className="text-[10px] text-zinc-500 w-7 text-right tabular-nums shrink-0">
+                        {selectedTextProps ? (selectedTextProps.curve ?? 0) : textForm.curve}
+                      </span>
+                    </div>
                     {!selectedTextProps && (
                       <button
                         onClick={addTextLayer}
@@ -2164,7 +2350,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                   </div>}
                   </div>
 
-                  {/* AI Actions — always visible */}
+                  {/* Layer Actions */}
                   <div className="border-b border-zinc-800 shrink-0">
                     <button
                       onClick={() => setAiActionsOpen((o) => !o)}
@@ -2172,29 +2358,25 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                     >
                       <SparklesIcon className="size-3 text-indigo-400" />
                       <span className="text-[10px] font-semibold text-zinc-400 uppercase tracking-widest flex-1 text-left">
-                        AI Actions
+                        Layer Actions
                       </span>
                       <span className="text-zinc-600 text-[10px]">{aiActionsOpen ? '▲' : '▼'}</span>
                     </button>
                     {aiActionsOpen && <div className="px-2 pb-2 flex flex-col gap-1.5">
                       <select
                         value=""
-                        disabled={aiLoading || imageFontsLoading}
+                        disabled={aiLoading || selectedLayer === backgroundLayerId}
                         onChange={(e) => {
                           const v = e.target.value;
-                          if (v === 'suggest-fonts') suggestFontsForImage();
-                          else if (v === 'strip-text') runAiLayerAction('strip-text');
+                          if (v === 'strip-text') runAiLayerAction('strip-text');
                           else if (v === 'suggest-font') runAiLayerAction('suggest-font');
                           else if (v === 'remove-specific-text') { setShowRemoveTextInput(true); setRemoveTextQuery(''); }
                           else if (v === 'check-text') { setTextCheckResult(null); runAiLayerAction('check-text'); }
                         }}
-                        className="w-full rounded bg-zinc-800 border border-zinc-700 text-zinc-300 text-xs px-2 py-1.5 outline-none focus:border-zinc-500 cursor-pointer disabled:opacity-50 disabled:cursor-wait"
+                        className="w-full rounded bg-zinc-800 border border-zinc-700 text-zinc-300 text-xs px-2 py-1.5 outline-none focus:border-zinc-500 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         <option value="" disabled hidden>
-                          {aiLoading || imageFontsLoading ? 'Processing…' : 'Choose an action…'}
-                        </option>
-                        <option value="suggest-fonts" disabled={imageFonts !== null}>
-                          Suggest fonts for SVG
+                          {aiLoading ? 'Processing…' : selectedLayer === backgroundLayerId ? 'Not available for canvas layer' : 'Choose an action…'}
                         </option>
                         {selectedLayer && <option value="strip-text">Strip text — layer (AI)</option>}
                         {selectedLayer && <option value="suggest-font">Suggest font — layer (AI)</option>}
