@@ -1,22 +1,29 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 import { cn } from '@/lib/utils';
-
-// ─── Types ───────────────────────────────────────────────────────────────────
-
-interface SvgLayer {
-  id: string;
-  label: string;
-}
-
-interface ActiveSvg {
-  name: string;
-  src: string;           // thumbnail / blob URL
-  content: string;       // serialized SVG string (layer IDs injected)
-  originalContent: string; // content as first parsed — used for reset
-  layers: SvgLayer[];    // top-level <g> children, in document order
-  objectUrl?: string;
-}
+import {
+  type ActiveSvg,
+  type SvgLayer,
+  type SelectedTextProps,
+  type TaxonomyGroup,
+  applyTranslateDelta,
+  bboxInRootSpace,
+  collectLayerGradientIds,
+  COLOR_PAINT_ATTRS,
+  computeArcPath,
+  extractLayerColors,
+  findClickedSubText,
+  hashString,
+  normalizeColor,
+  parseSvg,
+  resolveGradient,
+  stripScripts,
+  svgToBase64Png,
+} from '@/lib/svg-utils';
+import { SparklesIcon } from './svg-icons';
+import { SamplesSidebar } from './samples-sidebar';
+import { LayersPanel } from './layers-panel';
+import type { AiActionType } from './layers-panel';
 
 // ─── Samples ─────────────────────────────────────────────────────────────────
 
@@ -33,325 +40,6 @@ const SAMPLES = [
 
 type SampleName = (typeof SAMPLES)[number]['name'];
 
-// ─── SVG processing ───────────────────────────────────────────────────────────
-
-function stripScripts(raw: string): string {
-  return raw
-    .replace(/<script[\s\S]*?<\/script>/gi, '')
-    .replace(/\son\w+="[^"]*"/gi, '');
-}
-
-// Tags that are metadata/definitions, not visual layers
-const SKIP_TAGS = new Set([
-  'defs', 'style', 'title', 'desc', 'metadata',
-  'lineargradient', 'radialgradient', 'pattern',
-  'clippath', 'mask', 'filter', 'marker',
-]);
-
-function parseSvg(raw: string): { content: string; layers: SvgLayer[] } {
-  try {
-    const doc = new DOMParser().parseFromString(raw, 'image/svg+xml');
-    if (doc.querySelector('parsererror')) return { content: raw, layers: [] };
-
-    const svg = doc.documentElement;
-    const layers: SvgLayer[] = [];
-
-    Array.from(svg.children).forEach((child, i) => {
-      if (SKIP_TAGS.has(child.tagName.toLowerCase())) return;
-      if (!child.id) child.id = `_layer_${i}`;
-
-      const label =
-        child.getAttribute('data-name')?.trim() ||
-        child.getAttribute('inkscape:label')?.trim() ||
-        (!child.id.startsWith('_layer_') ? child.id : null) ||
-        `Layer ${layers.length + 1}`;
-
-      layers.push({ id: child.id, label });
-    });
-
-    // Serialize the SVG element only (no XML declaration)
-    const content = new XMLSerializer().serializeToString(svg);
-    return { content, layers };
-  } catch {
-    return { content: raw, layers: [] };
-  }
-}
-
-function hexToHsl(hex: string): [number, number, number] {
-  const r = parseInt(hex.slice(1, 3), 16) / 255;
-  const g = parseInt(hex.slice(3, 5), 16) / 255;
-  const b = parseInt(hex.slice(5, 7), 16) / 255;
-  const max = Math.max(r, g, b), min = Math.min(r, g, b);
-  const l = (max + min) / 2;
-  if (max === min) return [0, 0, Math.round(l * 100)];
-  const d = max - min;
-  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-  let h = 0;
-  if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
-  else if (max === g) h = ((b - r) / d + 2) / 6;
-  else h = ((r - g) / d + 4) / 6;
-  return [Math.round(h * 360), Math.round(s * 100), Math.round(l * 100)];
-}
-function hslToHex(h: number, s: number, l: number): string {
-  s /= 100; l /= 100;
-  const k = (n: number) => (n + h / 30) % 12;
-  const a = s * Math.min(l, 1 - l);
-  const f = (n: number) => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
-  const hex2 = (x: number) => Math.round(x * 255).toString(16).padStart(2, '0');
-  return `#${hex2(f(0))}${hex2(f(8))}${hex2(f(4))}`;
-}
-
-// Returns the element's bounding box in SVG root coordinate space,
-// correctly accounting for the element's own transform attribute.
-function bboxInRootSpace(svgEl: SVGSVGElement, el: SVGGraphicsElement): DOMRect | null {
-  try {
-    const local = el.getBBox();
-    const m = svgEl.getScreenCTM()!.inverse().multiply(el.getScreenCTM()!);
-    const corners = [
-      [local.x,               local.y],
-      [local.x + local.width, local.y],
-      [local.x + local.width, local.y + local.height],
-      [local.x,               local.y + local.height],
-    ].map(([x, y]) => {
-      const pt = svgEl.createSVGPoint();
-      pt.x = x; pt.y = y;
-      return pt.matrixTransform(m);
-    });
-    const xs = corners.map((p) => p.x);
-    const ys = corners.map((p) => p.y);
-    const x = Math.min(...xs), y = Math.min(...ys);
-    return new DOMRect(x, y, Math.max(...xs) - x, Math.max(...ys) - y);
-  } catch {
-    return null;
-  }
-}
-
-// Return the direct <text id="..."> child of layerEl that contains the click target,
-// or null if the click didn't land inside any identified text child.
-function findClickedSubText(layerEl: Element, clickTarget: EventTarget | null): Element | null {
-  if (!(clickTarget instanceof Element)) return null;
-  for (const child of Array.from(layerEl.children)) {
-    if (child.tagName.toLowerCase() === 'text' && child.id &&
-        (child === clickTarget || child.contains(clickTarget))) {
-      return child;
-    }
-  }
-  return null;
-}
-
-function applyTranslateDelta(existing: string, dx: number, dy: number): string {
-  const m = existing.match(/^translate\(\s*([-\d.]+)(?:[,\s]+([-\d.]+))?\s*\)/);
-  if (m) {
-    const x = parseFloat(m[1]) + dx;
-    const y = parseFloat(m[2] ?? '0') + dy;
-    return `translate(${x}, ${y})${existing.slice(m[0].length)}`;
-  }
-  return `translate(${dx}, ${dy}) ${existing}`.trim();
-}
-
-// Arc path for curved text. The arc midpoint is always pinned at cy so the
-// centre character never moves as the curve slider changes.
-// Bowl (curve>0): chord at cy-h (endpoints above cy), arc bottom at cy.
-// Arch (curve<0): chord at cy+h (endpoints below cy), arc peak at cy.
-function computeArcPath(cx: number, cy: number, halfW: number, curve: number): string {
-  const h = halfW * Math.abs(curve) / 100;
-  const r = (halfW * halfW + h * h) / (2 * h);
-  const sweep = curve > 0 ? 1 : 0;
-  const chordY = curve > 0 ? cy - h : cy + h;
-  return `M ${cx - halfW} ${chordY} A ${r} ${r} 0 0 ${sweep} ${cx + halfW} ${chordY}`;
-}
-
-function normalizeColor(color: string): string {
-  const c = color.trim().toLowerCase();
-  if (!c || c === 'none' || c === 'transparent' || c === 'inherit' || c === 'currentcolor') return c;
-  if (c.startsWith('url(')) return c;
-  try {
-    const canvas = document.createElement('canvas');
-    canvas.width = canvas.height = 1;
-    const ctx = canvas.getContext('2d')!;
-    ctx.fillStyle = color;
-    return ctx.fillStyle; // '#rrggbb' or 'rgba(r, g, b, a)'
-  } catch {
-    return c;
-  }
-}
-
-const COLOR_PAINT_ATTRS = ['fill', 'stroke', 'stop-color', 'flood-color', 'lighting-color'];
-
-// Returns the gradient element that actually owns <stop> children, following xlink:href / href chains.
-function resolveGradient(id: string, doc: Document): Element | null {
-  const el = doc.getElementById(id);
-  if (!el) return null;
-  const href = el.getAttribute('xlink:href') ?? el.getAttribute('href') ?? '';
-  if (href.startsWith('#')) return doc.getElementById(href.slice(1)) ?? el;
-  return el;
-}
-
-// Collects IDs of all gradients (linearGradient / radialGradient) referenced by a layer via
-// direct fill/stroke attrs, inline styles, and CSS class rules.
-function collectLayerGradientIds(layerEl: Element, layerClasses: Set<string>, doc: Document): Set<string> {
-  const ids = new Set<string>();
-  const addRef = (val: string) => {
-    const m = val.trim().match(/^url\(#(.+)\)$/);
-    if (m) ids.add(m[1]);
-  };
-  [layerEl, ...Array.from(layerEl.querySelectorAll('*'))].forEach((el) => {
-    ['fill', 'stroke'].forEach((a) => { const v = el.getAttribute(a); if (v) addRef(v); });
-    const style = el.getAttribute('style') ?? '';
-    for (const m of style.matchAll(/(fill|stroke)\s*:\s*(url\(#[^)]+\))/gi)) addRef(m[2]);
-  });
-  doc.querySelectorAll('style').forEach((styleEl) => {
-    const css = styleEl.textContent ?? '';
-    for (const rm of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
-      const used = rm[1].split(',').some((s) => [...layerClasses].some((cls) => s.includes(`.${cls}`)));
-      if (!used) continue;
-      for (const dm of rm[2].matchAll(/(fill|stroke)\s*:\s*(url\(#[^)]+\))/gi)) addRef(dm[2]);
-    }
-  });
-  return ids;
-}
-
-function extractLayerColors(layerEl: Element, doc: Document): string[] {
-  const seen = new Set<string>();
-
-  const addColor = (raw: string) => {
-    const n = normalizeColor(raw);
-    if (n && n !== 'none' && n !== 'transparent' && n !== 'inherit' && n !== 'currentcolor' && !n.startsWith('url(')) {
-      seen.add(n);
-    }
-  };
-
-  // Direct attributes + inline styles on every element in the layer
-  [layerEl, ...Array.from(layerEl.querySelectorAll('*'))].forEach((el) => {
-    COLOR_PAINT_ATTRS.forEach((attr) => {
-      const v = el.getAttribute(attr);
-      if (v) addColor(v);
-    });
-    const style = el.getAttribute('style');
-    if (style) {
-      for (const m of style.matchAll(/(fill|stroke|stop-color|flood-color|lighting-color)\s*:\s*([^;{}]+)/gi)) {
-        addColor(m[2].trim());
-      }
-    }
-  });
-
-  // CSS class rules whose selectors reference a class used in the layer
-  const layerClasses = new Set<string>();
-  [layerEl, ...Array.from(layerEl.querySelectorAll('[class]'))].forEach((el) => {
-    el.getAttribute('class')?.split(/\s+/).forEach((c) => c && layerClasses.add(c));
-  });
-
-  doc.querySelectorAll('style').forEach((styleEl) => {
-    const css = styleEl.textContent ?? '';
-    for (const m of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
-      const selector = m[1];
-      const declarations = m[2];
-      const used = selector.split(',').some((s) => [...layerClasses].some((cls) => s.includes(`.${cls}`)));
-      if (!used) continue;
-      for (const dm of declarations.matchAll(/(fill|stroke|stop-color|flood-color|lighting-color)\s*:\s*([^;{}]+)/gi)) {
-        addColor(dm[2].trim());
-      }
-    }
-  });
-
-  // Extract stop colors from any gradients referenced by the layer
-  collectLayerGradientIds(layerEl, layerClasses, doc).forEach((id) => {
-    const source = resolveGradient(id, doc);
-    source?.querySelectorAll('stop').forEach((stop) => {
-      const sc = stop.getAttribute('stop-color');
-      if (sc) addColor(sc);
-    });
-  });
-
-  return [...seen];
-}
-
-function hashString(s: string): string {
-  let h = 5381;
-  for (let i = 0; i < s.length; i++) { h = (((h << 5) + h) ^ s.charCodeAt(i)) >>> 0; }
-  return h.toString(36);
-}
-
-function svgToBase64Png(svgString: string, width: number, height: number): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const blob = new Blob([svgString], { type: 'image/svg+xml' });
-    const url = URL.createObjectURL(blob);
-    const img = new Image();
-    img.onload = () => {
-      const canvas = document.createElement('canvas');
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext('2d');
-      if (!ctx) { URL.revokeObjectURL(url); reject(new Error('Canvas unavailable')); return; }
-      ctx.drawImage(img, 0, 0, width, height);
-      URL.revokeObjectURL(url);
-      resolve(canvas.toDataURL('image/png').replace('data:image/png;base64,', ''));
-    };
-    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('SVG render failed')); };
-    img.src = url;
-  });
-}
-
-// ─── Icons ───────────────────────────────────────────────────────────────────
-
-function EyeIcon({ className }: { className?: string }) {
-  return (
-    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
-      stroke="currentColor" strokeWidth={1.75} className={className}>
-      <path strokeLinecap="round" strokeLinejoin="round"
-        d="M2.036 12.322a1.012 1.012 0 0 1 0-.639C3.423 7.51 7.36 4.5 12 4.5c4.638 0 8.573 3.007 9.963 7.178.07.207.07.431 0 .639C20.577 16.49 16.64 19.5 12 19.5c-4.638 0-8.573-3.007-9.963-7.178Z" />
-      <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z" />
-    </svg>
-  );
-}
-
-function EyeSlashIcon({ className }: { className?: string }) {
-  return (
-    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
-      stroke="currentColor" strokeWidth={1.75} className={className}>
-      <path strokeLinecap="round" strokeLinejoin="round"
-        d="M3.98 8.223A10.477 10.477 0 0 0 1.934 12C3.226 16.338 7.244 19.5 12 19.5c.993 0 1.953-.138 2.863-.395M6.228 6.228A10.451 10.451 0 0 1 12 4.5c4.756 0 8.773 3.162 10.065 7.498a10.522 10.522 0 0 1-4.293 5.774M6.228 6.228 3 3m3.228 3.228 3.65 3.65m7.894 7.894L21 21m-3.228-3.228-3.65-3.65m0 0a3 3 0 1 0-4.243-4.243m4.242 4.242L9.88 9.88" />
-    </svg>
-  );
-}
-
-
-function GripIcon({ className }: { className?: string }) {
-  return (
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 8 14" fill="currentColor" className={className}>
-      <circle cx="1.5" cy="1.5"  r="1.5" />
-      <circle cx="6.5" cy="1.5"  r="1.5" />
-      <circle cx="1.5" cy="7"    r="1.5" />
-      <circle cx="6.5" cy="7"    r="1.5" />
-      <circle cx="1.5" cy="12.5" r="1.5" />
-      <circle cx="6.5" cy="12.5" r="1.5" />
-    </svg>
-  );
-}
-
-
-function SparklesIcon({ className }: { className?: string }) {
-  return (
-    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"
-      stroke="currentColor" strokeWidth={1.75} className={className}>
-      <path strokeLinecap="round" strokeLinejoin="round"
-        d="M9.813 15.904 9 18.75l-.813-2.846a4.5 4.5 0 0 0-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 0 0 3.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 0 0 3.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 0 0-3.09 3.09ZM18.259 8.715 18 9.75l-.259-1.035a3.375 3.375 0 0 0-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 0 0 2.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 0 0 2.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 0 0-2.456 2.456ZM16.894 20.567 16.5 21.75l-.394-1.183a2.25 2.25 0 0 0-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 0 0 1.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 0 0 1.423 1.423l1.183.394-1.183.394a2.25 2.25 0 0 0-1.423 1.423Z" />
-    </svg>
-  );
-}
-
-const TAXONOMY_COLOURS: Record<string, string> = {
-  text:       'text-amber-400',
-  background: 'text-zinc-400',
-  icon:       'text-sky-400',
-  graphic:    'text-sky-400',
-  decoration: 'text-purple-400',
-  shape:      'text-emerald-400',
-  image:      'text-rose-400',
-};
-
-type TaxonomyGroup = { type: string; elements: string[] }; // elements are human-readable descriptions
-
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export function SvgDropZone() {
@@ -360,8 +48,6 @@ export function SvgDropZone() {
   const [hiddenLayers, setHiddenLayers] = useState<Set<string>>(new Set());
   const [selectedLayer, setSelectedLayer]   = useState<string | null>(null);
   const [selectedLayers, setSelectedLayers] = useState<Set<string>>(new Set());
-  const [dragLayerId, setDragLayerId]   = useState<string | null>(null);
-  const [dropPosition, setDropPosition] = useState<{ targetId: string; before: boolean } | null>(null);
   const [isLoading, setIsLoading]       = useState(false);
   const [isDragging, setIsDragging]     = useState(false);
   const [, setDragCounter]   = useState(0);
@@ -383,6 +69,7 @@ export function SvgDropZone() {
   const [imageFonts, setImageFonts]           = useState<Array<{ font: string; reason: string }> | null>(null);
   const [imageFontsLoading, setImageFontsLoading] = useState(false);
   const [showImageFonts, setShowImageFonts]   = useState(false);
+  const [selectedImageFont, setSelectedImageFont] = useState<string | null>(null);
   const [taxonomy, setTaxonomy]           = useState<TaxonomyGroup[] | null>(null);
   const [taxonomyLoading, setTaxonomyLoading] = useState(false);
   const [taxonomyOpen, setTaxonomyOpen]       = useState(false);
@@ -399,19 +86,15 @@ export function SvgDropZone() {
     fontSize: number; fontFamily: string; fontWeight: number; color: string;
   } | null>(null);
   const [selectedSubElId, setSelectedSubElId] = useState<string | null>(null);
-  const dragMovedRef            = useRef(false);
   const aiCacheRef              = useRef<Map<string, string>>(new Map());
+  const dragMovedRef            = useRef(false);
   const colorBaselineRef        = useRef<string | null>(null);
+  const autoColorSelectedRef    = useRef(false);
   const undoStackRef             = useRef<Array<{ content: string; layers: SvgLayer[] }>>([]);
   const [undoCount, setUndoCount] = useState(0);
-  // Panel drag — use refs so onPointerMove/Up handlers always see current values
-  const panelDragIdRef          = useRef<string | null>(null);
-  const panelDropPositionRef    = useRef<{ targetId: string; before: boolean } | null>(null);
-  const panelReorderDoneRef     = useRef(false); // suppresses the post-drag click
-  const layerListRef            = useRef<HTMLDivElement>(null);
-  const fileInputRef            = useRef<HTMLInputElement>(null);
-  const svgCanvasRef            = useRef<HTMLDivElement>(null);
-  const curveStartCenterYRef    = useRef<number | null>(null);
+  const textEditSnappedRef = useRef(false);
+  const fileInputRef       = useRef<HTMLInputElement>(null);
+  const svgCanvasRef       = useRef<HTMLDivElement>(null);
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -550,46 +233,6 @@ export function SvgDropZone() {
     selectOne(null);
   }, [activeSvg, selectedLayer, selectOne]);
 
-  // mousedown on canvas: begin drag if the pointer is over any selected layer
-  const handleCanvasMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    if (!selectedLayers.size || !activeSvg?.layers.length) return;
-    const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
-    if (!svgEl) return;
-
-    const selectedEls = [...selectedLayers]
-      .map((id) => svgEl.querySelector(`#${CSS.escape(id)}`))
-      .filter(Boolean) as Element[];
-    if (!selectedEls.length) return;
-
-    // Only start drag if the pointer is inside one of the selected layer elements
-    let el = e.target as Element | null;
-    let hit = false;
-    while (el && el !== svgEl) {
-      if (selectedEls.includes(el)) { hit = true; break; }
-      el = el.parentElement;
-    }
-    if (!hit) return;
-
-    const pt = svgEl.createSVGPoint();
-    pt.x = e.clientX; pt.y = e.clientY;
-    const svgPt = pt.matrixTransform(svgEl.getScreenCTM()!.inverse());
-    dragMovedRef.current = false;
-
-    const baseTransforms: Record<string, string> = {};
-    [...selectedLayers].forEach((id) => {
-      const layerEl = svgEl.querySelector(`#${CSS.escape(id)}`);
-      if (layerEl) baseTransforms[id] = layerEl.getAttribute('transform') ?? '';
-    });
-
-    snapshotForUndo(activeSvg!.content, activeSvg!.layers);
-    setCanvasDrag({
-      layerIds: [...selectedLayers],
-      startClientX: e.clientX, startClientY: e.clientY,
-      startSvgX: svgPt.x,      startSvgY: svgPt.y,
-      baseTransforms,
-    });
-  }, [selectedLayers, activeSvg, snapshotForUndo]);
-
   const handleCanvasDblClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (!activeSvg?.layers.length) return;
     const canvasEl = svgCanvasRef.current;
@@ -640,7 +283,7 @@ export function SvgDropZone() {
     }
   }, [activeSvg, selectOne]);
 
-  // Global mouse listeners while a canvas drag is active
+  // Global mouse listeners while the background layer is being dragged
   useEffect(() => {
     if (!canvasDrag) return;
     const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
@@ -660,10 +303,7 @@ export function SvgDropZone() {
       canvasDrag.layerIds.forEach((id) => {
         const layerEl = svgEl.querySelector(`#${CSS.escape(id)}`);
         if (layerEl) {
-          layerEl.setAttribute(
-            'transform',
-            `translate(${dx}, ${dy}) ${canvasDrag.baseTransforms[id]}`.trim(),
-          );
+          layerEl.setAttribute('transform', `translate(${dx}, ${dy}) ${canvasDrag.baseTransforms[id]}`.trim());
         }
       });
       svgEl.querySelector('#__svghl__')?.remove();
@@ -779,6 +419,26 @@ export function SvgDropZone() {
       const el = doc.getElementById(id);
       el?.parentNode?.removeChild(el);
     });
+
+    // Embed @import rules for any Google Fonts actually present in the exported doc
+    if (extraFonts.length > 0) {
+      const interim = new XMLSerializer().serializeToString(doc.documentElement);
+      const usedFonts = extraFonts.filter((font) => interim.includes(font));
+      if (usedFonts.length > 0) {
+        const svg = doc.documentElement;
+        let defsEl = svg.querySelector('defs');
+        if (!defsEl) {
+          defsEl = doc.createElementNS('http://www.w3.org/2000/svg', 'defs');
+          svg.insertBefore(defsEl, svg.firstChild);
+        }
+        const styleEl = doc.createElementNS('http://www.w3.org/2000/svg', 'style');
+        styleEl.textContent = usedFonts
+          .map((font) => `@import url('https://fonts.googleapis.com/css2?family=${font.replace(/\s+/g, '+')}:wght@100;200;300;400;500;600;700;800;900&display=swap');`)
+          .join('\n');
+        defsEl.insertBefore(styleEl, defsEl.firstChild);
+      }
+    }
+
     const serialized = new XMLSerializer().serializeToString(doc.documentElement);
     const blob = new Blob([serialized], { type: 'image/svg+xml' });
     const url = URL.createObjectURL(blob);
@@ -787,7 +447,7 @@ export function SvgDropZone() {
     a.download = activeSvg.name.replace(/\.svg$/i, '') + '_export.svg';
     a.click();
     URL.revokeObjectURL(url);
-  }, [activeSvg, hiddenLayers]);
+  }, [activeSvg, hiddenLayers, extraFonts]);
 
   // ── Background layer detection ────────────────────────────────────────────
 
@@ -835,6 +495,47 @@ export function SvgDropZone() {
 
     return null;
   }, [activeSvg?.src]);
+
+  // mousedown on canvas: drag any selected non-background layer
+  const handleCanvasMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (!selectedLayers.size || !activeSvg?.layers.length) return;
+    const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
+    if (!svgEl) return;
+
+    const draggableIds = [...selectedLayers].filter((id) => id !== backgroundLayerId);
+    if (!draggableIds.length) return;
+
+    const draggableEls = draggableIds
+      .map((id) => svgEl.querySelector(`#${CSS.escape(id)}`))
+      .filter(Boolean) as Element[];
+
+    let el = e.target as Element | null;
+    let hit = false;
+    while (el && el !== (svgEl as Element)) {
+      if (draggableEls.includes(el)) { hit = true; break; }
+      el = el.parentElement;
+    }
+    if (!hit) return;
+
+    const pt = svgEl.createSVGPoint();
+    pt.x = e.clientX; pt.y = e.clientY;
+    const svgPt = pt.matrixTransform(svgEl.getScreenCTM()!.inverse());
+    dragMovedRef.current = false;
+
+    const baseTransforms: Record<string, string> = {};
+    draggableIds.forEach((id) => {
+      const layerEl = svgEl.querySelector(`#${CSS.escape(id)}`);
+      if (layerEl) baseTransforms[id] = layerEl.getAttribute('transform') ?? '';
+    });
+
+    snapshotForUndo(activeSvg.content, activeSvg.layers);
+    setCanvasDrag({
+      layerIds: draggableIds,
+      startClientX: e.clientX, startClientY: e.clientY,
+      startSvgX: svgPt.x,     startSvgY: svgPt.y,
+      baseTransforms,
+    });
+  }, [activeSvg, selectedLayers, backgroundLayerId, snapshotForUndo]);
 
   // ── Selected text layer properties ────────────────────────────────────────
 
@@ -907,6 +608,10 @@ export function SvgDropZone() {
 
   const updateTextLayer = useCallback((attrs: Partial<{ content: string; font: string; size: number; weight: number; color: string; curve: number; letterSpacing: number }>) => {
     if (!activeSvg) return;
+    if (!textEditSnappedRef.current) {
+      snapshotForUndo(activeSvg.content, activeSvg.layers);
+      textEditSnappedRef.current = true;
+    }
     const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
 
     if (selectedSubElId) {
@@ -1048,7 +753,7 @@ export function SvgDropZone() {
         : prev.layers;
       return { ...prev, content, layers };
     });
-  }, [selectedLayer, selectedSubElId, activeSvg]);
+  }, [selectedLayer, selectedSubElId, activeSvg, snapshotForUndo]);
 
   // ── Add text layer ─────────────────────────────────────────────────────────
 
@@ -1135,37 +840,32 @@ export function SvgDropZone() {
     setSelectedLayer(id);
   }, [activeSvg, textForm, snapshotForUndo]);
 
-  // ── Center layers to selected ─────────────────────────────────────────────
+  // ── Center all layers to canvas horizontal midpoint ──────────────────────
 
-  const centerLayersToSelected = useCallback(() => {
-    if (!activeSvg || !selectedLayer) return;
+  const centerLayersToCanvas = useCallback(() => {
+    if (!activeSvg) return;
     const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
     if (!svgEl) return;
     const screenCTM = svgEl.getScreenCTM();
     if (!screenCTM) return;
     const inv = screenCTM.inverse();
 
-    const toSvgPoint = (el: Element) => {
-      const r = el.getBoundingClientRect();
+    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+    const vb = (doc.documentElement.getAttribute('viewBox') ?? '').trim().split(/[\s,]+/).map(Number);
+    if (vb.length < 4) return;
+    const canvasCenterX = vb[0] + vb[2] / 2;
+
+    let changed = false;
+    activeSvg.layers.forEach(({ id }) => {
+      if (id === backgroundLayerId) return;
+      const liveEl = svgEl.getElementById(id);
+      if (!liveEl) return;
+      const r = liveEl.getBoundingClientRect();
       const pt = svgEl.createSVGPoint();
       pt.x = r.left + r.width / 2;
       pt.y = r.top + r.height / 2;
-      return pt.matrixTransform(inv);
-    };
-
-    const selectedLiveEl = svgEl.getElementById(selectedLayer);
-    if (!selectedLiveEl) return;
-    const target = toSvgPoint(selectedLiveEl);
-
-    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
-    let changed = false;
-
-    activeSvg.layers.forEach(({ id }) => {
-      if (id === selectedLayer || id === backgroundLayerId) return;
-      const liveEl = svgEl.getElementById(id);
-      if (!liveEl) return;
-      const center = toSvgPoint(liveEl);
-      const dx = target.x - center.x;
+      const center = pt.matrixTransform(inv);
+      const dx = canvasCenterX - center.x;
       if (Math.abs(dx) < 0.5) return;
       const docEl = doc.getElementById(id);
       if (!docEl) return;
@@ -1175,14 +875,14 @@ export function SvgDropZone() {
     });
 
     if (!changed) return;
+    snapshotForUndo(activeSvg.content, activeSvg.layers);
     const content = new XMLSerializer().serializeToString(doc.documentElement);
     setActiveSvg((prev) => (prev ? { ...prev, content } : null));
-  }, [activeSvg, selectedLayer]);
+  }, [activeSvg, backgroundLayerId, snapshotForUndo]);
 
   // ── Load + register a Google Font ─────────────────────────────────────────
 
-  const addGoogleFont = useCallback((fontName: string) => {
-    setExtraFonts((prev) => prev.includes(fontName) ? prev : [...prev, fontName]);
+  const loadGoogleFontLink = useCallback((fontName: string) => {
     const linkId = `gfont-${fontName.replace(/\s+/g, '-')}`;
     if (!document.getElementById(linkId)) {
       const link = document.createElement('link');
@@ -1191,6 +891,11 @@ export function SvgDropZone() {
       document.head.appendChild(link);
     }
   }, []);
+
+  const addGoogleFont = useCallback((fontName: string) => {
+    setExtraFonts((prev) => prev.includes(fontName) ? prev : [...prev, fontName]);
+    loadGoogleFontLink(fontName);
+  }, [loadGoogleFontLink]);
 
   // ── Image-level font suggestions ──────────────────────────────────────────
 
@@ -1233,15 +938,7 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
       const raw = data.content?.[0]?.text ?? '';
       const parsed = JSON.parse(raw) as { suggestions: Array<{ font: string; reason: string }> };
       const suggestions = parsed.suggestions ?? [];
-      suggestions.forEach(({ font }) => {
-        const linkId = `gfont-${font.replace(/\s+/g, '-')}`;
-        if (!document.getElementById(linkId)) {
-          const link = document.createElement('link');
-          link.id = linkId; link.rel = 'stylesheet';
-          link.href = `https://fonts.googleapis.com/css2?family=${font.replace(/\s+/g, '+')}:wght@400;700&display=swap`;
-          document.head.appendChild(link);
-        }
-      });
+      suggestions.forEach(({ font }) => loadGoogleFontLink(font));
       setImageFonts(suggestions);
     } catch (err) {
       console.error('Font suggestion failed:', err);
@@ -1249,7 +946,7 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
     } finally {
       setImageFontsLoading(false);
     }
-  }, [activeSvg]);
+  }, [activeSvg, loadGoogleFontLink]);
 
 
   // ── Taxonomy analysis ─────────────────────────────────────────────────────
@@ -1404,6 +1101,48 @@ Return ONLY valid JSON — no markdown, no explanation:
     const content = new XMLSerializer().serializeToString(doc.documentElement);
     setActiveSvg((prev) => (prev ? { ...prev, content } : null));
   }, [activeSvg, selectedLayer, colorReplaceFrom, colorReplaceTo]);
+
+  const onSelectFromColor = useCallback((color: string) => {
+    if (!activeSvg) return;
+    snapshotForUndo(activeSvg.content, activeSvg.layers);
+    setColorReplaceFrom(color);
+    colorBaselineRef.current = activeSvg.content;
+  }, [activeSvg, snapshotForUndo]);
+
+  const onClearFromColor = useCallback(() => {
+    setColorReplaceFrom('');
+    colorBaselineRef.current = null;
+  }, []);
+
+  const onCurvePointerDown = useCallback((): number | null => {
+    if (!selectedTextProps || !selectedLayer) return null;
+    const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
+    const el = svgEl?.getElementById(selectedLayer) as SVGGraphicsElement | null;
+    if (!el || !svgEl) return null;
+    const bbox = bboxInRootSpace(svgEl, el);
+    return bbox ? bbox.y + bbox.height / 2 : null;
+  }, [selectedTextProps, selectedLayer]);
+
+  const onCurvePointerUp = useCallback((startCenterY: number) => {
+    if (!selectedLayer || !activeSvg) return;
+    const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
+    const el = svgEl?.getElementById(selectedLayer) as SVGGraphicsElement | null;
+    if (!el || !svgEl) return;
+    const bbox = bboxInRootSpace(svgEl, el as SVGGraphicsElement);
+    if (!bbox) return;
+    const delta = startCenterY - (bbox.y + bbox.height / 2);
+    if (Math.abs(delta) < 0.5) return;
+    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+    const groupEl = doc.getElementById(selectedLayer);
+    if (!groupEl) return;
+    const cur = groupEl.getAttribute('transform') ?? '';
+    const m = cur.match(/translate\(\s*([^,\s)]+)[\s,]+([^,\s)]+)\s*\)/);
+    const tx = m ? parseFloat(m[1]) : 0;
+    const ty = m ? parseFloat(m[2]) : 0;
+    groupEl.setAttribute('transform', `translate(${tx}, ${ty + delta})`);
+    const content = new XMLSerializer().serializeToString(doc.documentElement);
+    setActiveSvg((prev) => prev ? { ...prev, content } : null);
+  }, [selectedLayer, activeSvg]);
 
   // ── AI layer actions ───────────────────────────────────────────────────────
 
@@ -1795,6 +1534,8 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
   useEffect(() => () => revokePrev(activeSvg), []);
 
   useEffect(() => {
+    textEditSnappedRef.current = false;
+    autoColorSelectedRef.current = false;
     setAiError(null); setFontSuggestion(null); setSuggestedFontName(null);
     setColorReplaceFrom(''); setSelectedSubElId(null);
     setShowRemoveTextInput(false); setRemoveTextQuery(''); setTextCheckResult(null);
@@ -1802,8 +1543,17 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
   }, [selectedLayer]);
 
   useEffect(() => {
+    if (autoColorSelectedRef.current || layerColors.length !== 1 || !activeSvg) return;
+    autoColorSelectedRef.current = true;
+    snapshotForUndo(activeSvg.content, activeSvg.layers);
+    setColorReplaceFrom(layerColors[0]);
+    colorBaselineRef.current = activeSvg.content;
+  }, [layerColors, activeSvg, snapshotForUndo]);
+
+  useEffect(() => {
     setImageFonts(null);
     setShowImageFonts(false);
+    setSelectedImageFont(null);
     setTaxonomy(null);
     setTaxonomyLoading(false);
     setTaxonomyOpen(false);
@@ -1811,7 +1561,11 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
   }, [activeSvg?.src]);
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') clear(); };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      clear();
+    };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [clear]);
@@ -1886,49 +1640,12 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     <div className="flex h-screen bg-zinc-950 overflow-hidden">
 
       {/* ── Left sidebar ─────────────────────────────────────────────── */}
-      <aside className="w-56 shrink-0 flex flex-col border-r border-zinc-800 bg-zinc-900/60">
-        <div className="px-3 py-2.5 border-b border-zinc-800">
-          <span className="text-[10px] font-semibold text-zinc-500 uppercase tracking-widest">
-            Samples
-          </span>
-        </div>
-        <div className="flex flex-col gap-1.5 p-2 overflow-y-auto">
-          {SAMPLES.map((sample) => {
-            const isActive = activeSample === sample.name;
-            return (
-              <button
-                key={sample.name}
-                onClick={() => openSample(sample)}
-                disabled={isLoading}
-                className={cn(
-                  'flex flex-col gap-1.5 rounded-lg p-1.5 text-left transition-all duration-100 outline-none',
-                  isActive ? 'bg-zinc-700/80 ring-1 ring-inset ring-zinc-500' : 'hover:bg-zinc-800/70',
-                  isLoading && 'opacity-50 cursor-wait'
-                )}
-              >
-                <div className="w-full aspect-square rounded-md overflow-hidden bg-zinc-950/60 relative">
-                  <div className="absolute inset-0 bg-zinc-800 animate-pulse rounded-md" />
-                  <img
-                    src={sample.src}
-                    alt={sample.label}
-                    className="relative w-full h-full object-contain p-1.5"
-                    onLoad={(e) => {
-                      const placeholder = (e.currentTarget.previousSibling as HTMLElement | null);
-                      if (placeholder) placeholder.style.display = 'none';
-                    }}
-                  />
-                </div>
-                <span className={cn(
-                  'text-[11px] truncate w-full leading-tight transition-colors',
-                  isActive ? 'text-zinc-200' : 'text-zinc-500'
-                )}>
-                  {sample.label}
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      </aside>
+      <SamplesSidebar
+        samples={SAMPLES}
+        activeSample={activeSample}
+        isLoading={isLoading}
+        onOpenSample={openSample}
+      />
 
       {/* ── Main area ────────────────────────────────────────────────── */}
       <div className="flex flex-col flex-1 min-w-0">
@@ -1947,19 +1664,17 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
               </div>
 
               <div className="flex items-center gap-1.5 shrink-0">
-                {/* Center layers — icon button */}
-                {selectedLayer && (
-                  <button
-                    onClick={centerLayersToSelected}
-                    title="Center all layers to selected"
-                    className="h-7 w-7 flex items-center justify-center rounded border border-zinc-700 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
-                  >
+                {/* Center layers to canvas midpoint */}
+                <button
+                  onClick={centerLayersToCanvas}
+                  title="Center all layers horizontally"
+                  className="h-7 w-7 flex items-center justify-center rounded border border-zinc-700 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
+                >
                     <svg xmlns="http://www.w3.org/2000/svg" className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
                       <circle cx="12" cy="12" r="3" />
                       <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v2m0 14v2M3 12h2m14 0h2" />
                     </svg>
-                  </button>
-                )}
+                </button>
 
                 {/* Undo */}
                 {undoCount > 0 && (
@@ -2018,18 +1733,41 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                 )}
                 {imageFonts && imageFonts.length > 0 && (
                   <div className="flex flex-wrap gap-2">
-                    {imageFonts.map(({ font }) => (
-                      <div key={font} className="flex items-center gap-1.5 rounded bg-zinc-800 px-2 py-1">
-                        <span className="text-xs text-zinc-200" style={{ fontFamily: font }}>{font}</span>
-                        <button
-                          onClick={() => addGoogleFont(font)}
-                          title="Add to font list"
-                          className="text-zinc-500 hover:text-zinc-200 transition-colors text-xs ml-1"
+                    {imageFonts.map(({ font, reason }) => {
+                      const isSelected = selectedImageFont === font;
+                      return (
+                        <div
+                          key={font}
+                          title={reason}
+                          onClick={() => {
+                            const next = isSelected ? null : font;
+                            setSelectedImageFont(next);
+                            if (next) {
+                              if (selectedTextProps) updateTextLayer({ font: next });
+                              else setTextForm((f) => ({ ...f, font: next }));
+                            }
+                          }}
+                          className={cn(
+                            'flex items-center gap-1.5 rounded px-2 py-1 cursor-pointer transition-colors',
+                            isSelected
+                              ? 'bg-indigo-600/30 ring-1 ring-indigo-500 text-indigo-200'
+                              : 'bg-zinc-800 hover:bg-zinc-700/80 text-zinc-200'
+                          )}
                         >
-                          +
-                        </button>
-                      </div>
-                    ))}
+                          <span className="text-xs" style={{ fontFamily: font }}>{font}</span>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); addGoogleFont(font); }}
+                            title="Add to font list"
+                            className={cn(
+                              'transition-colors text-xs ml-1',
+                              isSelected ? 'text-indigo-400 hover:text-indigo-200' : 'text-zinc-500 hover:text-zinc-200'
+                            )}
+                          >
+                            +
+                          </button>
+                        </div>
+                      );
+                    })}
                   </div>
                 )}
               </div>
@@ -2069,7 +1807,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                       }</style>
                     )}
                     {selectedLayer && (
-                      <style>{[...selectedLayers].map((id) => `.svg-canvas #${CSS.escape(id)}{cursor:grab}`).join('')}</style>
+                      <style>{[...selectedLayers].filter((id) => id !== backgroundLayerId).map((id) => `.svg-canvas #${CSS.escape(id)}{cursor:grab}`).join('')}</style>
                     )}
                     <div
                       className="svg-canvas"
@@ -2119,647 +1857,40 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
 
               {/* ── Layers panel ─────────────────────────────────────── */}
               {activeSvg && (
-                <aside className="w-52 shrink-0 flex flex-col border-l border-zinc-800 bg-zinc-900/60">
-
-                  {/* Suggest fonts — collapsible, above layers heading */}
-                  <div className="border-b border-zinc-800 shrink-0">
-                    <button
-                      onClick={() => setSuggestFontsOpen((o) => !o)}
-                      className="w-full px-3 py-1.5 flex items-center gap-1.5 hover:bg-zinc-800/40 transition-colors"
-                    >
-                      <SparklesIcon className="size-3 text-indigo-400" />
-                      <span className="text-[10px] font-semibold text-zinc-400 uppercase tracking-widest flex-1 text-left">
-                        Image Actions
-                      </span>
-                      <span className="text-zinc-600 text-[10px]">{suggestFontsOpen ? '▲' : '▼'}</span>
-                    </button>
-                    {suggestFontsOpen && (
-                      <div className="px-2 pb-2">
-                        <button
-                          onClick={suggestFontsForImage}
-                          disabled={imageFonts !== null || imageFontsLoading}
-                          className={cn(
-                            'w-full flex items-center justify-center gap-1.5 rounded text-xs py-1.5 transition-colors',
-                            imageFonts !== null
-                              ? 'bg-zinc-800/30 text-zinc-600 cursor-not-allowed'
-                              : imageFontsLoading
-                              ? 'bg-zinc-800/30 text-zinc-500 cursor-wait'
-                              : 'bg-zinc-800/60 hover:bg-zinc-700/60 text-zinc-300'
-                          )}
-                        >
-                          {imageFontsLoading && <div className="size-3 rounded-full border border-zinc-600 border-t-zinc-400 animate-spin shrink-0" />}
-                          {imageFontsLoading ? 'Analysing…' : imageFonts !== null ? 'Fonts suggested' : 'Suggest fonts'}
-                        </button>
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="px-3 py-2.5 border-b border-zinc-800 flex items-center justify-between">
-                    <span className="text-[10px] font-semibold text-zinc-500 uppercase tracking-widest">
-                      Layers
-                    </span>
-                    <span className="text-[10px] text-zinc-600">
-                      {activeSvg.layers.length}
-                    </span>
-                  </div>
-
-                  {/* Text layer form — add when nothing selected, edit when a text layer is selected */}
-                  <div className="border-b border-zinc-800">
-                    <button
-                      onClick={() => setTextFormOpen((o) => !o)}
-                      className="w-full px-3 py-1.5 flex items-center gap-1.5 hover:bg-zinc-800/40 transition-colors"
-                    >
-                      <span className="text-[10px] font-semibold text-zinc-500 uppercase tracking-widest flex-1 text-left">
-                        Text
-                      </span>
-                      <span className="text-zinc-600 text-[10px]">{textFormOpen ? '▲' : '▼'}</span>
-                    </button>
-                  {textFormOpen && <div className="px-2 pb-2 flex flex-col gap-1.5">
-                    <input
-                      type="text"
-                      value={selectedTextProps ? selectedTextProps.content : textForm.content}
-                      onChange={(e) =>
-                        selectedTextProps
-                          ? updateTextLayer({ content: e.target.value })
-                          : setTextForm((f) => ({ ...f, content: e.target.value }))
-                      }
-                      placeholder="Text content"
-                      className="w-full rounded bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs px-2 py-1 outline-none focus:border-zinc-500 placeholder:text-zinc-600"
-                    />
-                    <select
-                      value={selectedTextProps ? selectedTextProps.font : textForm.font}
-                      onChange={(e) =>
-                        selectedTextProps
-                          ? updateTextLayer({ font: e.target.value })
-                          : setTextForm((f) => ({ ...f, font: e.target.value }))
-                      }
-                      className="w-full rounded bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs px-2 py-1 outline-none focus:border-zinc-500"
-                    >
-                      {['Arial','Helvetica','Georgia','Times New Roman','Courier New','Verdana','Impact','Trebuchet MS'].map((f) => (
-                        <option key={f} value={f} style={{ fontFamily: f }}>{f}</option>
-                      ))}
-                      {extraFonts.map((f) => (
-                        <option key={f} value={f} style={{ fontFamily: f }}>{f} ✦</option>
-                      ))}
-                    </select>
-                    <div className="flex gap-1.5">
-                      <input
-                        type="number"
-                        min={1}
-                        max={999}
-                        value={selectedTextProps ? selectedTextProps.size : textForm.size}
-                        onChange={(e) =>
-                          selectedTextProps
-                            ? updateTextLayer({ size: Math.max(1, Number(e.target.value)) })
-                            : setTextForm((f) => ({ ...f, size: Math.max(1, Number(e.target.value)) }))
-                        }
-                        className="w-full rounded bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs px-2 py-1 outline-none focus:border-zinc-500"
-                        title="Font size"
-                      />
-                      <select
-                        value={selectedTextProps ? selectedTextProps.weight : textForm.weight}
-                        onChange={(e) =>
-                          selectedTextProps
-                            ? updateTextLayer({ weight: Number(e.target.value) })
-                            : setTextForm((f) => ({ ...f, weight: Number(e.target.value) }))
-                        }
-                        className="w-16 shrink-0 rounded bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs px-1 py-1 outline-none focus:border-zinc-500"
-                        title="Font weight"
-                      >
-                        {[100,200,300,400,500,600,700,800,900].map((w) => (
-                          <option key={w} value={w}>{w}</option>
-                        ))}
-                      </select>
-                    </div>
-                    <div className="flex gap-1.5 items-center">
-                      <input
-                        type="color"
-                        value={selectedTextProps ? selectedTextProps.color : textForm.color}
-                        onChange={(e) =>
-                          selectedTextProps
-                            ? updateTextLayer({ color: e.target.value })
-                            : setTextForm((f) => ({ ...f, color: e.target.value }))
-                        }
-                        className="h-6 w-6 shrink-0 rounded border border-zinc-700 bg-zinc-800 cursor-pointer p-0.5"
-                        title="Text color"
-                      />
-                      {'EyeDropper' in window && (
-                        <button
-                          title="Pick color from canvas"
-                          onClick={async () => {
-                            try {
-                              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                              const dropper = new (window as any).EyeDropper();
-                              const result = await dropper.open() as { sRGBHex: string };
-                              selectedTextProps
-                                ? updateTextLayer({ color: result.sRGBHex })
-                                : setTextForm((f) => ({ ...f, color: result.sRGBHex }));
-                            } catch { /* cancelled */ }
-                          }}
-                          className="h-6 w-6 shrink-0 flex items-center justify-center rounded border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 transition-colors"
-                        >
-                          <svg xmlns="http://www.w3.org/2000/svg" className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
-                            <path strokeLinecap="round" strokeLinejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 1 1 3.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-                          </svg>
-                        </button>
-                      )}
-                      <span className="text-[10px] text-zinc-500 shrink-0">Space</span>
-                      <select
-                        value={selectedTextProps ? selectedTextProps.letterSpacing : textForm.letterSpacing}
-                        onChange={(e) => {
-                          const v = Number(e.target.value);
-                          selectedTextProps
-                            ? updateTextLayer({ letterSpacing: v })
-                            : setTextForm((f) => ({ ...f, letterSpacing: v }));
-                        }}
-                        className="flex-1 min-w-0 rounded bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs px-2 py-1 outline-none focus:border-zinc-500"
-                      >
-                        {([-0.1, -0.05, 0, 0.05, 0.1, 0.15, 0.2, 0.3] as const).map((v) => (
-                          <option key={v} value={v}>
-                            {v === 0 ? 'Normal' : v < 0 ? `Tight (${v}em)` : `+${v}em`}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-
-                    {/* Curve slider */}
-                    <div className="flex items-center gap-1.5 min-w-0">
-                      <span className="text-[10px] text-zinc-500 w-8 shrink-0">Curve</span>
-                      <input
-                        type="range"
-                        min={-100}
-                        max={100}
-                        step={5}
-                        value={selectedTextProps ? (selectedTextProps.curve ?? 0) : textForm.curve}
-                        onChange={(e) => {
-                          const v = Number(e.target.value);
-                          selectedTextProps
-                            ? updateTextLayer({ curve: v })
-                            : setTextForm((f) => ({ ...f, curve: v }));
-                        }}
-                        onPointerDown={() => {
-                          if (!selectedTextProps || !selectedLayer) return;
-                          const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
-                          const el = svgEl?.getElementById(selectedLayer) as SVGGraphicsElement | null;
-                          if (el && svgEl) {
-                            const bbox = bboxInRootSpace(svgEl, el);
-                            curveStartCenterYRef.current = bbox ? bbox.y + bbox.height / 2 : null;
-                          }
-                        }}
-                        onPointerUp={() => {
-                          if (curveStartCenterYRef.current === null || !selectedLayer || !activeSvg) return;
-                          const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
-                          const el = svgEl?.getElementById(selectedLayer) as SVGGraphicsElement | null;
-                          if (!el || !svgEl) { curveStartCenterYRef.current = null; return; }
-                          const bbox = bboxInRootSpace(svgEl, el as SVGGraphicsElement);
-                          if (!bbox) { curveStartCenterYRef.current = null; return; }
-                          const delta = curveStartCenterYRef.current - (bbox.y + bbox.height / 2);
-                          curveStartCenterYRef.current = null;
-                          if (Math.abs(delta) < 0.5) return;
-                          const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
-                          const groupEl = doc.getElementById(selectedLayer);
-                          if (!groupEl) return;
-                          const cur = groupEl.getAttribute('transform') ?? '';
-                          const m = cur.match(/translate\(\s*([^,\s)]+)[\s,]+([^,\s)]+)\s*\)/);
-                          const tx = m ? parseFloat(m[1]) : 0;
-                          const ty = m ? parseFloat(m[2]) : 0;
-                          groupEl.setAttribute('transform', `translate(${tx}, ${ty + delta})`);
-                          const content = new XMLSerializer().serializeToString(doc.documentElement);
-                          setActiveSvg((prev) => prev ? { ...prev, content } : null);
-                        }}
-                        className="flex-1 min-w-0 accent-zinc-400"
-                      />
-                      <span className="text-[10px] text-zinc-500 w-7 text-right tabular-nums shrink-0">
-                        {selectedTextProps ? (selectedTextProps.curve ?? 0) : textForm.curve}
-                      </span>
-                    </div>
-                    {!selectedTextProps && (
-                      <button
-                        onClick={addTextLayer}
-                        disabled={!textForm.content.trim()}
-                        className={cn(
-                          'w-full rounded text-xs font-medium py-1.5 transition-colors',
-                          textForm.content.trim()
-                            ? 'bg-zinc-700 hover:bg-zinc-600 text-zinc-200'
-                            : 'bg-zinc-800/40 text-zinc-600 cursor-not-allowed'
-                        )}
-                      >
-                        Add layer
-                      </button>
-                    )}
-                  </div>}
-                  </div>
-
-                  {/* Layer Actions */}
-                  <div className="border-b border-zinc-800 shrink-0">
-                    <button
-                      onClick={() => setAiActionsOpen((o) => !o)}
-                      className="w-full px-3 py-1.5 flex items-center gap-1.5 hover:bg-zinc-800/40 transition-colors"
-                    >
-                      <SparklesIcon className="size-3 text-indigo-400" />
-                      <span className="text-[10px] font-semibold text-zinc-400 uppercase tracking-widest flex-1 text-left">
-                        Layer Actions
-                      </span>
-                      <span className="text-zinc-600 text-[10px]">{aiActionsOpen ? '▲' : '▼'}</span>
-                    </button>
-                    {aiActionsOpen && <div className="px-2 pb-2 flex flex-col gap-1.5">
-                      <select
-                        value=""
-                        disabled={aiLoading || selectedLayer === backgroundLayerId}
-                        onChange={(e) => {
-                          const v = e.target.value;
-                          if (v === 'strip-text') runAiLayerAction('strip-text');
-                          else if (v === 'suggest-font') runAiLayerAction('suggest-font');
-                          else if (v === 'remove-specific-text') { setShowRemoveTextInput(true); setRemoveTextQuery(''); }
-                          else if (v === 'check-text') { setTextCheckResult(null); runAiLayerAction('check-text'); }
-                        }}
-                        className="w-full rounded bg-zinc-800 border border-zinc-700 text-zinc-300 text-xs px-2 py-1.5 outline-none focus:border-zinc-500 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                        <option value="" disabled hidden>
-                          {aiLoading ? 'Processing…' : selectedLayer === backgroundLayerId ? 'Not available for canvas layer' : 'Choose an action…'}
-                        </option>
-                        {selectedLayer && <option value="strip-text">Strip text — layer (AI)</option>}
-                        {selectedLayer && <option value="suggest-font">Suggest font — layer (AI)</option>}
-                        {selectedLayer && <option value="remove-specific-text">Remove specific text — layer (AI)</option>}
-                        {selectedLayer && <option value="check-text">Check text — layer (AI)</option>}
-                      </select>
-
-                      {showRemoveTextInput && selectedLayer && (
-                        <div className="flex gap-1">
-                          <input
-                            type="text"
-                            placeholder="Text to remove…"
-                            value={removeTextQuery}
-                            onChange={(e) => setRemoveTextQuery(e.target.value)}
-                            onKeyDown={(e) => {
-                              if (e.key === 'Enter' && removeTextQuery.trim() && !aiLoading)
-                                runAiLayerAction('remove-specific-text', removeTextQuery.trim());
-                            }}
-                            disabled={aiLoading}
-                            autoFocus
-                            className="flex-1 min-w-0 rounded bg-zinc-800 border border-zinc-700 text-zinc-300 text-xs px-2 py-1 outline-none focus:border-zinc-500 disabled:opacity-50"
-                          />
-                          <button
-                            onClick={() => {
-                              if (removeTextQuery.trim() && !aiLoading)
-                                runAiLayerAction('remove-specific-text', removeTextQuery.trim());
-                            }}
-                            disabled={!removeTextQuery.trim() || aiLoading}
-                            className="shrink-0 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-xs px-2 py-1 transition-colors"
-                          >
-                            Remove
-                          </button>
-                        </div>
-                      )}
-
-                      {textCheckResult && (
-                        <div className="rounded bg-zinc-800/60 border border-zinc-700 px-2 py-1.5 flex flex-col gap-0.5">
-                          {textCheckResult.heading ? (
-                            <p className="text-[11px] font-semibold text-zinc-200 leading-snug">{textCheckResult.heading}</p>
-                          ) : (
-                            <p className="text-[10px] text-zinc-500 italic leading-snug">No heading detected</p>
-                          )}
-                          {textCheckResult.subheading ? (
-                            <p className="text-[10px] text-zinc-400 leading-snug">{textCheckResult.subheading}</p>
-                          ) : null}
-                        </div>
-                      )}
-
-                      {aiError && (
-                        <p className="text-[10px] text-red-400 px-1 break-all leading-tight">{aiError}</p>
-                      )}
-                      {fontSuggestion && (
-                        <div className="flex flex-col gap-1">
-                          <p className="text-[10px] text-zinc-300 px-1 leading-snug">{fontSuggestion}</p>
-                          {suggestedFontName && (
-                            <button
-                              onClick={() => {
-                                if (selectedTextProps) {
-                                  updateTextLayer({ font: suggestedFontName });
-                                } else {
-                                  setTextForm((f) => ({ ...f, font: suggestedFontName! }));
-                                }
-                              }}
-                              className="w-full rounded text-xs font-medium py-1 text-zinc-300 bg-zinc-700/60 hover:bg-zinc-600/60 transition-colors"
-                            >
-                              Use "{suggestedFontName}"
-                            </button>
-                          )}
-                        </div>
-                      )}
-                    </div>}
-                  </div>
-
-                  {/* Color Replace — visible for non-text layers only */}
-                  {selectedLayer && !selectedTextProps && (
-                    <div className="border-b border-zinc-800 shrink-0">
-                      <button
-                        onClick={() => setColorReplaceOpen((o) => !o)}
-                        className="w-full px-3 py-1.5 flex items-center gap-1.5 hover:bg-zinc-800/40 transition-colors"
-                      >
-                        <span className="text-[10px] font-semibold text-zinc-500 uppercase tracking-widest flex-1 text-left">
-                          Color Replace
-                        </span>
-                        <span className="text-zinc-600 text-[10px]">{colorReplaceOpen ? '▲' : '▼'}</span>
-                      </button>
-                    {colorReplaceOpen && <div className="px-2 pb-2 flex flex-col gap-1.5">
-
-                      {/* From — row of swatches extracted from the layer */}
-                      <div className="flex flex-col gap-1">
-                        <div className="flex items-center justify-between px-1">
-                          <span className="text-[10px] text-zinc-500">From</span>
-                          {colorReplaceFrom && (
-                            <button
-                              onClick={() => { setColorReplaceFrom(''); colorBaselineRef.current = null; }}
-                              title="Clear selection"
-                              className="text-[10px] text-zinc-600 hover:text-zinc-400 transition-colors leading-none"
-                            >✕</button>
-                          )}
-                        </div>
-                        <div className="flex flex-wrap gap-1.5 px-1 items-start">
-                          {layerColors.length > 0 ? layerColors.map((color) => (
-                            <button
-                              key={color}
-                              title={color}
-                              onClick={() => { snapshotForUndo(activeSvg!.content, activeSvg!.layers); setColorReplaceFrom(color); colorBaselineRef.current = activeSvg?.content ?? null; }}
-                              style={{
-                                backgroundColor: color,
-                                width: '2rem',
-                                height: '2rem',
-                                flexShrink: 0,
-                                borderRadius: '3px',
-                                border: colorReplaceFrom === color ? '2px solid #60a5fa' : '2px solid #52525b',
-                                cursor: 'pointer',
-                                transition: 'transform 0.1s, border-color 0.1s',
-                                transform: colorReplaceFrom === color ? 'scale(1.1)' : 'scale(1)',
-                              }}
-                            />
-                          )) : (
-                            <span className="text-[9px] text-zinc-600">no colors detected</span>
-                          )}
-                        </div>
-                      </div>
-
-                      {/* To — colour picker only */}
-                      <div className="flex items-center gap-2 px-1">
-                        <span className="text-[10px] text-zinc-500 shrink-0">
-                          To {!colorReplaceFrom && <span className="text-zinc-600">(pick From first)</span>}
-                        </span>
-                        <input
-                          type="color"
-                          value={colorReplaceTo}
-                          disabled={!colorReplaceFrom}
-                          onChange={(e) => {
-                            const c = e.target.value;
-                            setColorReplaceTo(c);
-                            replaceColorInLayer(c);
-                          }}
-                          onBlur={() => {
-                            if (colorReplaceFrom && !layerColors.includes(colorReplaceFrom)) {
-                              setColorReplaceFrom('');
-                              colorBaselineRef.current = null;
-                            }
-                          }}
-                          title="Pick replacement colour"
-                          className="h-8 w-12 rounded cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                          style={{ padding: '1px 2px', background: 'transparent', border: '2px solid #52525b' }}
-                        />
-                      </div>
-                    </div>}
-                    </div>
-                  )}
-
-                  <div
-                    ref={layerListRef}
-                    className="flex flex-col overflow-y-auto py-1 flex-1"
-                    onPointerMove={(e) => {
-                      if (!panelDragIdRef.current) return;
-                      // Reveal the dragged row as faded (state update, fine to call repeatedly)
-                      setDragLayerId(panelDragIdRef.current);
-                      // Hit-test the element visually under the pointer
-                      const under = document.elementFromPoint(e.clientX, e.clientY);
-                      const row   = under?.closest('[data-layer-id]') as HTMLElement | null;
-                      if (!row || row.dataset.layerId === panelDragIdRef.current) {
-                        panelDropPositionRef.current = null;
-                        setDropPosition(null);
-                        return;
-                      }
-                      const rect = row.getBoundingClientRect();
-                      const pos  = { targetId: row.dataset.layerId!, before: e.clientY < rect.top + rect.height / 2 };
-                      panelDropPositionRef.current = pos;
-                      setDropPosition(pos);
-                    }}
-                    onPointerUp={(e) => {
-                      if (!panelDragIdRef.current) return;
-                      layerListRef.current?.releasePointerCapture(e.pointerId);
-                      const pos = panelDropPositionRef.current;
-                      if (pos) {
-                        reorderLayers(panelDragIdRef.current, pos.targetId, pos.before);
-                        panelReorderDoneRef.current = true;
-                      }
-                      panelDragIdRef.current       = null;
-                      panelDropPositionRef.current = null;
-                      setDragLayerId(null);
-                      setDropPosition(null);
-                    }}
-                    onPointerCancel={() => {
-                      panelDragIdRef.current       = null;
-                      panelDropPositionRef.current = null;
-                      setDragLayerId(null);
-                      setDropPosition(null);
-                    }}
-                  >
-                    {activeSvg.layers.length === 0 ? (
-                      <p className="text-xs text-zinc-600 px-3 py-4 text-center">
-                        No named layers found
-                      </p>
-                    ) : (
-                      // Reverse: last SVG element is visually on top
-                      [...activeSvg.layers].reverse().map((layer) => {
-                        const hidden     = hiddenLayers.has(layer.id);
-                        const isSelected = selectedLayers.has(layer.id);
-                        const isDragged  = dragLayerId === layer.id;
-                        const isCanvas   = layer.id === backgroundLayerId;
-                        const dropBefore = dropPosition?.targetId === layer.id && dropPosition.before;
-                        const dropAfter  = dropPosition?.targetId === layer.id && !dropPosition.before;
-                        return (
-                          <React.Fragment key={layer.id}>
-                          <div
-                            data-layer-id={layer.id}
-                            onPointerDown={(e) => {
-                              if (e.button !== 0) return;
-                              if (e.shiftKey) {
-                                setSelectedLayers((prev) => {
-                                  const next = new Set(prev);
-                                  if (next.has(layer.id)) next.delete(layer.id); else next.add(layer.id);
-                                  return next;
-                                });
-                                setSelectedLayer(layer.id);
-                              } else {
-                                selectOne(layer.id);
-                              }
-                            }}
-                            onClick={() => {
-                              if (panelReorderDoneRef.current) {
-                                panelReorderDoneRef.current = false;
-                              }
-                            }}
-                            className={cn(
-                              'relative group flex items-center gap-2 px-2 py-1.5 mx-1 rounded-md transition-colors select-none',
-                              isSelected ? 'bg-zinc-700/60 ring-1 ring-inset ring-zinc-600' : 'hover:bg-zinc-800/60',
-                              hidden && 'opacity-40',
-                              isDragged && 'opacity-25',
-                            )}
-                          >
-                            {/* Drop-position indicator lines */}
-                            {dropBefore && (
-                              <div className="pointer-events-none absolute top-0 left-1 right-1 h-0.5 -translate-y-1/2 rounded-full bg-blue-500 z-10" />
-                            )}
-                            {dropAfter && (
-                              <div className="pointer-events-none absolute bottom-0 left-1 right-1 h-0.5 translate-y-1/2 rounded-full bg-blue-500 z-10" />
-                            )}
-
-                            {/* Drag handle */}
-                            <span
-                              onPointerDown={(e) => {
-                                if (e.button !== 0) return;
-                                e.stopPropagation();
-                                selectOne(layer.id);
-                                layerListRef.current?.setPointerCapture(e.pointerId);
-                                panelDragIdRef.current       = layer.id;
-                                panelDropPositionRef.current = null;
-                              }}
-                              className="shrink-0 cursor-grab opacity-0 group-hover:opacity-100 text-zinc-500 hover:text-zinc-300 transition-opacity"
-                            >
-                              <GripIcon className="size-2" />
-                            </span>
-
-                            <button
-                              onPointerDown={(e) => e.stopPropagation()}
-                              onClick={(e) => { e.stopPropagation(); toggleLayer(layer.id); }}
-                              title={hidden ? 'Show layer' : 'Hide layer'}
-                              className="shrink-0 text-zinc-500 hover:text-zinc-200 transition-colors"
-                            >
-                              {hidden
-                                ? <EyeSlashIcon className="size-3.5" />
-                                : <EyeIcon className="size-3.5" />
-                              }
-                            </button>
-                            <span className="text-xs text-zinc-300 truncate leading-snug flex-1 min-w-0">
-                              {isCanvas ? 'Canvas' : layer.label}
-                            </span>
-                            {isCanvas && (
-                              <span className="shrink-0 text-[9px] font-semibold uppercase tracking-wider text-zinc-500 bg-zinc-800 px-1 py-0.5 rounded">
-                                bg
-                              </span>
-                            )}
-                          </div>
-                          {/* Sub-layer rows for multi-text groups */}
-                          {subLayerMap.get(layer.id)?.map((sub) => {
-                            const isSubSelected = selectedSubElId === sub.id;
-                            return (
-                              <button
-                                key={sub.id}
-                                onPointerDown={(e) => e.stopPropagation()}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  selectOne(layer.id);
-                                  setSelectedSubElId(sub.id);
-                                }}
-                                className={cn(
-                                  'w-full flex items-center gap-1.5 pl-8 pr-2 py-1 rounded-md text-left transition-colors',
-                                  isSubSelected
-                                    ? 'bg-amber-500/15 ring-1 ring-inset ring-amber-500/40'
-                                    : 'hover:bg-zinc-800/60'
-                                )}
-                              >
-                                <span className="shrink-0 size-1.5 rounded-full bg-zinc-600" />
-                                <span className={cn(
-                                  'text-[11px] truncate leading-snug flex-1 min-w-0',
-                                  isSubSelected ? 'text-amber-300' : 'text-zinc-500'
-                                )}>
-                                  {sub.label}
-                                </span>
-                              </button>
-                            );
-                          })}
-                          </React.Fragment>
-                        );
-                      })
-                    )}
-                  </div>
-
-                  {/* Taxonomy */}
-                  <div className="border-t border-zinc-800 shrink-0">
-                    <button
-                      onClick={() => setTaxonomyOpen((o) => !o)}
-                      className="w-full px-3 py-1.5 flex items-center gap-1.5 hover:bg-zinc-800/40 transition-colors"
-                    >
-                      <span className="text-[10px] font-semibold text-zinc-500 uppercase tracking-widest flex-1 text-left">Taxonomy</span>
-                      {taxonomyLoading
-                        ? <div className="size-2.5 rounded-full border border-zinc-600 border-t-zinc-400 animate-spin" />
-                        : <span className="text-zinc-600 text-[10px]">{taxonomyOpen ? '▲' : '▼'}</span>
-                      }
-                    </button>
-                    {taxonomyOpen && (
-                      <div className="px-2 pb-2 flex flex-col gap-0.5 max-h-44 overflow-y-auto">
-                        {taxonomyLoading && (
-                          <div className="flex items-center gap-2 py-1">
-                            <div className="size-3 rounded-full border border-zinc-600 border-t-zinc-400 animate-spin shrink-0" />
-                            <span className="text-[10px] text-zinc-500">Analysing…</span>
-                          </div>
-                        )}
-                        {!taxonomyLoading && taxonomy === null && (
-                          <button
-                            onClick={runTaxonomyAnalysis}
-                            className="text-left text-[10px] text-zinc-500 hover:text-zinc-300 py-1 transition-colors"
-                          >
-                            Analyse structure →
-                          </button>
-                        )}
-                        {taxonomy && taxonomy.length === 0 && (
-                          <p className="text-[10px] text-zinc-600 italic py-1">Could not analyse structure</p>
-                        )}
-                        {taxonomy && taxonomy.length > 0 && taxonomy.map((group, i) => (
-                          <div key={`${group.type}-${i}`} className="rounded px-1.5 py-1">
-                            <span className={cn(
-                              'text-[9px] font-bold uppercase tracking-wider',
-                              TAXONOMY_COLOURS[group.type.toLowerCase()] ?? 'text-zinc-400'
-                            )}>
-                              {group.type}
-                            </span>
-                            <div className="flex flex-col gap-0.5 mt-0.5">
-                              {group.elements.map((desc, j) => (
-                                <span key={j} className="text-[10px] text-zinc-400 leading-snug">
-                                  {desc}
-                                </span>
-                              ))}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Revert */}
-                  <div className="px-2 py-2 border-t border-zinc-800 shrink-0">
-                    <button
-                      onClick={resetSvg}
-                      disabled={!isDirty}
-                      className={cn(
-                        'w-full flex items-center justify-center gap-1.5 rounded-md text-xs font-medium py-1.5 transition-colors',
-                        isDirty
-                          ? 'bg-zinc-800/60 hover:bg-red-900/40 text-zinc-400 hover:text-red-300 cursor-pointer'
-                          : 'bg-zinc-800/30 text-zinc-600 cursor-not-allowed'
-                      )}
-                    >
-                      <svg xmlns="http://www.w3.org/2000/svg" className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182m0-4.991v4.99" />
-                      </svg>
-                      Revert changes
-                    </button>
-                  </div>
-                </aside>
+                <LayersPanel
+                  activeSvg={activeSvg}
+                  backgroundLayerId={backgroundLayerId}
+                  isDirty={isDirty}
+                  selectedLayer={selectedLayer}
+                  selectedLayers={selectedLayers}
+                  selectedSubElId={selectedSubElId}
+                  hiddenLayers={hiddenLayers}
+                  subLayerMap={subLayerMap}
+                  selectedTextProps={selectedTextProps}
+                  text={{ form: textForm, setForm: setTextForm, open: textFormOpen, setOpen: setTextFormOpen }}
+                  ai={{ loading: aiLoading, error: aiError, actionsOpen: aiActionsOpen, setActionsOpen: setAiActionsOpen, fontSuggestion, suggestedFontName, removeTextQuery, setRemoveTextQuery, showRemoveTextInput, setShowRemoveTextInput, textCheckResult, setTextCheckResult }}
+                  color={{ from: colorReplaceFrom, to: colorReplaceTo, setTo: setColorReplaceTo, open: colorReplaceOpen, setOpen: setColorReplaceOpen, layerColors, baselineRef: colorBaselineRef }}
+                  fonts={{ extra: extraFonts, imageFonts, imageFontsLoading, suggestOpen: suggestFontsOpen, setSuggestOpen: setSuggestFontsOpen }}
+                  taxonomy={{ data: taxonomy, loading: taxonomyLoading, open: taxonomyOpen, setOpen: setTaxonomyOpen }}
+                  onSelectOne={selectOne}
+                  onSetSelectedLayers={setSelectedLayers}
+                  onSetSelectedLayer={setSelectedLayer}
+                  onSetSelectedSubElId={setSelectedSubElId}
+                  onToggleLayer={toggleLayer}
+                  onReorderLayers={reorderLayers}
+                  onUpdateTextLayer={updateTextLayer}
+                  onAddTextLayer={addTextLayer}
+                  onCurvePointerDown={onCurvePointerDown}
+                  onCurvePointerUp={onCurvePointerUp}
+                  onRunAiAction={runAiLayerAction as (action?: AiActionType, query?: string) => void}
+                  onSelectFromColor={onSelectFromColor}
+                  onClearFromColor={onClearFromColor}
+                  onReplaceColor={replaceColorInLayer}
+                  onAddGoogleFont={addGoogleFont}
+                  onSuggestFonts={suggestFontsForImage}
+                  onRunTaxonomy={runTaxonomyAnalysis}
+                  onReset={resetSvg}
+                />
               )}
             </div>
           </>
