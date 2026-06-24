@@ -1,6 +1,6 @@
-import React, { Dispatch, RefObject, SetStateAction, useRef, useState } from 'react';
+import { type ActiveSvg, type SelectedTextProps, type TaxonomyGroup } from '@/lib/svg-utils';
 import { cn } from '@/lib/utils';
-import { type ActiveSvg, type SvgLayer, type SelectedTextProps, type TaxonomyGroup } from '@/lib/svg-utils';
+import React, { Dispatch, RefObject, SetStateAction, useRef, useState } from 'react';
 import { EyeIcon, EyeSlashIcon, GripIcon, SparklesIcon } from './svg-icons';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -55,6 +55,8 @@ export interface FontBundle {
   imageFontsLoading: boolean;
   suggestOpen: boolean;
   setSuggestOpen: Dispatch<SetStateAction<boolean>>;
+  customiseFonts: string[];
+  customiseLoading: boolean;
 }
 
 export interface TaxonomyBundle {
@@ -97,6 +99,8 @@ export interface LayersPanelProps {
   onReplaceColor: (overrideTo?: string) => void;
   onAddGoogleFont: (fontName: string) => void;
   onSuggestFonts: () => void;
+  onCustomise: () => void;
+  onApplyFontGlobally: (fontName: string) => void;
   onRunTaxonomy: () => void;
   onReset: () => void;
 }
@@ -124,7 +128,7 @@ export function LayersPanel({
   onUpdateTextLayer, onAddTextLayer, onCurvePointerDown, onCurvePointerUp,
   onRunAiAction,
   onSelectFromColor, onClearFromColor, onReplaceColor,
-  onAddGoogleFont, onSuggestFonts,
+  onAddGoogleFont, onSuggestFonts, onCustomise, onApplyFontGlobally,
   onRunTaxonomy, onReset,
 }: LayersPanelProps) {
   // Layer-list drag state (panel-local, no canvas impact)
@@ -154,22 +158,57 @@ export function LayersPanel({
           <span className="text-zinc-600 text-[10px]">{fonts.suggestOpen ? '▲' : '▼'}</span>
         </button>
         {fonts.suggestOpen && (
-          <div className="px-2 pb-2">
-            <button
+          <div className="px-2 pb-2 flex flex-col gap-1.5">
+            {/*<button
               onClick={onSuggestFonts}
-              disabled={fonts.imageFonts !== null || fonts.imageFontsLoading}
+              disabled={fonts.imageFonts !== null || fonts.imageFontsLoading || fonts.customiseLoading}
               className={cn(
                 'w-full flex items-center justify-center gap-1.5 rounded text-xs py-1.5 transition-colors',
                 fonts.imageFonts !== null
                   ? 'bg-zinc-800/30 text-zinc-600 cursor-not-allowed'
-                  : fonts.imageFontsLoading
+                  : (fonts.imageFontsLoading || fonts.customiseLoading)
                   ? 'bg-zinc-800/30 text-zinc-500 cursor-wait'
                   : 'bg-zinc-800/60 hover:bg-zinc-700/60 text-zinc-300'
               )}
             >
               {fonts.imageFontsLoading && <div className="size-3 rounded-full border border-zinc-600 border-t-zinc-400 animate-spin shrink-0" />}
               {fonts.imageFontsLoading ? 'Analysing…' : fonts.imageFonts !== null ? 'Fonts suggested' : 'Suggest fonts'}
+            </button>*/}
+
+            <button
+              onClick={onCustomise}
+              disabled={fonts.customiseLoading || fonts.imageFontsLoading}
+              className={cn(
+                'w-full flex items-center justify-center gap-1.5 rounded text-xs py-1.5 transition-colors',
+                (fonts.customiseLoading || fonts.imageFontsLoading)
+                  ? 'bg-zinc-800/30 text-zinc-500 cursor-wait'
+                  : 'bg-zinc-800/60 hover:bg-zinc-700/60 text-zinc-300'
+              )}
+            >
+              {fonts.customiseLoading && <div className="size-3 rounded-full border border-zinc-600 border-t-zinc-400 animate-spin shrink-0" />}
+              {fonts.customiseLoading ? 'Analysing…' : 'Customise'}
             </button>
+
+            {fonts.customiseFonts.length > 0 && (
+              <div className="flex flex-col gap-1">
+                <span className="text-[9px] text-zinc-500 px-1 uppercase tracking-wider">Apply font globally</span>
+                <select
+                  defaultValue=""
+                  onChange={(e) => {
+                    if (e.target.value) {
+                      onApplyFontGlobally(e.target.value);
+                      e.target.value = '';
+                    }
+                  }}
+                  className="w-full rounded bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs px-2 py-1.5 outline-none focus:border-zinc-500 cursor-pointer"
+                >
+                  <option value="" disabled>Choose a font…</option>
+                  {fonts.customiseFonts.map((f) => (
+                    <option key={f} value={f} style={{ fontFamily: f }}>{f}</option>
+                  ))}
+                </select>
+              </div>
+            )}
           </div>
         )}
       </div>

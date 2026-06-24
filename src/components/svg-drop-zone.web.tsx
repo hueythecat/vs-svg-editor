@@ -70,6 +70,8 @@ export function SvgDropZone() {
   const [imageFontsLoading, setImageFontsLoading] = useState(false);
   const [showImageFonts, setShowImageFonts]   = useState(false);
   const [selectedImageFont, setSelectedImageFont] = useState<string | null>(null);
+  const [customiseFonts, setCustomiseFonts]   = useState<string[]>([]);
+  const [customiseLoading, setCustomiseLoading] = useState(false);
   const [taxonomy, setTaxonomy]           = useState<TaxonomyGroup[] | null>(null);
   const [taxonomyLoading, setTaxonomyLoading] = useState(false);
   const [taxonomyOpen, setTaxonomyOpen]       = useState(false);
@@ -196,6 +198,25 @@ export function SvgDropZone() {
     });
   }, []);
 
+  // Map from layer id → sub-text children, for groups that contain multiple <text id="…"> elements
+  const subLayerMap = useMemo(() => {
+    const map = new Map<string, { id: string; label: string }[]>();
+    if (!activeSvg) return map;
+    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+    for (const layer of activeSvg.layers) {
+      const el = doc.getElementById(layer.id);
+      if (!el || el.tagName.toLowerCase() !== 'g') continue;
+      const texts = Array.from(el.querySelectorAll('text')).filter((c) => c.id);
+      if (texts.length > 1) {
+        map.set(layer.id, texts.map((c) => ({
+          id: c.id,
+          label: c.textContent?.trim() || c.id,
+        })));
+      }
+    }
+    return map;
+  }, [activeSvg?.content]);
+
   // Click on canvas: walk up from the clicked element to find its layer
   const handleCanvasClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (dragMovedRef.current) { dragMovedRef.current = false; return; }
@@ -207,7 +228,21 @@ export function SvgDropZone() {
     while (el && el !== (svgEl as Element)) {
       if (el.parentElement === (svgEl as Element) && layerIds.has(el.id)) {
         const clickedId = el.id;
-        const subElId = findClickedSubText(el, e.target)?.id ?? null;
+        // Walk up from the click target to find which text sub-element was clicked.
+        // For multi-text layers, restrict to known sub-layer IDs; for any other
+        // layer, accept the nearest <text> ancestor that has an id.
+        let subElId: string | null = null;
+        const subs = subLayerMap.get(clickedId);
+        const subIds = subs ? new Set(subs.map((s) => s.id)) : null;
+        let node: Element | null = e.target as Element;
+        while (node && node !== el) {
+          if (subIds) {
+            if (node.id && subIds.has(node.id)) { subElId = node.id; break; }
+          } else if (node.tagName.toLowerCase() === 'text' && node.id) {
+            subElId = node.id; break;
+          }
+          node = node.parentElement;
+        }
         if (e.shiftKey) {
           setSelectedLayers((prev) => {
             const next = new Set(prev);
@@ -220,6 +255,12 @@ export function SvgDropZone() {
           setSelectedLayer(clickedId);
           setSelectedLayers(new Set([clickedId]));
           setSelectedSubElId(subElId);
+        } else if (subs) {
+          // Clicked within a multi-text layer but not on a specific text element:
+          // keep the layer selected, just clear any sub-layer highlight.
+          setSelectedLayer(clickedId);
+          setSelectedLayers(new Set([clickedId]));
+          setSelectedSubElId(null);
         } else {
           const next = selectedLayer === clickedId ? null : clickedId;
           setSelectedLayer(next);
@@ -231,7 +272,7 @@ export function SvgDropZone() {
       el = el.parentElement;
     }
     selectOne(null);
-  }, [activeSvg, selectedLayer, selectOne]);
+  }, [activeSvg, selectedLayer, selectOne, subLayerMap]);
 
   const handleCanvasDblClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (!activeSvg?.layers.length) return;
@@ -499,6 +540,9 @@ export function SvgDropZone() {
   // mousedown on canvas: drag any selected non-background layer
   const handleCanvasMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (!selectedLayers.size || !activeSvg?.layers.length) return;
+    // Don't start drag when the click lands on a text/tspan element — those are
+    // sub-layer clicks that need the click handler to fire unobstructed.
+    if ((e.target as Element).closest?.('text, tspan')) return;
     const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
     if (!svgEl) return;
 
@@ -546,27 +590,6 @@ export function SvgDropZone() {
     if (!layerEl) return [];
     return extractLayerColors(layerEl, doc);
   }, [selectedLayer, activeSvg?.content]);
-
-  // Map from layer id → sub-text children, for groups that contain multiple <text id="…"> elements
-  const subLayerMap = useMemo(() => {
-    const map = new Map<string, { id: string; label: string }[]>();
-    if (!activeSvg) return map;
-    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
-    for (const layer of activeSvg.layers) {
-      const el = doc.getElementById(layer.id);
-      if (!el || el.tagName.toLowerCase() !== 'g') continue;
-      const texts = Array.from(el.children).filter(
-        (c) => c.tagName.toLowerCase() === 'text' && c.id
-      );
-      if (texts.length > 1) {
-        map.set(layer.id, texts.map((c) => ({
-          id: c.id,
-          label: c.textContent?.trim() || c.id,
-        })));
-      }
-    }
-    return map;
-  }, [activeSvg?.content]);
 
   const selectedTextProps = useMemo(() => {
     if (!activeSvg) return null;
@@ -837,7 +860,7 @@ export function SvgDropZone() {
     const content = new XMLSerializer().serializeToString(svg);
     const newLayer = { id, label: textContent };
     setActiveSvg((prev) => (prev ? { ...prev, content, layers: [...prev.layers, newLayer] } : null));
-    setSelectedLayer(id);
+    setSelectedLayer(id); setSelectedSubElId(null);
   }, [activeSvg, textForm, snapshotForUndo]);
 
   // ── Center all layers to canvas horizontal midpoint ──────────────────────
@@ -948,6 +971,218 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
     }
   }, [activeSvg, loadGoogleFontLink]);
 
+
+  // ── Customise (strip all text + font suggestions) ─────────────────────────
+
+  const runCustomise = useCallback(async () => {
+    if (!activeSvg) return;
+    setCustomiseLoading(true);
+    setAiLoading(true);
+    setAiError(null);
+    setAiStatusMsg('Analysing image…');
+    snapshotForUndo(activeSvg.content, activeSvg.layers);
+    try {
+      const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+      const root = doc.documentElement;
+      const viewBox = root.getAttribute('viewBox') ?? '0 0 800 600';
+      const vbParts = viewBox.trim().split(/[\s,]+/).map(Number);
+      const vbX = vbParts[0] ?? 0;
+      const vbY = vbParts[1] ?? 0;
+      const vw  = vbParts[2] ?? 800;
+      const vh  = vbParts[3] ?? 600;
+
+      const scale = Math.min(1, 1024 / Math.max(vw, vh, 1));
+      const pngBase64 = await svgToBase64Png(activeSvg.content, Math.round(vw * scale), Math.round(vh * scale));
+
+      // Mark every shape element across ALL layers with a temporary index
+      const SHAPE_TAGS = new Set(['path', 'g', 'circle', 'rect', 'ellipse', 'polygon', 'polyline', 'line', 'text', 'tspan', 'use']);
+      let aiIdx = 0;
+      const aiIdMap = new Map<string, Element>();
+      const markEls = (el: Element) => {
+        for (const child of Array.from(el.children)) {
+          const tag = child.tagName.toLowerCase().replace(/.*:/, '');
+          if (SHAPE_TAGS.has(tag)) {
+            const sid = String(aiIdx++);
+            child.setAttribute('data-ai-idx', sid);
+            aiIdMap.set(sid, child);
+          }
+          markEls(child);
+        }
+      };
+      Array.from(root.children).forEach((child) => {
+        if (child.tagName.toLowerCase() !== 'defs') markEls(child);
+      });
+      const markedSvgString = new XMLSerializer().serializeToString(root);
+
+      type TextRow = {
+        yFraction: number; xFraction: number;
+        font: string; sizeFraction: number;
+        weight: number; color: string; content: string;
+        letterSpacing: number;
+      };
+      type CustomiseResult = { hasText: boolean; rows: TextRow[]; removeIds: string[]; fonts: string[] };
+
+      setAiStatusMsg('Detecting text…');
+      const response = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': process.env.EXPO_PUBLIC_CLAUDE_API_KEY ?? '',
+          'anthropic-version': '2023-06-01',
+          'anthropic-dangerous-direct-browser-access': 'true',
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-6',
+          max_tokens: 8192,
+          messages: [{
+            role: 'user',
+            content: [
+              { type: 'image', source: { type: 'base64', media_type: 'image/png', data: pngBase64 } },
+              { type: 'text', text: `Analyze this SVG design image and its source.
+
+TASK 1 — Text detection: Find ALL text across the entire image (including path-outlined letters). For each line:
+- yFraction: vertical centre as fraction of image height (0=top, 1=bottom)
+- xFraction: horizontal centre as fraction of image width (0=left, 1=right)
+- font: closest matching Google Font name
+- sizeFraction: cap-height as fraction of image height
+- weight: CSS font-weight (100–900)
+- color: dominant fill colour as CSS hex (e.g. "#ffffff")
+- content: exact text string if legible, else ""
+- letterSpacing: CSS letter-spacing in em (0 = normal)
+
+TASK 2 — Text element removal: Every SVG element has a data-ai-idx attribute. Return all data-ai-idx values of elements that visually render as text — including <text>/<tspan> AND path/group elements whose shapes form letter outlines. Return the group index when children together form a word.
+
+TASK 3 — Font suggestions: Suggest 2–4 Google Font names that suit the style, mood, and colour palette of this design. Return names only.
+
+SVG source:
+${markedSvgString}
+
+Return ONLY valid JSON, no markdown:
+{"hasText":true,"rows":[{"yFraction":0.3,"xFraction":0.5,"font":"Playfair Display","sizeFraction":0.1,"weight":700,"color":"#ffffff","content":"HELLO","letterSpacing":0}],"removeIds":["3","9"],"fonts":["Playfair Display","Lato"]}` },
+            ],
+          }],
+        }),
+      });
+
+      if (!response.ok) {
+        const e = await response.json().catch(() => ({})) as { error?: { message?: string } };
+        throw new Error(e.error?.message ?? `API error ${response.status}`);
+      }
+
+      const data = await response.json() as { content: Array<{ type: string; text: string }> };
+      const rawText = (data.content?.[0]?.text ?? '')
+        .replace(/^```(?:json)?\s*/im, '').replace(/```\s*$/m, '').trim();
+
+      let parsed: CustomiseResult;
+      try {
+        parsed = JSON.parse(rawText) as CustomiseResult;
+        if (!Array.isArray(parsed.removeIds)) parsed.removeIds = [];
+        if (!Array.isArray(parsed.fonts)) parsed.fonts = [];
+      } catch {
+        throw new Error('AI returned an unreadable response');
+      }
+
+      // Remove identified text elements
+      setAiStatusMsg('Applying changes…');
+      for (const sid of parsed.removeIds) {
+        const el = aiIdMap.get(sid);
+        el?.parentNode?.removeChild(el);
+      }
+      for (const [, el] of aiIdMap) el.removeAttribute('data-ai-idx');
+
+      // Re-add editable text layers (same placement logic as strip-text)
+      const newTextLayers: SvgLayer[] = [];
+      if (parsed.hasText && parsed.rows.length > 0) {
+        const Y_THRESHOLD = 0.03;
+        const groups: (typeof parsed.rows)[] = [];
+        const sorted = [...parsed.rows].sort((a, b) => a.yFraction - b.yFraction);
+        for (const row of sorted) {
+          const last = groups[groups.length - 1];
+          if (last && Math.abs(row.yFraction - last[0].yFraction) <= Y_THRESHOLD) {
+            last.push(row);
+          } else {
+            groups.push([row]);
+          }
+        }
+        const LS_OPTIONS = [-0.1, -0.05, 0, 0.05, 0.1, 0.15, 0.2, 0.3];
+        const snapLS = (v: number) => LS_OPTIONS.reduce((a, b) => Math.abs(b - v) < Math.abs(a - v) ? b : a);
+
+        groups.forEach((group, gi) => {
+          const newId = `_text_${Date.now()}_${gi}`;
+          const label = group.map((r) => r.content.trim()).filter(Boolean).join(' ') || 'Text';
+          group.forEach(({ font }) => addGoogleFont(font));
+
+          if (group.length === 1) {
+            const row = group[0];
+            const cx = vbX + row.xFraction * vw;
+            const cy = vbY + row.yFraction * vh;
+            const fontSize = Math.max(8, Math.round(row.sizeFraction * vh));
+            const textEl = doc.createElementNS('http://www.w3.org/2000/svg', 'text');
+            textEl.id = newId;
+            textEl.setAttribute('x', String(cx)); textEl.setAttribute('y', String(cy));
+            textEl.setAttribute('text-anchor', 'middle'); textEl.setAttribute('dominant-baseline', 'middle');
+            textEl.setAttribute('font-family', row.font || 'Arial');
+            textEl.setAttribute('font-size', String(fontSize));
+            textEl.setAttribute('font-weight', String(row.weight || 400));
+            textEl.setAttribute('fill', row.color || '#000000');
+            const ls = snapLS(row.letterSpacing ?? 0); if (ls !== 0) textEl.setAttribute('letter-spacing', `${ls}em`);
+            textEl.textContent = label;
+            root.appendChild(textEl);
+          } else {
+            const g = doc.createElementNS('http://www.w3.org/2000/svg', 'g');
+            g.id = newId; g.setAttribute('data-name', label);
+            group.forEach((row, si) => {
+              const cx = vbX + row.xFraction * vw;
+              const cy = vbY + row.yFraction * vh;
+              const fontSize = Math.max(8, Math.round(row.sizeFraction * vh));
+              const textEl = doc.createElementNS('http://www.w3.org/2000/svg', 'text');
+              textEl.id = `${newId}_${si}`;
+              textEl.setAttribute('x', String(cx)); textEl.setAttribute('y', String(cy));
+              textEl.setAttribute('text-anchor', 'middle'); textEl.setAttribute('dominant-baseline', 'middle');
+              textEl.setAttribute('font-family', row.font || 'Arial');
+              textEl.setAttribute('font-size', String(fontSize));
+              textEl.setAttribute('font-weight', String(row.weight || 400));
+              textEl.setAttribute('fill', row.color || '#000000');
+              const ls = snapLS(row.letterSpacing ?? 0); if (ls !== 0) textEl.setAttribute('letter-spacing', `${ls}em`);
+              textEl.textContent = row.content.trim() || 'Text';
+              g.appendChild(textEl);
+            });
+            root.appendChild(g);
+          }
+          newTextLayers.push({ id: newId, label });
+        });
+      }
+
+      // Store suggested fonts (load them for preview)
+      const validFonts = parsed.fonts.filter(Boolean);
+      validFonts.forEach((f) => loadGoogleFontLink(f));
+      setCustomiseFonts(validFonts);
+
+      const content = new XMLSerializer().serializeToString(root);
+      setActiveSvg((prev) => {
+        if (!prev) return null;
+        return { ...prev, content, layers: newTextLayers.length > 0 ? [...prev.layers, ...newTextLayers] : prev.layers };
+      });
+      if (newTextLayers.length > 0) { setSelectedLayer(newTextLayers[0].id); setSelectedSubElId(null); }
+
+    } catch (err) {
+      setAiError(err instanceof Error ? err.message : 'Customise failed');
+    } finally {
+      setCustomiseLoading(false);
+      setAiLoading(false);
+      setAiStatusMsg('Thinking…');
+    }
+  }, [activeSvg, addGoogleFont, loadGoogleFontLink, snapshotForUndo]);
+
+  const applyFontGlobally = useCallback((fontName: string) => {
+    if (!activeSvg) return;
+    snapshotForUndo(activeSvg.content, activeSvg.layers);
+    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+    doc.querySelectorAll('text, tspan').forEach((el) => el.setAttribute('font-family', fontName));
+    const content = new XMLSerializer().serializeToString(doc.documentElement);
+    setActiveSvg((prev) => prev ? { ...prev, content } : null);
+    addGoogleFont(fontName);
+  }, [activeSvg, snapshotForUndo, addGoogleFont]);
 
   // ── Taxonomy analysis ─────────────────────────────────────────────────────
 
@@ -1507,7 +1742,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
           layers: newTextLayers.length > 0 ? [...prev.layers, ...newTextLayers] : prev.layers,
         };
       });
-      if (newTextLayers.length > 0) setSelectedLayer(newTextLayers[0].id);
+      if (newTextLayers.length > 0) { setSelectedLayer(newTextLayers[0].id); setSelectedSubElId(null); }
 
     } catch (err) {
       setAiError(err instanceof Error ? err.message : 'AI action failed');
@@ -1525,7 +1760,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     const { content, layers } = parseSvg(activeSvg.originalContent);
     setActiveSvg((prev) => (prev ? { ...prev, content, layers } : null));
     setHiddenLayers(new Set());
-    setSelectedLayer(null);
+    setSelectedLayer(null); setSelectedSubElId(null);
   }, [activeSvg]);
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
@@ -1537,7 +1772,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     textEditSnappedRef.current = false;
     autoColorSelectedRef.current = false;
     setAiError(null); setFontSuggestion(null); setSuggestedFontName(null);
-    setColorReplaceFrom(''); setSelectedSubElId(null);
+    setColorReplaceFrom('');
     setShowRemoveTextInput(false); setRemoveTextQuery(''); setTextCheckResult(null);
     colorBaselineRef.current = null;
   }, [selectedLayer]);
@@ -1554,6 +1789,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     setImageFonts(null);
     setShowImageFonts(false);
     setSelectedImageFont(null);
+    setCustomiseFonts([]);
     setTaxonomy(null);
     setTaxonomyLoading(false);
     setTaxonomyOpen(false);
@@ -1870,7 +2106,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                   text={{ form: textForm, setForm: setTextForm, open: textFormOpen, setOpen: setTextFormOpen }}
                   ai={{ loading: aiLoading, error: aiError, actionsOpen: aiActionsOpen, setActionsOpen: setAiActionsOpen, fontSuggestion, suggestedFontName, removeTextQuery, setRemoveTextQuery, showRemoveTextInput, setShowRemoveTextInput, textCheckResult, setTextCheckResult }}
                   color={{ from: colorReplaceFrom, to: colorReplaceTo, setTo: setColorReplaceTo, open: colorReplaceOpen, setOpen: setColorReplaceOpen, layerColors, baselineRef: colorBaselineRef }}
-                  fonts={{ extra: extraFonts, imageFonts, imageFontsLoading, suggestOpen: suggestFontsOpen, setSuggestOpen: setSuggestFontsOpen }}
+                  fonts={{ extra: extraFonts, imageFonts, imageFontsLoading, suggestOpen: suggestFontsOpen, setSuggestOpen: setSuggestFontsOpen, customiseFonts, customiseLoading }}
                   taxonomy={{ data: taxonomy, loading: taxonomyLoading, open: taxonomyOpen, setOpen: setTaxonomyOpen }}
                   onSelectOne={selectOne}
                   onSetSelectedLayers={setSelectedLayers}
@@ -1888,6 +2124,8 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                   onReplaceColor={replaceColorInLayer}
                   onAddGoogleFont={addGoogleFont}
                   onSuggestFonts={suggestFontsForImage}
+                  onCustomise={runCustomise}
+                  onApplyFontGlobally={applyFontGlobally}
                   onRunTaxonomy={runTaxonomyAnalysis}
                   onReset={resetSvg}
                 />
