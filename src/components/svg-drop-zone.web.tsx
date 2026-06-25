@@ -1,15 +1,12 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
-import { cn } from '@/lib/utils';
 import {
   type ActiveSvg,
   type SvgLayer,
-  type SelectedTextProps,
   type TaxonomyGroup,
   applyTranslateDelta,
   bboxInRootSpace,
   collectLayerGradientIds,
-  COLOR_PAINT_ATTRS,
   computeArcPath,
   extractLayerColors,
   findClickedSubText,
@@ -18,12 +15,13 @@ import {
   parseSvg,
   resolveGradient,
   stripScripts,
-  svgToBase64Png,
+  svgToBase64Png
 } from '@/lib/svg-utils';
-import { SparklesIcon } from './svg-icons';
-import { SamplesSidebar } from './samples-sidebar';
-import { LayersPanel } from './layers-panel';
+import { cn } from '@/lib/utils';
 import type { AiActionType } from './layers-panel';
+import { LayersPanel } from './layers-panel';
+import { SamplesSidebar } from './samples-sidebar';
+import { SparklesIcon } from './svg-icons';
 
 // ─── Samples ─────────────────────────────────────────────────────────────────
 
@@ -39,6 +37,13 @@ const SAMPLES = [
 ] as const;
 
 type SampleName = (typeof SAMPLES)[number]['name'];
+
+// Text fields the user manages — added via the text tool (data-text-layer="1")
+// or re-added by an AI pass (id starting "_text_"). These are already real,
+// editable SVG text, so the AI strip/customise passes must leave them alone:
+// they are not artwork text to detect or remove.
+const isEditableTextField = (el: Element) =>
+  el.getAttribute('data-text-layer') === '1' || el.id.startsWith('_text_');
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
@@ -72,6 +77,7 @@ export function SvgDropZone() {
   const [selectedImageFont, setSelectedImageFont] = useState<string | null>(null);
   const [customiseFonts, setCustomiseFonts]   = useState<string[]>([]);
   const [customiseLoading, setCustomiseLoading] = useState(false);
+  const [customiseDone, setCustomiseDone] = useState(false);
   const [taxonomy, setTaxonomy]           = useState<TaxonomyGroup[] | null>(null);
   const [taxonomyLoading, setTaxonomyLoading] = useState(false);
   const [taxonomyOpen, setTaxonomyOpen]       = useState(false);
@@ -127,6 +133,7 @@ export function SvgDropZone() {
       setSelectedLayer(null);
       setSelectedLayers(new Set());
       setIsLoading(false);
+      setCustomiseDone(false);
       undoStackRef.current = [];
       setUndoCount(0);
       // Default font size = ~8% of the smallest viewBox dimension
@@ -219,7 +226,54 @@ export function SvgDropZone() {
     return map;
   }, [activeSvg?.content]);
 
-  // Click on canvas: walk up from the clicked element to find its layer
+  // Open the on-canvas inline text editor over `target` (a text layer). Returns
+  // true if an editor was opened (i.e. the target actually contains text).
+  const enterInlineEdit = useCallback((target: Element, clickTarget: EventTarget | null): boolean => {
+    const canvasEl = svgCanvasRef.current;
+    const svgEl = canvasEl?.querySelector('svg') as SVGSVGElement | null;
+    if (!svgEl || !canvasEl) return false;
+    const isTextLayer =
+      target.getAttribute('data-text-layer') === '1' ||
+      target.tagName.toLowerCase() === 'text' ||
+      !!target.querySelector('text');
+    if (!isTextLayer) return false;
+    // For plain groups with multiple <text> children, find which one was clicked
+    let textEl: SVGTextElement | null = null;
+    let subElId: string | null = null;
+    if (target.tagName.toLowerCase() === 'text') {
+      textEl = target as SVGTextElement;
+    } else if (target.getAttribute('data-text-layer') === '1') {
+      textEl = target.querySelector('text') as SVGTextElement | null;
+    } else {
+      const found = findClickedSubText(target, clickTarget);
+      if (found) { textEl = found as SVGTextElement; subElId = found.id || null; }
+    }
+    // Fall back to the first <text> if sub-text detection found nothing
+    if (!textEl) textEl = target.querySelector('text') as SVGTextElement | null;
+    if (!textEl) return false;
+    setSelectedSubElId(subElId);
+    const textRect = textEl.getBoundingClientRect();
+    const canvasRect = canvasEl.getBoundingClientRect();
+    const ctm = svgEl.getScreenCTM();
+    const svgFontSize = parseFloat(textEl.getAttribute('font-size') ?? '16');
+    const fontSize = ctm ? svgFontSize * ctm.a : svgFontSize;
+    setInlineEdit({
+      layerId: subElId ?? target.id,
+      left:   textRect.left - canvasRect.left + canvasEl.scrollLeft,
+      top:    textRect.top  - canvasRect.top  + canvasEl.scrollTop,
+      width:  Math.max(textRect.width,  80),
+      height: Math.max(textRect.height, fontSize * 1.4),
+      fontSize,
+      fontFamily: textEl.getAttribute('font-family') ?? 'Arial',
+      fontWeight: parseFloat(textEl.getAttribute('font-weight') ?? '400'),
+      color: textEl.getAttribute('fill') ?? '#000000',
+    });
+    return true;
+  }, []);
+
+  // Click on canvas: walk up from the clicked element to find its layer.
+  // Clicking a text layer that is already selected opens the inline editor,
+  // so a second click edits in place (in addition to double-click).
   const handleCanvasClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (!activeSvg?.layers.length) return;
     const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
@@ -230,62 +284,30 @@ export function SvgDropZone() {
     let el = e.target as Element | null;
     while (el && el !== (svgEl as Element)) {
       if (el.parentElement === (svgEl as Element) && layerIds.has(el.id)) {
+        const wasSelected = el.id === selectedLayer && !inlineEdit;
         selectOne(el.id);
+        if (wasSelected) enterInlineEdit(el, e.target);
         return;
       }
       el = el.parentElement;
     }
-  }, [activeSvg, selectOne]);
+  }, [activeSvg, selectOne, selectedLayer, inlineEdit, enterInlineEdit]);
 
   const handleCanvasDblClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (!activeSvg?.layers.length) return;
-    const canvasEl = svgCanvasRef.current;
-    const svgEl = canvasEl?.querySelector('svg') as SVGSVGElement | null;
-    if (!svgEl || !canvasEl) return;
+    const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
+    if (!svgEl) return;
     const layerIds = new Set(activeSvg.layers.map((l) => l.id));
     let target = e.target as Element | null;
     while (target && target !== (svgEl as Element)) {
       if (target.parentElement === (svgEl as Element) && layerIds.has(target.id)) {
-        const isTextLayer =
-          target.getAttribute('data-text-layer') === '1' ||
-          target.tagName.toLowerCase() === 'text' ||
-          !!target.querySelector('text');
-        if (!isTextLayer) return;
         selectOne(target.id);
-        // For plain groups with multiple <text> children, find which one was clicked
-        let textEl: SVGTextElement | null = null;
-        let subElId: string | null = null;
-        if (target.tagName.toLowerCase() === 'text') {
-          textEl = target as SVGTextElement;
-        } else if (target.getAttribute('data-text-layer') === '1') {
-          textEl = target.querySelector('text') as SVGTextElement | null;
-        } else {
-          const found = findClickedSubText(target, e.target);
-          if (found) { textEl = found as SVGTextElement; subElId = found.id || null; }
-        }
-        if (!textEl) return;
-        if (subElId) setSelectedSubElId(subElId);
-        const textRect = textEl.getBoundingClientRect();
-        const canvasRect = canvasEl.getBoundingClientRect();
-        const ctm = svgEl.getScreenCTM();
-        const svgFontSize = parseFloat(textEl.getAttribute('font-size') ?? '16');
-        const fontSize = ctm ? svgFontSize * ctm.a : svgFontSize;
-        setInlineEdit({
-          layerId: subElId ?? target.id,
-          left:   textRect.left - canvasRect.left + canvasEl.scrollLeft,
-          top:    textRect.top  - canvasRect.top  + canvasEl.scrollTop,
-          width:  Math.max(textRect.width,  80),
-          height: Math.max(textRect.height, fontSize * 1.4),
-          fontSize,
-          fontFamily: textEl.getAttribute('font-family') ?? 'Arial',
-          fontWeight: parseFloat(textEl.getAttribute('font-weight') ?? '400'),
-          color: textEl.getAttribute('fill') ?? '#000000',
-        });
+        enterInlineEdit(target, e.target);
         return;
       }
       target = target.parentElement;
     }
-  }, [activeSvg, selectOne]);
+  }, [activeSvg, selectOne, enterInlineEdit]);
 
   // Global mouse listeners while the background layer is being dragged
   useEffect(() => {
@@ -346,6 +368,58 @@ export function SvgDropZone() {
       ?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }, [selectedLayer]);
 
+  // ── Background layer detection ────────────────────────────────────────────
+
+  const backgroundLayerId = useMemo(() => {
+    if (!activeSvg || activeSvg.layers.length === 0) return null;
+    const candidate = activeSvg.layers[0];
+    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+    const svgRoot = doc.documentElement;
+    const vb = (svgRoot.getAttribute('viewBox') ?? '').trim().split(/[\s,]+/).map(Number);
+    if (vb.length < 4) return null;
+    const [, , vw, vh] = vb;
+    const viewBoxArea = vw * vh;
+    const el = doc.getElementById(candidate.id);
+    if (!el) return null;
+
+    const coversCanvas = (node: Element): boolean => {
+      const tag = node.localName.toLowerCase();
+      if (tag === 'rect') {
+        const w = parseFloat(node.getAttribute('width') ?? '0');
+        const h = parseFloat(node.getAttribute('height') ?? '0');
+        return w * h >= viewBoxArea * 0.75;
+      }
+      if (tag === 'circle') {
+        const r = parseFloat(node.getAttribute('r') ?? '0');
+        return Math.PI * r * r >= viewBoxArea * 0.75;
+      }
+      if (tag === 'ellipse') {
+        const rx = parseFloat(node.getAttribute('rx') ?? '0');
+        const ry = parseFloat(node.getAttribute('ry') ?? '0');
+        return Math.PI * rx * ry >= viewBoxArea * 0.75;
+      }
+      return false;
+    };
+
+    // Case 1: the layer element itself is a background shape
+    if (coversCanvas(el)) return candidate.id;
+
+    // Case 2: the layer is a group whose first few children include a background shape
+    const children = Array.from(el.children).filter(
+      (c) => !['defs', 'title', 'desc'].includes(c.localName.toLowerCase())
+    );
+    if (children.length > 0 && children.length <= 6) {
+      if (children.some(coversCanvas)) return candidate.id;
+    }
+
+    return null;
+  }, [activeSvg?.src]);
+
+  // The selection overlay's first/primary layer drives its position. Hide the
+  // overlay entirely when that layer is the locked background layer.
+  const selectionLayerId = selectedLayers.size ? [...selectedLayers][0] : null;
+  const showSelectionOverlay = !!selectionLayerId && selectionLayerId !== backgroundLayerId;
+
   // ── Selection overlay (HTML div, direct DOM manipulation) ───────────────────
   // Pure ref manipulation — no state, no re-renders. React only manages the
   // static structural properties (position, outline, zIndex). Everything else
@@ -361,14 +435,14 @@ export function SvgDropZone() {
     // Sub-overlay starts hidden each cycle; shown below if needed
     if (subOverlay) subOverlay.style.display = 'none';
 
-    if (!selectedLayers.size || !overlay) return;
+    if (!showSelectionOverlay || !selectionLayerId || !overlay) return;
 
     const svgEl    = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
     const canvasEl = svgCanvasRef.current;
     if (!svgEl || !canvasEl) return;
 
-    const [layerId] = selectedLayers;
-    const layerEl   = svgEl.querySelector(`#${CSS.escape(layerId)}`);
+    const layerId = selectionLayerId;
+    const layerEl = svgEl.querySelector(`#${CSS.escape(layerId)}`);
     if (!layerEl) return;
 
     try {
@@ -397,7 +471,7 @@ export function SvgDropZone() {
     } catch {
       // getBoundingClientRect can throw if the element is not in the DOM
     }
-  }, [selectedLayers, selectedSubElId, activeSvg?.content, canvasDrag]);
+  }, [showSelectionOverlay, selectionLayerId, selectedSubElId, activeSvg?.content, canvasDrag]);
 
   // ── Layer reorder ──────────────────────────────────────────────────────────
 
@@ -473,53 +547,6 @@ export function SvgDropZone() {
     a.click();
     URL.revokeObjectURL(url);
   }, [activeSvg, hiddenLayers, extraFonts]);
-
-  // ── Background layer detection ────────────────────────────────────────────
-
-  const backgroundLayerId = useMemo(() => {
-    if (!activeSvg || activeSvg.layers.length === 0) return null;
-    const candidate = activeSvg.layers[0];
-    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
-    const svgRoot = doc.documentElement;
-    const vb = (svgRoot.getAttribute('viewBox') ?? '').trim().split(/[\s,]+/).map(Number);
-    if (vb.length < 4) return null;
-    const [, , vw, vh] = vb;
-    const viewBoxArea = vw * vh;
-    const el = doc.getElementById(candidate.id);
-    if (!el) return null;
-
-    const coversCanvas = (node: Element): boolean => {
-      const tag = node.localName.toLowerCase();
-      if (tag === 'rect') {
-        const w = parseFloat(node.getAttribute('width') ?? '0');
-        const h = parseFloat(node.getAttribute('height') ?? '0');
-        return w * h >= viewBoxArea * 0.75;
-      }
-      if (tag === 'circle') {
-        const r = parseFloat(node.getAttribute('r') ?? '0');
-        return Math.PI * r * r >= viewBoxArea * 0.75;
-      }
-      if (tag === 'ellipse') {
-        const rx = parseFloat(node.getAttribute('rx') ?? '0');
-        const ry = parseFloat(node.getAttribute('ry') ?? '0');
-        return Math.PI * rx * ry >= viewBoxArea * 0.75;
-      }
-      return false;
-    };
-
-    // Case 1: the layer element itself is a background shape
-    if (coversCanvas(el)) return candidate.id;
-
-    // Case 2: the layer is a group whose first few children include a background shape
-    const children = Array.from(el.children).filter(
-      (c) => !['defs', 'title', 'desc'].includes(c.localName.toLowerCase())
-    );
-    if (children.length > 0 && children.length <= 6) {
-      if (children.some(coversCanvas)) return candidate.id;
-    }
-
-    return null;
-  }, [activeSvg?.src]);
 
   // mousedown on canvas: drag any selected non-background layer
   const handleDragHandleMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
@@ -961,15 +988,23 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
       const vw  = vbParts[2] ?? 800;
       const vh  = vbParts[3] ?? 600;
 
+      // Rasterize WITHOUT the user's editable text fields so the AI neither sees
+      // them in the image (and re-creates duplicates) nor treats them as artwork.
       const scale = Math.min(1, 1024 / Math.max(vw, vh, 1));
-      const pngBase64 = await svgToBase64Png(activeSvg.content, Math.round(vw * scale), Math.round(vh * scale));
+      const imgDoc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+      imgDoc.querySelectorAll('[data-text-layer="1"], [id^="_text_"]').forEach((el) => el.remove());
+      const imgSource = new XMLSerializer().serializeToString(imgDoc.documentElement);
+      const pngBase64 = await svgToBase64Png(imgSource, Math.round(vw * scale), Math.round(vh * scale));
 
-      // Mark every shape element across ALL layers with a temporary index
+      // Mark every shape element across ALL layers with a temporary index.
+      // Editable text fields are skipped entirely — never tagged, never recursed
+      // into — so they can't appear in removeIds and stay untouched.
       const SHAPE_TAGS = new Set(['path', 'g', 'circle', 'rect', 'ellipse', 'polygon', 'polyline', 'line', 'text', 'tspan', 'use']);
       let aiIdx = 0;
       const aiIdMap = new Map<string, Element>();
       const markEls = (el: Element) => {
         for (const child of Array.from(el.children)) {
+          if (isEditableTextField(child)) continue;
           const tag = child.tagName.toLowerCase().replace(/.*:/, '');
           if (SHAPE_TAGS.has(tag)) {
             const sid = String(aiIdx++);
@@ -992,7 +1027,7 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
       };
       type CustomiseResult = { hasText: boolean; rows: TextRow[]; removeIds: string[]; fonts: string[] };
 
-      setAiStatusMsg('Detecting text…');
+      setAiStatusMsg('Customising…');
       const response = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: {
@@ -1022,7 +1057,7 @@ TASK 1 — Text detection: Examine the image carefully. Detect ALL text present,
 
 IMPORTANT: If a single horizontal line contains multiple words in different colors, fonts, sizes, or styles, return a SEPARATE row for each such word — same yFraction, but its own xFraction, color and font. Do NOT merge differently-styled words on one line into a single row.
 
-TASK 2 — Text element removal: Every SVG element has a data-ai-idx attribute. Return all data-ai-idx values of elements that visually render as text — including <text>/<tspan> AND path/group elements whose shapes form letter outlines. Return the group index when children together form a word.
+TASK 2 — Text element removal: Most SVG elements have a data-ai-idx attribute. Return all data-ai-idx values of elements that visually render as text — including <text>/<tspan> AND path/group elements whose shapes form letter outlines. Return the group index when children together form a word. NOTE: already-editable text fields have deliberately NOT been given a data-ai-idx — never invent indices for them; only return indices that appear in the source below.
 
 TASK 3 — Font suggestions: Suggest 2–4 Google Font names that suit the style, mood, and colour palette of this design. Return names only.
 
@@ -1141,6 +1176,7 @@ Return ONLY valid JSON, no markdown:
       setAiError(err instanceof Error ? err.message : 'Customise failed');
     } finally {
       setCustomiseLoading(false);
+      setCustomiseDone(true);
       setAiLoading(false);
       setAiStatusMsg('Thinking…');
     }
@@ -1551,6 +1587,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences:
       const aiIdMap = new Map<string, Element>();
       const markEls = (el: Element) => {
         for (const child of Array.from(el.children)) {
+          if (isEditableTextField(child)) continue;  // leave user-managed text fields alone
           const tag = child.tagName.toLowerCase().replace(/.*:/, '');
           if (SHAPE_TAGS.has(tag)) {
             const sid = String(aiIdx++);
@@ -1595,7 +1632,7 @@ TASK 1 — Text detection: Examine the image carefully. Detect ALL text present,
 
 IMPORTANT: If a single horizontal line contains multiple words in different colors, fonts, sizes, or styles, return a SEPARATE row for each such word — same yFraction, but its own xFraction, color and font. Do NOT merge differently-styled words on one line into a single row.
 
-TASK 2 — Text element identification: Every SVG element in the source has a data-ai-idx attribute. Identify which elements visually render as text — including <text>/<tspan> elements AND <path>/<g> elements whose shapes form letter or word outlines. IMPORTANT: if a <g> group contains child paths that together form a word, return the group's data-ai-idx (not the individual letter path indices). Return every text element's data-ai-idx in "removeIds".
+TASK 2 — Text element identification: Most SVG elements in the source have a data-ai-idx attribute. Identify which elements visually render as text — including <text>/<tspan> elements AND <path>/<g> elements whose shapes form letter or word outlines. IMPORTANT: if a <g> group contains child paths that together form a word, return the group's data-ai-idx (not the individual letter path indices). Return every text element's data-ai-idx in "removeIds". NOTE: already-editable text fields have deliberately NOT been given a data-ai-idx — never invent indices for them; only return indices that actually appear in the source below.
 
 SVG source:
 ${markedSvgString}
@@ -1990,6 +2027,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
               <div
                 ref={svgCanvasRef}
                 onClick={handleCanvasClick}
+                onDoubleClick={handleCanvasDblClick}
                 className="relative flex-1 overflow-auto flex items-center justify-center min-w-0"
                 style={{
                   backgroundImage: 'radial-gradient(circle, #3f3f46 1px, transparent 1px)',
@@ -2020,8 +2058,9 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                       dangerouslySetInnerHTML={{ __html: activeSvg.content }}
                     />
                     {/* Selection overlay — React controls existence, layout effect controls position.
-                        No display/left/top/width/height in JSX so React never overrides them. */}
-                    {selectedLayers.size > 0 && (
+                        No display/left/top/width/height in JSX so React never overrides them.
+                        Hidden for the locked background layer. */}
+                    {showSelectionOverlay && (
                       <div
                         ref={overlayRef}
                         data-sel-overlay
@@ -2068,40 +2107,75 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                 ) : null}
 
                 {inlineEdit && selectedTextProps && (
-                  <input
-                    autoFocus
-                    type="text"
-                    value={selectedTextProps.content}
-                    onChange={(e) => updateTextLayer({ content: e.target.value })}
-                    onBlur={() => setInlineEdit(null)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Escape' || e.key === 'Enter') {
-                        setInlineEdit(null);
-                        e.preventDefault();
-                      }
-                    }}
-                    onPointerDown={(e) => e.stopPropagation()}
-                    onClick={(e) => e.stopPropagation()}
-                    style={{
-                      position: 'absolute',
-                      left:      inlineEdit.left,
-                      top:       inlineEdit.top,
-                      minWidth:  inlineEdit.width,
-                      height:    inlineEdit.height,
-                      fontSize:  inlineEdit.fontSize,
-                      fontFamily: inlineEdit.fontFamily,
-                      fontWeight: inlineEdit.fontWeight,
-                      color:     inlineEdit.color,
-                      background: 'rgba(0,0,0,0.55)',
-                      border:    '1.5px solid #3b82f6',
-                      borderRadius: 3,
-                      outline:   'none',
-                      padding:   '0 6px',
-                      zIndex:    20,
-                      textAlign: 'center',
-                      lineHeight: 1,
-                    }}
-                  />
+                  <>
+                    {/* Hide the underlying SVG text while editing so it doesn't show through
+                        behind the input as duplicated text. visibility (not display) keeps
+                        its box, so the editor position and selection overlay stay put. */}
+                    <style>{`.svg-canvas #${CSS.escape(inlineEdit.layerId)}{visibility:hidden}`}</style>
+                    {/* "Editing" badge floating above the field, so entering edit mode is unmistakable */}
+                    <div
+                      style={{
+                        position: 'absolute',
+                        left:     inlineEdit.left,
+                        top:      Math.max(0, inlineEdit.top - 22),
+                        zIndex:   21,
+                        display:  'flex',
+                        alignItems: 'center',
+                        gap:      4,
+                        height:   18,
+                        padding:  '0 7px',
+                        background: '#3b82f6',
+                        color:    '#fff',
+                        fontSize: 11,
+                        fontWeight: 600,
+                        lineHeight: 1,
+                        borderRadius: 4,
+                        whiteSpace: 'nowrap',
+                        pointerEvents: 'none',
+                        boxShadow: '0 1px 3px rgba(0,0,0,0.35)',
+                      }}
+                    >
+                      Editing text · Enter to finish
+                    </div>
+                    <input
+                      autoFocus
+                      type="text"
+                      value={selectedTextProps.content}
+                      onFocus={(e) => e.currentTarget.select()}
+                      onChange={(e) => updateTextLayer({ content: e.target.value })}
+                      onBlur={() => setInlineEdit(null)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Escape' || e.key === 'Enter') {
+                          setInlineEdit(null);
+                          e.preventDefault();
+                        }
+                      }}
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => e.stopPropagation()}
+                      style={{
+                        position: 'absolute',
+                        left:      inlineEdit.left,
+                        top:       inlineEdit.top,
+                        minWidth:  inlineEdit.width,
+                        height:    inlineEdit.height,
+                        fontSize:  inlineEdit.fontSize,
+                        fontFamily: inlineEdit.fontFamily,
+                        fontWeight: inlineEdit.fontWeight,
+                        color:     inlineEdit.color,
+                        caretColor: '#3b82f6',
+                        background: 'rgba(0,0,0,0.55)',
+                        border:    '2px solid #3b82f6',
+                        borderRadius: 3,
+                        outline:   'none',
+                        boxShadow: '0 0 0 3px rgba(59,130,246,0.35), 0 2px 8px rgba(0,0,0,0.4)',
+                        padding:   '0 6px',
+                        zIndex:    20,
+                        textAlign: 'center',
+                        lineHeight: 1,
+                        cursor:    'text',
+                      }}
+                    />
+                  </>
                 )}
               </div>
 
@@ -2120,7 +2194,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                   text={{ form: textForm, setForm: setTextForm, open: textFormOpen, setOpen: setTextFormOpen }}
                   ai={{ loading: aiLoading, error: aiError, actionsOpen: aiActionsOpen, setActionsOpen: setAiActionsOpen, fontSuggestion, suggestedFontName, removeTextQuery, setRemoveTextQuery, showRemoveTextInput, setShowRemoveTextInput, textCheckResult, setTextCheckResult }}
                   color={{ from: colorReplaceFrom, to: colorReplaceTo, setTo: setColorReplaceTo, open: colorReplaceOpen, setOpen: setColorReplaceOpen, layerColors, baselineRef: colorBaselineRef }}
-                  fonts={{ extra: extraFonts, imageFonts, imageFontsLoading, suggestOpen: suggestFontsOpen, setSuggestOpen: setSuggestFontsOpen, customiseFonts, customiseLoading }}
+                  fonts={{ extra: extraFonts, imageFonts, imageFontsLoading, suggestOpen: suggestFontsOpen, setSuggestOpen: setSuggestFontsOpen, customiseFonts, customiseLoading, customiseDone }}
                   taxonomy={{ data: taxonomy, loading: taxonomyLoading, open: taxonomyOpen, setOpen: setTaxonomyOpen }}
                   onSelectOne={selectOne}
                   onSetSelectedLayers={setSelectedLayers}

@@ -57,6 +57,7 @@ export interface FontBundle {
   setSuggestOpen: Dispatch<SetStateAction<boolean>>;
   customiseFonts: string[];
   customiseLoading: boolean;
+  customiseDone: boolean;
 }
 
 export interface TaxonomyBundle {
@@ -177,16 +178,18 @@ export function LayersPanel({
 
             <button
               onClick={onCustomise}
-              disabled={fonts.customiseLoading || fonts.imageFontsLoading}
+              disabled={fonts.customiseLoading || fonts.imageFontsLoading || fonts.customiseDone}
               className={cn(
                 'w-full flex items-center justify-center gap-1.5 rounded text-xs py-1.5 transition-colors',
                 (fonts.customiseLoading || fonts.imageFontsLoading)
                   ? 'bg-zinc-800/30 text-zinc-500 cursor-wait'
+                  : fonts.customiseDone
+                  ? 'bg-zinc-800/30 text-zinc-500 cursor-not-allowed'
                   : 'bg-zinc-800/60 hover:bg-zinc-700/60 text-zinc-300'
               )}
             >
               {fonts.customiseLoading && <div className="size-3 rounded-full border border-zinc-600 border-t-zinc-400 animate-spin shrink-0" />}
-              {fonts.customiseLoading ? 'Analysing…' : 'Customise'}
+              {fonts.customiseLoading ? 'Analysing…' : fonts.customiseDone ? 'Customised' : 'Customise'}
             </button>
 
             {fonts.customiseFonts.length > 0 && (
