@@ -96,7 +96,9 @@ export function SvgDropZone() {
   const [undoCount, setUndoCount] = useState(0);
   const textEditSnappedRef = useRef(false);
   const fileInputRef       = useRef<HTMLInputElement>(null);
-  const svgCanvasRef       = useRef<HTMLDivElement>(null);
+  const svgCanvasRef    = useRef<HTMLDivElement>(null);
+  const overlayRef      = useRef<HTMLDivElement>(null);
+  const subOverlayRef   = useRef<HTMLDivElement>(null);
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -219,60 +221,21 @@ export function SvgDropZone() {
 
   // Click on canvas: walk up from the clicked element to find its layer
   const handleCanvasClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    if (dragMovedRef.current) { dragMovedRef.current = false; return; }
     if (!activeSvg?.layers.length) return;
     const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
     if (!svgEl) return;
+    // Ignore clicks on the selection overlay (drag handle)
+    if ((e.target as Element).closest?.('[data-sel-overlay]')) return;
     const layerIds = new Set(activeSvg.layers.map((l) => l.id));
     let el = e.target as Element | null;
     while (el && el !== (svgEl as Element)) {
       if (el.parentElement === (svgEl as Element) && layerIds.has(el.id)) {
-        const clickedId = el.id;
-        // Walk up from the click target to find which text sub-element was clicked.
-        // For multi-text layers, restrict to known sub-layer IDs; for any other
-        // layer, accept the nearest <text> ancestor that has an id.
-        let subElId: string | null = null;
-        const subs = subLayerMap.get(clickedId);
-        const subIds = subs ? new Set(subs.map((s) => s.id)) : null;
-        let node: Element | null = e.target as Element;
-        while (node && node !== el) {
-          if (subIds) {
-            if (node.id && subIds.has(node.id)) { subElId = node.id; break; }
-          } else if (node.tagName.toLowerCase() === 'text' && node.id) {
-            subElId = node.id; break;
-          }
-          node = node.parentElement;
-        }
-        if (e.shiftKey) {
-          setSelectedLayers((prev) => {
-            const next = new Set(prev);
-            if (next.has(clickedId)) next.delete(clickedId); else next.add(clickedId);
-            return next;
-          });
-          setSelectedLayer(clickedId);
-          setSelectedSubElId(null);
-        } else if (subElId) {
-          setSelectedLayer(clickedId);
-          setSelectedLayers(new Set([clickedId]));
-          setSelectedSubElId(subElId);
-        } else if (subs) {
-          // Clicked within a multi-text layer but not on a specific text element:
-          // keep the layer selected, just clear any sub-layer highlight.
-          setSelectedLayer(clickedId);
-          setSelectedLayers(new Set([clickedId]));
-          setSelectedSubElId(null);
-        } else {
-          const next = selectedLayer === clickedId ? null : clickedId;
-          setSelectedLayer(next);
-          setSelectedLayers(next ? new Set([next]) : new Set());
-          setSelectedSubElId(null);
-        }
+        selectOne(el.id);
         return;
       }
       el = el.parentElement;
     }
-    selectOne(null);
-  }, [activeSvg, selectedLayer, selectOne, subLayerMap]);
+  }, [activeSvg, selectOne]);
 
   const handleCanvasDblClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (!activeSvg?.layers.length) return;
@@ -347,12 +310,16 @@ export function SvgDropZone() {
           layerEl.setAttribute('transform', `translate(${dx}, ${dy}) ${canvasDrag.baseTransforms[id]}`.trim());
         }
       });
-      svgEl.querySelector('#__svghl__')?.remove();
+      // Translate the HTML overlay to follow the layer (screen-pixel delta)
+      if (overlayRef.current) {
+        const sdx = e.clientX - canvasDrag.startClientX;
+        const sdy = e.clientY - canvasDrag.startClientY;
+        overlayRef.current.style.transform = `translate(${sdx}px, ${sdy}px)`;
+      }
     };
 
     const onUp = () => {
       if (svgEl && dragMovedRef.current) {
-        svgEl.querySelector('#__svghl__')?.remove();
         const content = new XMLSerializer().serializeToString(svgEl);
         setActiveSvg((prev) => (prev ? { ...prev, content } : null));
       }
@@ -379,40 +346,57 @@ export function SvgDropZone() {
       ?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }, [selectedLayer]);
 
-  // ── SVG selection highlight (perforated rect injected into SVG DOM) ─────────
+  // ── Selection overlay (HTML div, direct DOM manipulation) ───────────────────
+  // Pure ref manipulation — no state, no re-renders. React only manages the
+  // static structural properties (position, outline, zIndex). Everything else
+  // (left, top, width, height, display, transform) is set directly so React
+  // can never override them between layout-effect runs.
 
   useLayoutEffect(() => {
-    const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
-    svgEl?.querySelector('#__svghl__')?.remove();
-    if (!selectedLayers.size || !svgEl || canvasDrag) return;
-    const ns = 'http://www.w3.org/2000/svg';
-    const pad = 4;
-    const container = document.createElementNS(ns, 'g');
-    container.id = '__svghl__';
-    container.setAttribute('pointer-events', 'none');
+    const overlay    = overlayRef.current;
+    const subOverlay = subOverlayRef.current;
 
-    const addRect = (id: string, color: string, dashArray: string) => {
-      const targetEl = svgEl.querySelector(`#${CSS.escape(id)}`);
-      if (!targetEl) return;
-      const bbox = bboxInRootSpace(svgEl, targetEl as SVGGraphicsElement);
-      if (!bbox || (!bbox.width && !bbox.height)) return;
-      const rect = document.createElementNS(ns, 'rect');
-      rect.setAttribute('x', String(bbox.x - pad));
-      rect.setAttribute('y', String(bbox.y - pad));
-      rect.setAttribute('width',  String(bbox.width  + pad * 2));
-      rect.setAttribute('height', String(bbox.height + pad * 2));
-      rect.setAttribute('fill', 'none');
-      rect.setAttribute('stroke', color);
-      rect.setAttribute('stroke-width', '2');
-      rect.setAttribute('stroke-dasharray', dashArray);
-      rect.setAttribute('vector-effect', 'non-scaling-stroke');
-      container.appendChild(rect);
-    };
+    // Always clear any drag-time transform first
+    if (overlay) overlay.style.transform = '';
+    // Sub-overlay starts hidden each cycle; shown below if needed
+    if (subOverlay) subOverlay.style.display = 'none';
 
-    [...selectedLayers].forEach((id) => addRect(id, '#3b82f6', '6 4'));
-    if (selectedSubElId) addRect(selectedSubElId, '#f59e0b', '4 3');
+    if (!selectedLayers.size || !overlay) return;
 
-    if (container.children.length) svgEl.appendChild(container);
+    const svgEl    = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
+    const canvasEl = svgCanvasRef.current;
+    if (!svgEl || !canvasEl) return;
+
+    const [layerId] = selectedLayers;
+    const layerEl   = svgEl.querySelector(`#${CSS.escape(layerId)}`);
+    if (!layerEl) return;
+
+    try {
+      const canvasRect = canvasEl.getBoundingClientRect();
+      const lr  = layerEl.getBoundingClientRect();
+      if (!lr.width && !lr.height) return;
+      const pad = 4;
+
+      overlay.style.left   = `${lr.left - canvasRect.left + canvasEl.scrollLeft - pad}px`;
+      overlay.style.top    = `${lr.top  - canvasRect.top  + canvasEl.scrollTop  - pad}px`;
+      overlay.style.width  = `${lr.width  + pad * 2}px`;
+      overlay.style.height = `${lr.height + pad * 2}px`;
+
+      if (subOverlay && selectedSubElId) {
+        const subEl = svgEl.querySelector(`#${CSS.escape(selectedSubElId)}`);
+        if (subEl) {
+          const sr = subEl.getBoundingClientRect();
+          // Position relative to the overlay's top-left corner (lr.left-pad, lr.top-pad)
+          subOverlay.style.display = 'block';
+          subOverlay.style.left    = `${sr.left - lr.left}px`;
+          subOverlay.style.top     = `${sr.top  - lr.top}px`;
+          subOverlay.style.width   = `${sr.width  + pad * 2}px`;
+          subOverlay.style.height  = `${sr.height + pad * 2}px`;
+        }
+      }
+    } catch {
+      // getBoundingClientRect can throw if the element is not in the DOM
+    }
   }, [selectedLayers, selectedSubElId, activeSvg?.content, canvasDrag]);
 
   // ── Layer reorder ──────────────────────────────────────────────────────────
@@ -538,28 +522,14 @@ export function SvgDropZone() {
   }, [activeSvg?.src]);
 
   // mousedown on canvas: drag any selected non-background layer
-  const handleCanvasMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+  const handleDragHandleMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    e.stopPropagation();
     if (!selectedLayers.size || !activeSvg?.layers.length) return;
-    // Don't start drag when the click lands on a text/tspan element — those are
-    // sub-layer clicks that need the click handler to fire unobstructed.
-    if ((e.target as Element).closest?.('text, tspan')) return;
     const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
     if (!svgEl) return;
 
     const draggableIds = [...selectedLayers].filter((id) => id !== backgroundLayerId);
     if (!draggableIds.length) return;
-
-    const draggableEls = draggableIds
-      .map((id) => svgEl.querySelector(`#${CSS.escape(id)}`))
-      .filter(Boolean) as Element[];
-
-    let el = e.target as Element | null;
-    let hit = false;
-    while (el && el !== (svgEl as Element)) {
-      if (draggableEls.includes(el)) { hit = true; break; }
-      el = el.parentElement;
-    }
-    if (!hit) return;
 
     const pt = svgEl.createSVGPoint();
     pt.x = e.clientX; pt.y = e.clientY;
@@ -1040,15 +1010,17 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
               { type: 'image', source: { type: 'base64', media_type: 'image/png', data: pngBase64 } },
               { type: 'text', text: `Analyze this SVG design image and its source.
 
-TASK 1 — Text detection: Find ALL text across the entire image (including path-outlined letters). For each line:
-- yFraction: vertical centre as fraction of image height (0=top, 1=bottom)
-- xFraction: horizontal centre as fraction of image width (0=left, 1=right)
-- font: closest matching Google Font name
-- sizeFraction: cap-height as fraction of image height
-- weight: CSS font-weight (100–900)
-- color: dominant fill colour as CSS hex (e.g. "#ffffff")
-- content: exact text string if legible, else ""
-- letterSpacing: CSS letter-spacing in em (0 = normal)
+TASK 1 — Text detection: Examine the image carefully. Detect ALL text present, including text rendered as outlined or filled path shapes (not just SVG <text> elements). For each distinct line or row of text, estimate:
+- yFraction: vertical center as a fraction of image height (0.0 = top edge, 1.0 = bottom edge)
+- xFraction: horizontal center as a fraction of image width (0.0 = left, 1.0 = right)
+- font: name of the closest matching Google Font
+- sizeFraction: font cap-height as a fraction of image height (e.g. 0.08 if text height ≈ 8% of image)
+- weight: CSS font-weight integer (100, 200, 300, 400, 500, 600, 700, 800, or 900)
+- color: dominant text fill color as CSS hex (e.g. "#ffffff")
+- content: the exact text string if legible, else ""
+- letterSpacing: CSS letter-spacing in em units. Default to 0.0 (normal) if you are not certain — only use a non-zero value when you can clearly see unusually wide or condensed tracking (e.g. 0.1 slightly wide, 0.3 very wide, -0.05 condensed)
+
+IMPORTANT: If a single horizontal line contains multiple words in different colors, fonts, sizes, or styles, return a SEPARATE row for each such word — same yFraction, but its own xFraction, color and font. Do NOT merge differently-styled words on one line into a single row.
 
 TASK 2 — Text element removal: Every SVG element has a data-ai-idx attribute. Return all data-ai-idx values of elements that visually render as text — including <text>/<tspan> AND path/group elements whose shapes form letter outlines. Return the group index when children together form a word.
 
@@ -1621,6 +1593,8 @@ TASK 1 — Text detection: Examine the image carefully. Detect ALL text present,
 - content: the exact text string if legible, else ""
 - letterSpacing: CSS letter-spacing in em units. Default to 0.0 (normal) if you are not certain — only use a non-zero value when you can clearly see unusually wide or condensed tracking (e.g. 0.1 slightly wide, 0.3 very wide, -0.05 condensed)
 
+IMPORTANT: If a single horizontal line contains multiple words in different colors, fonts, sizes, or styles, return a SEPARATE row for each such word — same yFraction, but its own xFraction, color and font. Do NOT merge differently-styled words on one line into a single row.
+
 TASK 2 — Text element identification: Every SVG element in the source has a data-ai-idx attribute. Identify which elements visually render as text — including <text>/<tspan> elements AND <path>/<g> elements whose shapes form letter or word outlines. IMPORTANT: if a <g> group contains child paths that together form a word, return the group's data-ai-idx (not the individual letter path indices). Return every text element's data-ai-idx in "removeIds".
 
 SVG source:
@@ -2016,8 +1990,6 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
               <div
                 ref={svgCanvasRef}
                 onClick={handleCanvasClick}
-                onMouseDown={handleCanvasMouseDown}
-                onDoubleClick={handleCanvasDblClick}
                 className="relative flex-1 overflow-auto flex items-center justify-center min-w-0"
                 style={{
                   backgroundImage: 'radial-gradient(circle, #3f3f46 1px, transparent 1px)',
@@ -2042,14 +2014,56 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                           .join('')
                       }</style>
                     )}
-                    {selectedLayer && (
-                      <style>{[...selectedLayers].filter((id) => id !== backgroundLayerId).map((id) => `.svg-canvas #${CSS.escape(id)}{cursor:grab}`).join('')}</style>
-                    )}
                     <div
                       className="svg-canvas"
                       style={{ width: '80%' }}
                       dangerouslySetInnerHTML={{ __html: activeSvg.content }}
                     />
+                    {/* Selection overlay — React controls existence, layout effect controls position.
+                        No display/left/top/width/height in JSX so React never overrides them. */}
+                    {selectedLayers.size > 0 && (
+                      <div
+                        ref={overlayRef}
+                        data-sel-overlay
+                        style={{
+                          position: 'absolute',
+                          pointerEvents: 'none',
+                          outline: '2px dashed #3b82f6',
+                          boxSizing: 'border-box',
+                          zIndex: 5,
+                        }}
+                      >
+                        {/* Sub-layer highlight (amber) — display toggled by layout effect */}
+                        <div
+                          ref={subOverlayRef}
+                          style={{
+                            position: 'absolute',
+                            outline: '2px dashed #f59e0b',
+                            boxSizing: 'border-box',
+                            pointerEvents: 'none',
+                          }}
+                        />
+                        {/* Drag handle — single-layer selection only */}
+                        {selectedLayers.size === 1 && (
+                          <div
+                            onMouseDown={handleDragHandleMouseDown}
+                            onClick={(e) => e.stopPropagation()}
+                            style={{
+                              position: 'absolute',
+                              right: -8,
+                              top: -8,
+                              width: 16,
+                              height: 16,
+                              borderRadius: '50%',
+                              background: '#3b82f6',
+                              border: '2px solid white',
+                              cursor: 'grab',
+                              pointerEvents: 'all',
+                            }}
+                          />
+                        )}
+                      </div>
+                    )}
                   </>
                 ) : null}
 
