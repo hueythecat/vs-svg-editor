@@ -1027,7 +1027,7 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
       };
       type CustomiseResult = { hasText: boolean; rows: TextRow[]; removeIds: string[]; fonts: string[] };
 
-      setAiStatusMsg('Customising…');
+      setAiStatusMsg('Thinking…');
       const response = await fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: {
