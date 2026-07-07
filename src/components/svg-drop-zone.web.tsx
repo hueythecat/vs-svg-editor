@@ -45,6 +45,93 @@ type SampleName = (typeof SAMPLES)[number]['name'];
 const isEditableTextField = (el: Element) =>
   el.getAttribute('data-text-layer') === '1' || el.id.startsWith('_text_');
 
+// Shared text-detection + element-identification instructions used by BOTH the
+// strip-text pass and the customise pass, so the two never drift apart. Callers
+// wrap this with their own intro line, any extra tasks (e.g. font suggestions),
+// the marked SVG source, and the JSON output schema.
+// Both passes also share one model, so an A/B model swap flips strip-text and
+// customise together and they can't drift apart.
+const TEXT_PARSE_MODEL = 'claude-sonnet-4-6';
+const TEXT_PARSING_PROMPT = `TASK 1 — Text detection: Examine the image carefully. Detect ALL text present, including text rendered as outlined or filled path shapes (not just SVG <text> elements). For each distinct line or row of text, estimate:
+- yFraction: vertical center as a fraction of image height (0.0 = top edge, 1.0 = bottom edge)
+- xFraction: horizontal center as a fraction of image width (0.0 = left, 1.0 = right)
+- font: name of the closest matching Google Font
+- sizeFraction: font cap-height as a fraction of image height (e.g. 0.08 if text height ≈ 8% of image)
+- weight: CSS font-weight integer (100, 200, 300, 400, 500, 600, 700, 800, or 900)
+- color: dominant text fill color as CSS hex (e.g. "#ffffff")
+- content: the exact text string if legible, else ""
+- letterSpacing: CSS letter-spacing in em units. Default to 0.0 (normal) if you are not certain — only use a non-zero value when you can clearly see unusually wide or condensed tracking (e.g. 0.1 slightly wide, 0.3 very wide, -0.05 condensed)
+
+IMPORTANT: If a single horizontal line contains multiple words in different colors, fonts, sizes, or styles, return a SEPARATE row for each such word — same yFraction, but its own xFraction, color and font. Do NOT merge differently-styled words on one line into a single row.
+
+TASK 2 — Text element identification: Most SVG elements in the source have a data-ai-idx attribute. Identify which elements visually render as text — including <text>/<tspan> elements AND <path>/<g> elements whose shapes form letter or word outlines. IMPORTANT: if a <g> group contains child paths that together form a word, return the group's data-ai-idx (not the individual letter path indices). Return every text element's data-ai-idx in "removeIds". NOTE: already-editable text fields have deliberately NOT been given a data-ai-idx — never invent indices for them; only return indices that actually appear in the source below.`;
+
+// Mounts a hidden clone of svgRoot (carrying its data-* marks) so getBBox works on a
+// detached/parsed SVG document, runs fn against it, and always unmounts.
+const withOffscreenSvg = <T,>(svgRoot: Element, fn: (mounted: SVGSVGElement) => T): T => {
+  const measureSvg = svgRoot.cloneNode(true) as SVGSVGElement;
+  const holder = document.createElement('div');
+  holder.setAttribute('style', 'position:absolute;left:-99999px;top:0;width:1px;height:1px;overflow:hidden');
+  holder.appendChild(measureSvg);
+  document.body.appendChild(holder);
+  try {
+    return fn(measureSvg);
+  } finally {
+    document.body.removeChild(holder);
+  }
+};
+
+// Drops removeIds whose element covers ≥ BACKGROUND_AREA_LIMIT of the canvas — a
+// background or decoration the vision model mislabeled as text. Shared by the
+// strip-text and customise passes so both guard identically. svgRoot must already
+// carry the data-ai-idx marks.
+const BACKGROUND_AREA_LIMIT = 0.5; // ≥50% of the canvas ⇒ background, never a text run
+const filterOutBackgroundIds = (
+  svgRoot: Element,
+  removeIds: string[],
+  canvasW: number,
+  canvasH: number,
+  logTag: string,
+): string[] => {
+  const canvasArea = Math.max(1, canvasW * canvasH);
+  return withOffscreenSvg(svgRoot, (measureSvg) =>
+    removeIds.filter((sid) => {
+      const probe = measureSvg.querySelector(`[data-ai-idx="${sid}"]`) as SVGGraphicsElement | null;
+      if (!probe || typeof probe.getBBox !== 'function') return true; // can't measure → trust the model
+      try {
+        const b = probe.getBBox();
+        const frac = (b.width * b.height) / canvasArea;
+        if (frac >= BACKGROUND_AREA_LIMIT) {
+          console.log(`[${logTag}] skipping removeId ${sid} — bbox covers ${(frac * 100).toFixed(0)}% of canvas (background, not text)`);
+          return false;
+        }
+      } catch { /* unrenderable geometry — leave the call to the model */ }
+      return true;
+    }),
+  );
+};
+
+// True when the element (by id) spans essentially the whole canvas in BOTH dimensions
+// — i.e. a background/canvas fill, not foreground artwork. Gates whether the bottom
+// layer is excluded from the customise vision image.
+const FULL_CANVAS_MIN = 0.9; // ≥90% of both canvas dimensions ⇒ a background layer
+const isFullCanvasLayer = (
+  svgRoot: Element,
+  elementId: string,
+  canvasW: number,
+  canvasH: number,
+): boolean =>
+  withOffscreenSvg(svgRoot, (measureSvg) => {
+    const el = measureSvg.querySelector(`[id="${elementId}"]`) as SVGGraphicsElement | null;
+    if (!el || typeof el.getBBox !== 'function') return false;
+    try {
+      const b = el.getBBox();
+      return b.width >= FULL_CANVAS_MIN * canvasW && b.height >= FULL_CANVAS_MIN * canvasH;
+    } catch {
+      return false;
+    }
+  });
+
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export function SvgDropZone() {
@@ -88,11 +175,6 @@ export function SvgDropZone() {
   const [showRemoveTextInput, setShowRemoveTextInput] = useState(false);
   const [textCheckResult, setTextCheckResult] = useState<{ heading: string; subheading: string } | null>(null);
   const [colorReplaceOpen, setColorReplaceOpen] = useState(true);
-  const [inlineEdit, setInlineEdit] = useState<{
-    layerId: string;
-    left: number; top: number; width: number; height: number;
-    fontSize: number; fontFamily: string; fontWeight: number; color: string;
-  } | null>(null);
   const [selectedSubElId, setSelectedSubElId] = useState<string | null>(null);
   const aiCacheRef              = useRef<Map<string, string>>(new Map());
   const dragMovedRef            = useRef(false);
@@ -103,6 +185,7 @@ export function SvgDropZone() {
   const textEditSnappedRef = useRef(false);
   const fileInputRef       = useRef<HTMLInputElement>(null);
   const svgCanvasRef    = useRef<HTMLDivElement>(null);
+  const textContentRef  = useRef<HTMLInputElement>(null);
   const overlayRef      = useRef<HTMLDivElement>(null);
   const subOverlayRef   = useRef<HTMLDivElement>(null);
 
@@ -226,54 +309,10 @@ export function SvgDropZone() {
     return map;
   }, [activeSvg?.content]);
 
-  // Open the on-canvas inline text editor over `target` (a text layer). Returns
-  // true if an editor was opened (i.e. the target actually contains text).
-  const enterInlineEdit = useCallback((target: Element, clickTarget: EventTarget | null): boolean => {
-    const canvasEl = svgCanvasRef.current;
-    const svgEl = canvasEl?.querySelector('svg') as SVGSVGElement | null;
-    if (!svgEl || !canvasEl) return false;
-    const isTextLayer =
-      target.getAttribute('data-text-layer') === '1' ||
-      target.tagName.toLowerCase() === 'text' ||
-      !!target.querySelector('text');
-    if (!isTextLayer) return false;
-    // For plain groups with multiple <text> children, find which one was clicked
-    let textEl: SVGTextElement | null = null;
-    let subElId: string | null = null;
-    if (target.tagName.toLowerCase() === 'text') {
-      textEl = target as SVGTextElement;
-    } else if (target.getAttribute('data-text-layer') === '1') {
-      textEl = target.querySelector('text') as SVGTextElement | null;
-    } else {
-      const found = findClickedSubText(target, clickTarget);
-      if (found) { textEl = found as SVGTextElement; subElId = found.id || null; }
-    }
-    // Fall back to the first <text> if sub-text detection found nothing
-    if (!textEl) textEl = target.querySelector('text') as SVGTextElement | null;
-    if (!textEl) return false;
-    setSelectedSubElId(subElId);
-    const textRect = textEl.getBoundingClientRect();
-    const canvasRect = canvasEl.getBoundingClientRect();
-    const ctm = svgEl.getScreenCTM();
-    const svgFontSize = parseFloat(textEl.getAttribute('font-size') ?? '16');
-    const fontSize = ctm ? svgFontSize * ctm.a : svgFontSize;
-    setInlineEdit({
-      layerId: subElId ?? target.id,
-      left:   textRect.left - canvasRect.left + canvasEl.scrollLeft,
-      top:    textRect.top  - canvasRect.top  + canvasEl.scrollTop,
-      width:  Math.max(textRect.width,  80),
-      height: Math.max(textRect.height, fontSize * 1.4),
-      fontSize,
-      fontFamily: textEl.getAttribute('font-family') ?? 'Arial',
-      fontWeight: parseFloat(textEl.getAttribute('font-weight') ?? '400'),
-      color: textEl.getAttribute('fill') ?? '#000000',
-    });
-    return true;
-  }, []);
-
-  // Click on canvas: walk up from the clicked element to find its layer.
-  // Clicking a text layer that is already selected opens the inline editor,
-  // so a second click edits in place (in addition to double-click).
+  // Click on canvas: walk up from the clicked element to find its layer. When the
+  // clicked layer holds text (and the click wasn't on the drag overlay), focus the
+  // side-panel text input so keyboard input edits it immediately. For a plain group
+  // with several <text> children, target the specific one that was clicked.
   const handleCanvasClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (!activeSvg?.layers.length) return;
     const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
@@ -284,30 +323,33 @@ export function SvgDropZone() {
     let el = e.target as Element | null;
     while (el && el !== (svgEl as Element)) {
       if (el.parentElement === (svgEl as Element) && layerIds.has(el.id)) {
-        const wasSelected = el.id === selectedLayer && !inlineEdit;
         selectOne(el.id);
-        if (wasSelected) enterInlineEdit(el, e.target);
+        const isText =
+          el.getAttribute('data-text-layer') === '1' ||
+          el.tagName.toLowerCase() === 'text' ||
+          !!el.querySelector('text');
+        if (isText) {
+          // selectOne clears any sub-element; re-target the clicked <text> child.
+          if (el.getAttribute('data-text-layer') !== '1' && el.tagName.toLowerCase() !== 'text') {
+            const found = findClickedSubText(el, e.target);
+            if (found?.id) setSelectedSubElId(found.id);
+          }
+          // Open the Text panel and focus its input so typing edits the text in place.
+          // Place the caret at the end (rather than selecting all) so typing appends.
+          setTextFormOpen(true);
+          requestAnimationFrame(() => {
+            const input = textContentRef.current;
+            if (!input) return;
+            input.focus();
+            const end = input.value.length;
+            input.setSelectionRange(end, end);
+          });
+        }
         return;
       }
       el = el.parentElement;
     }
-  }, [activeSvg, selectOne, selectedLayer, inlineEdit, enterInlineEdit]);
-
-  const handleCanvasDblClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    if (!activeSvg?.layers.length) return;
-    const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
-    if (!svgEl) return;
-    const layerIds = new Set(activeSvg.layers.map((l) => l.id));
-    let target = e.target as Element | null;
-    while (target && target !== (svgEl as Element)) {
-      if (target.parentElement === (svgEl as Element) && layerIds.has(target.id)) {
-        selectOne(target.id);
-        enterInlineEdit(target, e.target);
-        return;
-      }
-      target = target.parentElement;
-    }
-  }, [activeSvg, selectOne, enterInlineEdit]);
+  }, [activeSvg, selectOne]);
 
   // Global mouse listeners while the background layer is being dragged
   useEffect(() => {
@@ -447,8 +489,35 @@ export function SvgDropZone() {
 
     try {
       const canvasRect = canvasEl.getBoundingClientRect();
-      const lr  = layerEl.getBoundingClientRect();
-      if (!lr.width && !lr.height) return;
+      let lr: { left: number; top: number; width: number; height: number } =
+        layerEl.getBoundingClientRect();
+      if (!lr.width && !lr.height) {
+        // An empty text layer collapses to a zero-size box, so there'd be nothing
+        // to show or click. Synthesize a placeholder rect at the text anchor (using
+        // the element's own screen CTM so ancestor transforms are included) so the
+        // selection overlay still appears and remains a drag/click target.
+        const textEl = (layerEl.tagName.toLowerCase() === 'text'
+          ? layerEl
+          : layerEl.querySelector('text')) as SVGTextElement | null;
+        const ctm = textEl?.getScreenCTM();
+        if (!textEl || !ctm) return;
+        const groupEl = layerEl as Element;
+        const x = parseFloat(
+          textEl.getAttribute('x') ?? groupEl.getAttribute('data-cx') ?? '0');
+        const y = parseFloat(
+          textEl.getAttribute('y') ?? groupEl.getAttribute('data-cy') ?? '0');
+        const fs = parseFloat(
+          textEl.getAttribute('font-size') ?? groupEl.getAttribute('data-fontsize') ?? '16');
+        const pt = (svgEl as SVGSVGElement).createSVGPoint();
+        pt.x = x; pt.y = y;
+        const sp = pt.matrixTransform(ctm);
+        const h = Math.max(fs * ctm.a, 12);
+        const w = Math.max(h * 3, 40); // generous width so the empty field is easy to click
+        const anchor = textEl.getAttribute('text-anchor');
+        const left = anchor === 'end' ? sp.x - w : anchor === 'middle' ? sp.x - w / 2 : sp.x;
+        // dominant-baseline:middle keeps the glyph centered on y
+        lr = { left, top: sp.y - h / 2, width: w, height: h };
+      }
       const pad = 4;
 
       overlay.style.left   = `${lr.left - canvasRect.left + canvasEl.scrollLeft - pad}px`;
@@ -625,6 +694,11 @@ export function SvgDropZone() {
       letterSpacing: parseFloat((textEl.getAttribute('letter-spacing') ?? '0').replace('em', '')) || 0,
     };
   }, [selectedLayer, selectedSubElId, activeSvg?.content]);
+
+  // An empty text layer renders no geometry, so clicks inside its placeholder
+  // selection box fall through to the background. Flag it so the overlay can
+  // capture those clicks and keep the empty text layer selected instead.
+  const selectionIsEmptyText = !!selectedTextProps && selectedTextProps.content.trim() === '';
 
   const updateTextLayer = useCallback((attrs: Partial<{ content: string; font: string; size: number; weight: number; color: string; curve: number; letterSpacing: number }>) => {
     if (!activeSvg) return;
@@ -932,16 +1006,14 @@ export function SvgDropZone() {
       const scale = Math.min(1, 1024 / Math.max(vw, vh, 1));
       const pngBase64 = await svgToBase64Png(activeSvg.content, Math.round(vw * scale), Math.round(vh * scale));
 
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
+      console.log('[suggest-fonts] invoking LLM:', 'claude-sonnet-5');
+      const res = await fetch('/api/claude', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-api-key': process.env.EXPO_PUBLIC_CLAUDE_API_KEY ?? '',
-          'anthropic-version': '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true',
         },
         body: JSON.stringify({
-          model: 'claude-sonnet-4-6',
+          model: 'claude-sonnet-5',
           max_tokens: 1000,
           messages: [{
             role: 'user',
@@ -988,18 +1060,29 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
       const vw  = vbParts[2] ?? 800;
       const vh  = vbParts[3] ?? 600;
 
-      // Rasterize WITHOUT the user's editable text fields so the AI neither sees
-      // them in the image (and re-creates duplicates) nor treats them as artwork.
+      // Per-layer processing (below) rasterizes each layer on its own, so here we only
+      // need the shared raster scale and the document <defs> (gradients/styles) that
+      // each isolated layer must render against.
       const scale = Math.min(1, 1024 / Math.max(vw, vh, 1));
-      const imgDoc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
-      imgDoc.querySelectorAll('[data-text-layer="1"], [id^="_text_"]').forEach((el) => el.remove());
-      const imgSource = new XMLSerializer().serializeToString(imgDoc.documentElement);
-      const pngBase64 = await svgToBase64Png(imgSource, Math.round(vw * scale), Math.round(vh * scale));
+      const defsEl = doc.querySelector('defs');
+      const defsXml = defsEl ? new XMLSerializer().serializeToString(defsEl) : '';
 
-      // Mark every shape element across ALL layers with a temporary index.
-      // Editable text fields are skipped entirely — never tagged, never recursed
-      // into — so they can't appear in removeIds and stay untouched.
+      type TextRow = {
+        yFraction: number; xFraction: number;
+        font: string; sizeFraction: number;
+        weight: number; color: string; content: string;
+        letterSpacing: number;
+      };
+      type CustomiseResult = { hasText: boolean; rows: TextRow[]; removeIds: string[]; fonts: string[] };
+
       const SHAPE_TAGS = new Set(['path', 'g', 'circle', 'rect', 'ellipse', 'polygon', 'polyline', 'line', 'text', 'tspan', 'use']);
+
+      // Send ONLY the content layers to the model in ONE call — skip full-canvas
+      // backgrounds and existing editable text. Including the whole document (especially
+      // the background) made the model read the artwork as a single logo and over-flag
+      // graphics as text; scoping to the content, like strip-text, fixes it in a single
+      // request. The raster always maps the full viewBox onto the canvas, so excluding
+      // the background changes nothing about where text sits — field positions stay correct.
       let aiIdx = 0;
       const aiIdMap = new Map<string, Element>();
       const markEls = (el: Element) => {
@@ -1014,55 +1097,44 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
           markEls(child);
         }
       };
-      Array.from(root.children).forEach((child) => {
-        if (child.tagName.toLowerCase() !== 'defs') markEls(child);
-      });
-      const markedSvgString = new XMLSerializer().serializeToString(root);
 
-      type TextRow = {
-        yFraction: number; xFraction: number;
-        font: string; sizeFraction: number;
-        weight: number; color: string; content: string;
-        letterSpacing: number;
-      };
-      type CustomiseResult = { hasText: boolean; rows: TextRow[]; removeIds: string[]; fonts: string[] };
+      const contentEls: Element[] = [];
+      for (const layer of activeSvg.layers) {
+        if (layer.id.startsWith('_text_')) continue;                 // already-editable text
+        const layerEl = doc.getElementById(layer.id);
+        if (!layerEl || isEditableTextField(layerEl)) continue;
+        if (isFullCanvasLayer(doc.documentElement, layer.id, vw, vh)) {
+          console.log('[customise] skipping full-canvas background layer:', layer.id);
+          continue;
+        }
+        contentEls.push(layerEl);
+      }
+      contentEls.forEach((el) => markEls(el));
+      const contentXml = contentEls.map((el) => new XMLSerializer().serializeToString(el)).join('');
+      // Scoped raster: defs + content layers only (no background) at the full viewBox.
+      const contentSvg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="${viewBox}">${defsXml}${contentXml}</svg>`;
+      const pngBase64 = await svgToBase64Png(contentSvg, Math.round(vw * scale), Math.round(vh * scale));
 
-      setAiStatusMsg('Thinking…');
-      const response = await fetch('https://api.anthropic.com/v1/messages', {
+      setAiStatusMsg('Detecting text…');
+      console.log('[customise] invoking LLM:', TEXT_PARSE_MODEL);
+      const response = await fetch('/api/claude', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': process.env.EXPO_PUBLIC_CLAUDE_API_KEY ?? '',
-          'anthropic-version': '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true',
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: 'claude-sonnet-4-6',
+          model: TEXT_PARSE_MODEL,
           max_tokens: 8192,
           messages: [{
             role: 'user',
             content: [
               { type: 'image', source: { type: 'base64', media_type: 'image/png', data: pngBase64 } },
-              { type: 'text', text: `Analyze this SVG design image and its source.
+              { type: 'text', text: `Analyze this SVG image and its source.
 
-TASK 1 — Text detection: Examine the image carefully. Detect ALL text present, including text rendered as outlined or filled path shapes (not just SVG <text> elements). For each distinct line or row of text, estimate:
-- yFraction: vertical center as a fraction of image height (0.0 = top edge, 1.0 = bottom edge)
-- xFraction: horizontal center as a fraction of image width (0.0 = left, 1.0 = right)
-- font: name of the closest matching Google Font
-- sizeFraction: font cap-height as a fraction of image height (e.g. 0.08 if text height ≈ 8% of image)
-- weight: CSS font-weight integer (100, 200, 300, 400, 500, 600, 700, 800, or 900)
-- color: dominant text fill color as CSS hex (e.g. "#ffffff")
-- content: the exact text string if legible, else ""
-- letterSpacing: CSS letter-spacing in em units. Default to 0.0 (normal) if you are not certain — only use a non-zero value when you can clearly see unusually wide or condensed tracking (e.g. 0.1 slightly wide, 0.3 very wide, -0.05 condensed)
-
-IMPORTANT: If a single horizontal line contains multiple words in different colors, fonts, sizes, or styles, return a SEPARATE row for each such word — same yFraction, but its own xFraction, color and font. Do NOT merge differently-styled words on one line into a single row.
-
-TASK 2 — Text element removal: Most SVG elements have a data-ai-idx attribute. Return all data-ai-idx values of elements that visually render as text — including <text>/<tspan> AND path/group elements whose shapes form letter outlines. Return the group index when children together form a word. NOTE: already-editable text fields have deliberately NOT been given a data-ai-idx — never invent indices for them; only return indices that appear in the source below.
+${TEXT_PARSING_PROMPT}
 
 TASK 3 — Font suggestions: Suggest 2–4 Google Font names that suit the style, mood, and colour palette of this design. Return names only.
 
 SVG source:
-${markedSvgString}
+${contentXml}
 
 Return ONLY valid JSON, no markdown:
 {"hasText":true,"rows":[{"yFraction":0.3,"xFraction":0.5,"font":"Playfair Display","sizeFraction":0.1,"weight":700,"color":"#ffffff","content":"HELLO","letterSpacing":0}],"removeIds":["3","9"],"fonts":["Playfair Display","Lato"]}` },
@@ -1075,7 +1147,6 @@ Return ONLY valid JSON, no markdown:
         const e = await response.json().catch(() => ({})) as { error?: { message?: string } };
         throw new Error(e.error?.message ?? `API error ${response.status}`);
       }
-
       const data = await response.json() as { content: Array<{ type: string; text: string }> };
       const rawText = (data.content?.[0]?.text ?? '')
         .replace(/^```(?:json)?\s*/im, '').replace(/```\s*$/m, '').trim();
@@ -1083,26 +1154,32 @@ Return ONLY valid JSON, no markdown:
       let parsed: CustomiseResult;
       try {
         parsed = JSON.parse(rawText) as CustomiseResult;
+        if (!Array.isArray(parsed.rows)) parsed.rows = [];
         if (!Array.isArray(parsed.removeIds)) parsed.removeIds = [];
         if (!Array.isArray(parsed.fonts)) parsed.fonts = [];
       } catch {
         throw new Error('AI returned an unreadable response');
       }
+      console.log('[customise] LLM returned:', { hasText: parsed.hasText, removeIds: parsed.removeIds, rows: parsed.rows.length });
 
-      // Remove identified text elements
       setAiStatusMsg('Applying changes…');
-      for (const sid of parsed.removeIds) {
+      const removeIds = filterOutBackgroundIds(doc.documentElement, parsed.removeIds, vw, vh, 'customise');
+      console.log(`[customise] removing ${removeIds.length}/${parsed.removeIds.length} element(s) after guard`);
+      for (const sid of removeIds) {
         const el = aiIdMap.get(sid);
         el?.parentNode?.removeChild(el);
       }
       for (const [, el] of aiIdMap) el.removeAttribute('data-ai-idx');
 
+      const allRows = parsed.hasText ? parsed.rows : [];
+      const allFonts = parsed.fonts;
+
       // Re-add editable text layers (same placement logic as strip-text)
       const newTextLayers: SvgLayer[] = [];
-      if (parsed.hasText && parsed.rows.length > 0) {
+      if (allRows.length > 0) {
         const Y_THRESHOLD = 0.03;
-        const groups: (typeof parsed.rows)[] = [];
-        const sorted = [...parsed.rows].sort((a, b) => a.yFraction - b.yFraction);
+        const groups: TextRow[][] = [];
+        const sorted = [...allRows].sort((a, b) => a.yFraction - b.yFraction);
         for (const row of sorted) {
           const last = groups[groups.length - 1];
           if (last && Math.abs(row.yFraction - last[0].yFraction) <= Y_THRESHOLD) {
@@ -1160,8 +1237,8 @@ Return ONLY valid JSON, no markdown:
         });
       }
 
-      // Store suggested fonts (load them for preview)
-      const validFonts = parsed.fonts.filter(Boolean);
+      // Store suggested fonts (load them for preview) — deduped across all layers.
+      const validFonts = Array.from(new Set(allFonts.filter(Boolean))).slice(0, 6);
       validFonts.forEach((f) => loadGoogleFontLink(f));
       setCustomiseFonts(validFonts);
 
@@ -1207,16 +1284,14 @@ Return ONLY valid JSON, no markdown:
       const vh = vb[3] ?? 600;
       const scale = Math.min(1, 1024 / Math.max(vw, vh, 1));
       const pngBase64 = await svgToBase64Png(activeSvg.content, Math.round(vw * scale), Math.round(vh * scale));
-      const res = await fetch('https://api.anthropic.com/v1/messages', {
+      console.log('[taxonomy] invoking LLM:', 'claude-sonnet-5');
+      const res = await fetch('/api/claude', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'x-api-key': process.env.EXPO_PUBLIC_CLAUDE_API_KEY ?? '',
-          'anthropic-version': '2023-06-01',
-          'anthropic-dangerous-direct-browser-access': 'true',
         },
         body: JSON.stringify({
-          model: 'claude-sonnet-4-6',
+          model: 'claude-sonnet-5',
           max_tokens: 512,
           messages: [{
             role: 'user',
@@ -1423,18 +1498,16 @@ Return ONLY valid JSON — no markdown, no explanation:
 
       const apiHeaders = {
         'Content-Type': 'application/json',
-        'x-api-key': process.env.EXPO_PUBLIC_CLAUDE_API_KEY ?? '',
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true',
       };
 
       // ── Suggest font ───────────────────────────────────────────────────────
       if (action === 'suggest-font') {
-        const response = await fetch('https://api.anthropic.com/v1/messages', {
+        console.log('[suggest-font] invoking LLM:', 'claude-sonnet-5');
+        const response = await fetch('/api/claude', {
           method: 'POST',
           headers: apiHeaders,
           body: JSON.stringify({
-            model: 'claude-sonnet-4-6',
+            model: 'claude-sonnet-5',
             max_tokens: 1000,
             messages: [{
               role: 'user',
@@ -1467,11 +1540,12 @@ Return JSON only, no markdown.` },
       // ── Check text ─────────────────────────────────────────────────────────
       if (action === 'check-text') {
         setAiStatusMsg('Reading text…');
-        const response = await fetch('https://api.anthropic.com/v1/messages', {
+        console.log('[check-text] invoking LLM:', 'claude-sonnet-5');
+        const response = await fetch('/api/claude', {
           method: 'POST',
           headers: apiHeaders,
           body: JSON.stringify({
-            model: 'claude-sonnet-4-6',
+            model: 'claude-sonnet-5',
             max_tokens: 512,
             messages: [{
               role: 'user',
@@ -1525,11 +1599,12 @@ No markdown, no code fences, no explanation. Example:
         const rstMarkedSvg = new XMLSerializer().serializeToString(layerEl);
 
         setAiStatusMsg('Finding text…');
-        const response = await fetch('https://api.anthropic.com/v1/messages', {
+        console.log('[remove-specific-text] invoking LLM:', 'claude-sonnet-5');
+        const response = await fetch('/api/claude', {
           method: 'POST',
           headers: apiHeaders,
           body: JSON.stringify({
-            model: 'claude-sonnet-4-6',
+            model: 'claude-sonnet-5',
             max_tokens: 1024,
             messages: [{
               role: 'user',
@@ -1608,11 +1683,13 @@ Respond with ONLY a valid JSON object — no markdown, no code fences:
         parsed = JSON.parse(cachedRaw) as StripResult;
       } else {
         setAiStatusMsg('Detecting text…');
-        const response = await fetch('https://api.anthropic.com/v1/messages', {
+        const stripModel = TEXT_PARSE_MODEL;
+        console.log('[strip-text] invoking LLM:', stripModel);
+        const response = await fetch('/api/claude', {
           method: 'POST',
           headers: apiHeaders,
           body: JSON.stringify({
-            model: 'claude-sonnet-4-6',
+            model: stripModel,
             max_tokens: 8192,
             messages: [{
               role: 'user',
@@ -1620,19 +1697,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences:
                 { type: 'image', source: { type: 'base64', media_type: 'image/png', data: pngBase64 } },
                 { type: 'text', text: `Analyze this SVG layer image and its source code.
 
-TASK 1 — Text detection: Examine the image carefully. Detect ALL text present, including text rendered as outlined or filled path shapes (not just SVG <text> elements). For each distinct line or row of text, estimate:
-- yFraction: vertical center as a fraction of image height (0.0 = top edge, 1.0 = bottom edge)
-- xFraction: horizontal center as a fraction of image width (0.0 = left, 1.0 = right)
-- font: name of the closest matching Google Font
-- sizeFraction: font cap-height as a fraction of image height (e.g. 0.08 if text height ≈ 8% of image)
-- weight: CSS font-weight integer (100, 200, 300, 400, 500, 600, 700, 800, or 900)
-- color: dominant text fill color as CSS hex (e.g. "#ffffff")
-- content: the exact text string if legible, else ""
-- letterSpacing: CSS letter-spacing in em units. Default to 0.0 (normal) if you are not certain — only use a non-zero value when you can clearly see unusually wide or condensed tracking (e.g. 0.1 slightly wide, 0.3 very wide, -0.05 condensed)
-
-IMPORTANT: If a single horizontal line contains multiple words in different colors, fonts, sizes, or styles, return a SEPARATE row for each such word — same yFraction, but its own xFraction, color and font. Do NOT merge differently-styled words on one line into a single row.
-
-TASK 2 — Text element identification: Most SVG elements in the source have a data-ai-idx attribute. Identify which elements visually render as text — including <text>/<tspan> elements AND <path>/<g> elements whose shapes form letter or word outlines. IMPORTANT: if a <g> group contains child paths that together form a word, return the group's data-ai-idx (not the individual letter path indices). Return every text element's data-ai-idx in "removeIds". NOTE: already-editable text fields have deliberately NOT been given a data-ai-idx — never invent indices for them; only return indices that actually appear in the source below.
+${TEXT_PARSING_PROMPT}
 
 SVG source:
 ${markedSvgString}
@@ -1665,10 +1730,23 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
 
       // Remove identified text elements directly from the DOM
       setAiStatusMsg('Applying changes…');
-      for (const sid of parsed.removeIds) {
+      console.log('[strip-text] LLM returned:', {
+        hasText: parsed.hasText,
+        rows: parsed.rows?.length ?? 0,
+        removeIds: parsed.removeIds,
+      });
+      const stripRemoveIds = filterOutBackgroundIds(doc.documentElement, parsed.removeIds, vw, vh, 'strip-text');
+      let stripDeleted = 0;
+      for (const sid of stripRemoveIds) {
         const el = aiIdMap.get(sid);
-        el?.parentNode?.removeChild(el);
+        if (el?.parentNode) {
+          el.parentNode.removeChild(el);
+          stripDeleted++;
+        } else {
+          console.log('[strip-text] removeId has no matching element:', sid);
+        }
       }
+      console.log(`[strip-text] deleted ${stripDeleted}/${parsed.removeIds.length} element(s)`);
       // Clean up temporary index attributes from remaining elements
       for (const [, el] of aiIdMap) {
         el.removeAttribute('data-ai-idx');
@@ -2027,7 +2105,6 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
               <div
                 ref={svgCanvasRef}
                 onClick={handleCanvasClick}
-                onDoubleClick={handleCanvasDblClick}
                 className="relative flex-1 overflow-auto flex items-center justify-center min-w-0"
                 style={{
                   backgroundImage: 'radial-gradient(circle, #3f3f46 1px, transparent 1px)',
@@ -2064,9 +2141,23 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                       <div
                         ref={overlayRef}
                         data-sel-overlay
+                        // An empty text layer has no clickable geometry, so let its
+                        // placeholder box catch clicks (re-focusing the input) instead
+                        // of falling through and selecting the background. Non-empty
+                        // layers stay click-through so glyph/sub-text clicks still work.
+                        onClick={selectionIsEmptyText ? () => {
+                          setTextFormOpen(true);
+                          requestAnimationFrame(() => {
+                            const input = textContentRef.current;
+                            if (!input) return;
+                            input.focus();
+                            const end = input.value.length;
+                            input.setSelectionRange(end, end);
+                          });
+                        } : undefined}
                         style={{
                           position: 'absolute',
-                          pointerEvents: 'none',
+                          pointerEvents: selectionIsEmptyText ? 'auto' : 'none',
                           outline: '2px dashed #3b82f6',
                           boxSizing: 'border-box',
                           zIndex: 5,
@@ -2106,77 +2197,6 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                   </>
                 ) : null}
 
-                {inlineEdit && selectedTextProps && (
-                  <>
-                    {/* Hide the underlying SVG text while editing so it doesn't show through
-                        behind the input as duplicated text. visibility (not display) keeps
-                        its box, so the editor position and selection overlay stay put. */}
-                    <style>{`.svg-canvas #${CSS.escape(inlineEdit.layerId)}{visibility:hidden}`}</style>
-                    {/* "Editing" badge floating above the field, so entering edit mode is unmistakable */}
-                    <div
-                      style={{
-                        position: 'absolute',
-                        left:     inlineEdit.left,
-                        top:      Math.max(0, inlineEdit.top - 22),
-                        zIndex:   21,
-                        display:  'flex',
-                        alignItems: 'center',
-                        gap:      4,
-                        height:   18,
-                        padding:  '0 7px',
-                        background: '#3b82f6',
-                        color:    '#fff',
-                        fontSize: 11,
-                        fontWeight: 600,
-                        lineHeight: 1,
-                        borderRadius: 4,
-                        whiteSpace: 'nowrap',
-                        pointerEvents: 'none',
-                        boxShadow: '0 1px 3px rgba(0,0,0,0.35)',
-                      }}
-                    >
-                      Editing text · Enter to finish
-                    </div>
-                    <input
-                      autoFocus
-                      type="text"
-                      value={selectedTextProps.content}
-                      onFocus={(e) => e.currentTarget.select()}
-                      onChange={(e) => updateTextLayer({ content: e.target.value })}
-                      onBlur={() => setInlineEdit(null)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Escape' || e.key === 'Enter') {
-                          setInlineEdit(null);
-                          e.preventDefault();
-                        }
-                      }}
-                      onPointerDown={(e) => e.stopPropagation()}
-                      onClick={(e) => e.stopPropagation()}
-                      style={{
-                        position: 'absolute',
-                        left:      inlineEdit.left,
-                        top:       inlineEdit.top,
-                        minWidth:  inlineEdit.width,
-                        height:    inlineEdit.height,
-                        fontSize:  inlineEdit.fontSize,
-                        fontFamily: inlineEdit.fontFamily,
-                        fontWeight: inlineEdit.fontWeight,
-                        color:     inlineEdit.color,
-                        caretColor: '#3b82f6',
-                        background: 'rgba(0,0,0,0.55)',
-                        border:    '2px solid #3b82f6',
-                        borderRadius: 3,
-                        outline:   'none',
-                        boxShadow: '0 0 0 3px rgba(59,130,246,0.35), 0 2px 8px rgba(0,0,0,0.4)',
-                        padding:   '0 6px',
-                        zIndex:    20,
-                        textAlign: 'center',
-                        lineHeight: 1,
-                        cursor:    'text',
-                      }}
-                    />
-                  </>
-                )}
               </div>
 
               {/* ── Layers panel ─────────────────────────────────────── */}
@@ -2191,6 +2211,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                   hiddenLayers={hiddenLayers}
                   subLayerMap={subLayerMap}
                   selectedTextProps={selectedTextProps}
+                  textContentRef={textContentRef}
                   text={{ form: textForm, setForm: setTextForm, open: textFormOpen, setOpen: setTextFormOpen }}
                   ai={{ loading: aiLoading, error: aiError, actionsOpen: aiActionsOpen, setActionsOpen: setAiActionsOpen, fontSuggestion, suggestedFontName, removeTextQuery, setRemoveTextQuery, showRemoveTextInput, setShowRemoveTextInput, textCheckResult, setTextCheckResult }}
                   color={{ from: colorReplaceFrom, to: colorReplaceTo, setTo: setColorReplaceTo, open: colorReplaceOpen, setOpen: setColorReplaceOpen, layerColors, baselineRef: colorBaselineRef }}

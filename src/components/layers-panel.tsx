@@ -77,6 +77,7 @@ export interface LayersPanelProps {
   hiddenLayers: Set<string>;
   subLayerMap: Map<string, Array<{ id: string; label: string }>>;
   selectedTextProps: SelectedTextProps | null;
+  textContentRef: RefObject<HTMLInputElement | null>;
 
   text: TextBundle;
   ai: AiBundle;
@@ -123,6 +124,7 @@ const TAXONOMY_COLOURS: Record<string, string> = {
 export function LayersPanel({
   activeSvg, backgroundLayerId, isDirty,
   selectedLayer, selectedLayers, selectedSubElId, hiddenLayers, subLayerMap, selectedTextProps,
+  textContentRef,
   text, ai, color, fonts, taxonomy,
   onSelectOne, onSetSelectedLayers, onSetSelectedLayer, onSetSelectedSubElId,
   onToggleLayer, onReorderLayers,
@@ -240,6 +242,7 @@ export function LayersPanel({
         {text.open && (
           <div className="px-2 pb-2 flex flex-col gap-1.5">
             <input
+              ref={textContentRef}
               type="text"
               value={selectedTextProps ? selectedTextProps.content : text.form.content}
               onChange={(e) =>
