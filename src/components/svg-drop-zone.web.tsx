@@ -45,6 +45,37 @@ type SampleName = (typeof SAMPLES)[number]['name'];
 const isEditableTextField = (el: Element) =>
   el.getAttribute('data-text-layer') === '1' || el.id.startsWith('_text_');
 
+// Rewrites a cloned element's id and every descendant id to a fresh namespace, and fixes
+// intra-subtree references (href / xlink:href / url(#…)) so a duplicated layer doesn't
+// collide with, or point back at, the original — e.g. curved text's arc path referenced
+// by its <textPath>. References to shared <defs> (gradients, filters) are left untouched.
+const remapClonedIds = (el: Element, newBaseId: string, origId: string) => {
+  const idMap = new Map<string, string>();
+  const collect = (node: Element) => {
+    if (node.id) {
+      const nid = node.id === origId ? newBaseId : `${newBaseId}__${node.id}`;
+      idMap.set(node.id, nid);
+      node.id = nid;
+    }
+    Array.from(node.children).forEach((c) => collect(c));
+  };
+  collect(el);
+  const fixRefs = (node: Element) => {
+    for (const attr of ['href', 'xlink:href']) {
+      const v = node.getAttribute(attr);
+      if (v && v.startsWith('#') && idMap.has(v.slice(1))) node.setAttribute(attr, `#${idMap.get(v.slice(1))}`);
+    }
+    for (const attr of ['fill', 'stroke', 'clip-path', 'mask', 'filter', 'style']) {
+      const v = node.getAttribute(attr);
+      if (v && v.includes('url(#')) {
+        node.setAttribute(attr, v.replace(/url\(#([^)]+)\)/g, (m, id) => (idMap.has(id) ? `url(#${idMap.get(id)})` : m)));
+      }
+    }
+    Array.from(node.children).forEach((c) => fixRefs(c));
+  };
+  fixRefs(el);
+};
+
 // Shared text-detection + element-identification instructions used by BOTH the
 // strip-text pass and the customise pass, so the two never drift apart. Callers
 // wrap this with their own intro line, any extra tasks (e.g. font suggestions),
@@ -181,6 +212,7 @@ export function SvgDropZone() {
   const colorBaselineRef        = useRef<string | null>(null);
   const autoColorSelectedRef    = useRef(false);
   const undoStackRef             = useRef<Array<{ content: string; layers: SvgLayer[] }>>([]);
+  const layerClipboardRef        = useRef<string | null>(null);
   const [undoCount, setUndoCount] = useState(0);
   const textEditSnappedRef = useRef(false);
   const fileInputRef       = useRef<HTMLInputElement>(null);
@@ -1931,6 +1963,67 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     return () => window.removeEventListener('keydown', onKey);
   }, [undo]);
 
+  // Duplicate a layer: deep-clone it, give the clone fresh ids, nudge it so it's visibly
+  // offset, insert it just above the original in paint order, and select it.
+  const duplicateLayer = useCallback((layerId: string) => {
+    if (!activeSvg) return;
+    const srcLayer = activeSvg.layers.find((l) => l.id === layerId);
+    if (!srcLayer) return;
+    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+    const el = doc.getElementById(layerId);
+    if (!el) return;
+    snapshotForUndo(activeSvg.content, activeSvg.layers);
+    const clone = el.cloneNode(true) as Element;
+    const newId = `_layer_copy_${Date.now()}`;
+    remapClonedIds(clone, newId, layerId);
+    clone.setAttribute('transform', applyTranslateDelta(clone.getAttribute('transform') ?? '', 12, 12));
+    el.parentNode?.insertBefore(clone, el.nextSibling);
+    const content = new XMLSerializer().serializeToString(doc.documentElement);
+    const newLayer: SvgLayer = { id: newId, label: `${srcLayer.label} copy` };
+    setActiveSvg((prev) => {
+      if (!prev) return null;
+      const idx = prev.layers.findIndex((l) => l.id === layerId);
+      const layers = [...prev.layers];
+      layers.splice(idx < 0 ? layers.length : idx + 1, 0, newLayer);
+      return { ...prev, content, layers };
+    });
+    setSelectedLayer(newId);
+    setSelectedLayers(new Set([newId]));
+    setSelectedSubElId(null);
+  }, [activeSvg, snapshotForUndo]);
+
+  // Delete a layer (removes its element and its layers-list entry). Undoable.
+  const deleteLayer = useCallback((layerId: string) => {
+    if (!activeSvg) return;
+    snapshotForUndo(activeSvg.content, activeSvg.layers);
+    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+    doc.getElementById(layerId)?.remove();
+    const content = new XMLSerializer().serializeToString(doc.documentElement);
+    setActiveSvg((prev) => (prev ? { ...prev, content, layers: prev.layers.filter((l) => l.id !== layerId) } : null));
+    setSelectedLayer((cur) => (cur === layerId ? null : cur));
+    setSelectedLayers((prev) => {
+      if (!prev.has(layerId)) return prev;
+      const next = new Set(prev); next.delete(layerId); return next;
+    });
+    setSelectedSubElId(null);
+  }, [activeSvg, snapshotForUndo]);
+
+  // Ctrl/Cmd+C copies the selected layer; Ctrl/Cmd+V pastes it as a duplicate.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      const key = e.key.toLowerCase();
+      if (key === 'c') {
+        if (selectedLayer) layerClipboardRef.current = selectedLayer;
+      } else if (key === 'v') {
+        if (layerClipboardRef.current) { e.preventDefault(); duplicateLayer(layerClipboardRef.current); }
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [selectedLayer, duplicateLayer]);
+
   // ── File drag handlers (drop zone) ─────────────────────────────────────────
 
   const handleDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
@@ -2222,6 +2315,8 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                   onSetSelectedLayer={setSelectedLayer}
                   onSetSelectedSubElId={setSelectedSubElId}
                   onToggleLayer={toggleLayer}
+                  onDuplicateLayer={duplicateLayer}
+                  onDeleteLayer={deleteLayer}
                   onReorderLayers={reorderLayers}
                   onUpdateTextLayer={updateTextLayer}
                   onAddTextLayer={addTextLayer}

@@ -1,7 +1,7 @@
 import { type ActiveSvg, type SelectedTextProps, type TaxonomyGroup } from '@/lib/svg-utils';
 import { cn } from '@/lib/utils';
 import React, { Dispatch, RefObject, SetStateAction, useRef, useState } from 'react';
-import { EyeIcon, EyeSlashIcon, GripIcon, SparklesIcon } from './svg-icons';
+import { DuplicateIcon, EyeIcon, EyeSlashIcon, GripIcon, SparklesIcon, TrashIcon } from './svg-icons';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -90,6 +90,8 @@ export interface LayersPanelProps {
   onSetSelectedLayer: Dispatch<SetStateAction<string | null>>;
   onSetSelectedSubElId: Dispatch<SetStateAction<string | null>>;
   onToggleLayer: (id: string) => void;
+  onDuplicateLayer: (id: string) => void;
+  onDeleteLayer: (id: string) => void;
   onReorderLayers: (fromId: string, toId: string, before: boolean) => void;
   onUpdateTextLayer: (attrs: Partial<TextLayerAttrs>) => void;
   onAddTextLayer: () => void;
@@ -127,7 +129,7 @@ export function LayersPanel({
   textContentRef,
   text, ai, color, fonts, taxonomy,
   onSelectOne, onSetSelectedLayers, onSetSelectedLayer, onSetSelectedSubElId,
-  onToggleLayer, onReorderLayers,
+  onToggleLayer, onDuplicateLayer, onDeleteLayer, onReorderLayers,
   onUpdateTextLayer, onAddTextLayer, onCurvePointerDown, onCurvePointerUp,
   onRunAiAction,
   onSelectFromColor, onClearFromColor, onReplaceColor,
@@ -623,6 +625,7 @@ export function LayersPanel({
             const isSelected = selectedLayers.has(layer.id);
             const isDragged  = dragLayerId === layer.id;
             const isCanvas   = layer.id === backgroundLayerId;
+            const isDuplicate = layer.id.startsWith('_layer_copy_');
             const dropBefore = dropPosition?.targetId === layer.id && dropPosition.before;
             const dropAfter  = dropPosition?.targetId === layer.id && !dropPosition.before;
             return (
@@ -690,6 +693,25 @@ export function LayersPanel({
                     <span className="shrink-0 text-[9px] font-semibold uppercase tracking-wider text-zinc-500 bg-zinc-800 px-1 py-0.5 rounded">
                       bg
                     </span>
+                  )}
+
+                  <button
+                    onPointerDown={(e) => e.stopPropagation()}
+                    onClick={(e) => { e.stopPropagation(); onDuplicateLayer(layer.id); }}
+                    title="Duplicate layer"
+                    className="shrink-0 text-zinc-500 hover:text-zinc-200 opacity-0 group-hover:opacity-100 transition-opacity"
+                  >
+                    <DuplicateIcon className="size-3.5" />
+                  </button>
+                  {isDuplicate && (
+                    <button
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => { e.stopPropagation(); onDeleteLayer(layer.id); }}
+                      title="Delete layer"
+                      className="shrink-0 text-zinc-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
+                    >
+                      <TrashIcon className="size-3.5" />
+                    </button>
                   )}
                 </div>
 
