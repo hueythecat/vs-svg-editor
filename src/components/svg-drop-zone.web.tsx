@@ -180,6 +180,13 @@ export function SvgDropZone() {
     startSvgX: number;   startSvgY: number;
     baseTransforms: Record<string, string>;
   } | null>(null);
+  const [canvasRotate, setCanvasRotate] = useState<{
+    layerId: string;
+    cx: number; cy: number;              // rotation centre in SVG root space
+    startClientX: number; startClientY: number;
+    startAngle: number;                  // pointer angle at grab, degrees
+    baseTransform: string;
+  } | null>(null);
   const [textForm, setTextForm] = useState({ content: 'Text', font: 'Arial', size: 48, weight: 400, color: '#000000', curve: 0, letterSpacing: 0 });
   const [aiLoading, setAiLoading]         = useState(false);
   const [aiError, setAiError]             = useState<string | null>(null);
@@ -406,12 +413,8 @@ export function SvgDropZone() {
           layerEl.setAttribute('transform', `translate(${dx}, ${dy}) ${canvasDrag.baseTransforms[id]}`.trim());
         }
       });
-      // Translate the HTML overlay to follow the layer (screen-pixel delta)
-      if (overlayRef.current) {
-        const sdx = e.clientX - canvasDrag.startClientX;
-        const sdy = e.clientY - canvasDrag.startClientY;
-        overlayRef.current.style.transform = `translate(${sdx}px, ${sdy}px)`;
-      }
+      // Recompute the overlay from the live element so it follows the layer.
+      positionOverlayRef.current();
     };
 
     const onUp = () => {
@@ -433,6 +436,55 @@ export function SvgDropZone() {
       window.removeEventListener('mouseup', onUp);
     };
   }, [canvasDrag]);
+
+  // Global mouse listeners while a layer is being rotated
+  useEffect(() => {
+    if (!canvasRotate) return;
+    const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
+
+    const onMove = (e: MouseEvent) => {
+      if (!svgEl) return;
+      if (Math.abs(e.clientX - canvasRotate.startClientX) > 2 ||
+          Math.abs(e.clientY - canvasRotate.startClientY) > 2) {
+        dragMovedRef.current = true;
+      }
+      if (!dragMovedRef.current) return;
+      const pt = svgEl.createSVGPoint();
+      pt.x = e.clientX; pt.y = e.clientY;
+      const cur = pt.matrixTransform(svgEl.getScreenCTM()!.inverse());
+      const angle = Math.atan2(cur.y - canvasRotate.cy, cur.x - canvasRotate.cx) * 180 / Math.PI;
+      let delta = angle - canvasRotate.startAngle;
+      if (e.shiftKey) delta = Math.round(delta / 15) * 15;   // snap to 15° with Shift
+      const layerEl = svgEl.querySelector(`#${CSS.escape(canvasRotate.layerId)}`);
+      if (layerEl) {
+        layerEl.setAttribute(
+          'transform',
+          `rotate(${delta.toFixed(2)}, ${canvasRotate.cx}, ${canvasRotate.cy}) ${canvasRotate.baseTransform}`.trim(),
+        );
+      }
+      // Recompute the overlay from the live element so it tracks the rotation.
+      positionOverlayRef.current();
+    };
+
+    const onUp = () => {
+      if (svgEl && dragMovedRef.current) {
+        const content = new XMLSerializer().serializeToString(svgEl);
+        setActiveSvg((prev) => (prev ? { ...prev, content } : null));
+      }
+      setCanvasRotate(null);
+    };
+
+    document.body.style.cursor = 'grabbing';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [canvasRotate]);
 
   // Scroll the matching panel row into view whenever selectedLayer changes
   useEffect(() => {
@@ -500,13 +552,16 @@ export function SvgDropZone() {
   // (left, top, width, height, display, transform) is set directly so React
   // can never override them between layout-effect runs.
 
-  useLayoutEffect(() => {
+  // Positions the selection overlay so it hugs the layer even when rotated/scaled:
+  // the layer's *local* bbox is mapped through its screen CTM (giving a rotated
+  // rect on screen), then the overlay is placed at the top-left corner and rotated
+  // to match. Called from the layout effect and live during drag/rotate so the box
+  // tracks the item continuously.
+  const positionSelectionOverlay = useCallback(() => {
     const overlay    = overlayRef.current;
     const subOverlay = subOverlayRef.current;
 
-    // Always clear any drag-time transform first
     if (overlay) overlay.style.transform = '';
-    // Sub-overlay starts hidden each cycle; shown below if needed
     if (subOverlay) subOverlay.style.display = 'none';
 
     if (!showSelectionOverlay || !selectionLayerId || !overlay) return;
@@ -515,64 +570,112 @@ export function SvgDropZone() {
     const canvasEl = svgCanvasRef.current;
     if (!svgEl || !canvasEl) return;
 
-    const layerId = selectionLayerId;
-    const layerEl = svgEl.querySelector(`#${CSS.escape(layerId)}`);
+    const layerEl = svgEl.querySelector(`#${CSS.escape(selectionLayerId)}`) as SVGGraphicsElement | null;
     if (!layerEl) return;
+
+    const pad = 4;
 
     try {
       const canvasRect = canvasEl.getBoundingClientRect();
-      let lr: { left: number; top: number; width: number; height: number } =
-        layerEl.getBoundingClientRect();
-      if (!lr.width && !lr.height) {
-        // An empty text layer collapses to a zero-size box, so there'd be nothing
-        // to show or click. Synthesize a placeholder rect at the text anchor (using
-        // the element's own screen CTM so ancestor transforms are included) so the
-        // selection overlay still appears and remains a drag/click target.
-        const textEl = (layerEl.tagName.toLowerCase() === 'text'
-          ? layerEl
-          : layerEl.querySelector('text')) as SVGTextElement | null;
-        const ctm = textEl?.getScreenCTM();
-        if (!textEl || !ctm) return;
-        const groupEl = layerEl as Element;
-        const x = parseFloat(
-          textEl.getAttribute('x') ?? groupEl.getAttribute('data-cx') ?? '0');
-        const y = parseFloat(
-          textEl.getAttribute('y') ?? groupEl.getAttribute('data-cy') ?? '0');
-        const fs = parseFloat(
-          textEl.getAttribute('font-size') ?? groupEl.getAttribute('data-fontsize') ?? '16');
-        const pt = (svgEl as SVGSVGElement).createSVGPoint();
-        pt.x = x; pt.y = y;
-        const sp = pt.matrixTransform(ctm);
-        const h = Math.max(fs * ctm.a, 12);
-        const w = Math.max(h * 3, 40); // generous width so the empty field is easy to click
-        const anchor = textEl.getAttribute('text-anchor');
-        const left = anchor === 'end' ? sp.x - w : anchor === 'middle' ? sp.x - w / 2 : sp.x;
-        // dominant-baseline:middle keeps the glyph centered on y
-        lr = { left, top: sp.y - h / 2, width: w, height: h };
-      }
-      const pad = 4;
+      const offX = -canvasRect.left + canvasEl.scrollLeft;
+      const offY = -canvasRect.top  + canvasEl.scrollTop;
 
-      overlay.style.left   = `${lr.left - canvasRect.left + canvasEl.scrollLeft - pad}px`;
-      overlay.style.top    = `${lr.top  - canvasRect.top  + canvasEl.scrollTop  - pad}px`;
-      overlay.style.width  = `${lr.width  + pad * 2}px`;
-      overlay.style.height = `${lr.height + pad * 2}px`;
+      // Try the tight, transform-aware box first.
+      const ctm = layerEl.getScreenCTM?.();
+      let localBox: { x: number; y: number; w: number; h: number } | null = null;
+      try {
+        const bb = layerEl.getBBox();
+        if (bb.width || bb.height) localBox = { x: bb.x, y: bb.y, w: bb.width, h: bb.height };
+      } catch { /* getBBox unsupported/detached */ }
 
-      if (subOverlay && selectedSubElId) {
-        const subEl = svgEl.querySelector(`#${CSS.escape(selectedSubElId)}`);
-        if (subEl) {
-          const sr = subEl.getBoundingClientRect();
-          // Position relative to the overlay's top-left corner (lr.left-pad, lr.top-pad)
-          subOverlay.style.display = 'block';
-          subOverlay.style.left    = `${sr.left - lr.left}px`;
-          subOverlay.style.top     = `${sr.top  - lr.top}px`;
-          subOverlay.style.width   = `${sr.width  + pad * 2}px`;
-          subOverlay.style.height  = `${sr.height + pad * 2}px`;
+      if (ctm && localBox) {
+        const sX = Math.hypot(ctm.a, ctm.b) || 1;   // screen px per local unit, x-axis
+        const sY = Math.hypot(ctm.c, ctm.d) || 1;   // …y-axis
+        const padX = pad / sX, padY = pad / sY;
+        const map = (lx: number, ly: number) => {
+          const p = svgEl.createSVGPoint();
+          p.x = lx; p.y = ly;
+          const s = p.matrixTransform(ctm);
+          return { x: s.x + offX, y: s.y + offY };
+        };
+        const P0 = map(localBox.x - padX,             localBox.y - padY);              // top-left
+        const P1 = map(localBox.x + localBox.w + padX, localBox.y - padY);             // top-right
+        const P3 = map(localBox.x - padX,             localBox.y + localBox.h + padY); // bottom-left
+        const theta  = Math.atan2(P1.y - P0.y, P1.x - P0.x);
+        const width  = Math.hypot(P1.x - P0.x, P1.y - P0.y);
+        const height = Math.hypot(P3.x - P0.x, P3.y - P0.y);
+
+        overlay.style.left            = `${P0.x}px`;
+        overlay.style.top             = `${P0.y}px`;
+        overlay.style.width           = `${width}px`;
+        overlay.style.height          = `${height}px`;
+        overlay.style.transformOrigin = '0 0';
+        overlay.style.transform       = `rotate(${theta}rad)`;
+
+        // Sub-layer highlight — mapped into the overlay's rotated frame.
+        if (subOverlay && selectedSubElId) {
+          const subEl  = svgEl.querySelector(`#${CSS.escape(selectedSubElId)}`) as SVGGraphicsElement | null;
+          const subCtm = subEl?.getScreenCTM?.();
+          let subBox: { x: number; y: number; w: number; h: number } | null = null;
+          try { const bb = subEl?.getBBox(); if (bb) subBox = { x: bb.x, y: bb.y, w: bb.width, h: bb.height }; } catch { /* ignore */ }
+          if (subEl && subCtm && subBox) {
+            const smap = (lx: number, ly: number) => {
+              const p = svgEl.createSVGPoint();
+              p.x = lx; p.y = ly;
+              const s = p.matrixTransform(subCtm);
+              return { x: s.x + offX, y: s.y + offY };
+            };
+            const S0 = smap(subBox.x, subBox.y);
+            const S1 = smap(subBox.x + subBox.w, subBox.y);
+            const S3 = smap(subBox.x, subBox.y + subBox.h);
+            // Express S0 in the overlay's local (un-rotated) frame.
+            const dx = S0.x - P0.x, dy = S0.y - P0.y;
+            const cos = Math.cos(-theta), sin = Math.sin(-theta);
+            subOverlay.style.display = 'block';
+            subOverlay.style.left    = `${dx * cos - dy * sin}px`;
+            subOverlay.style.top     = `${dx * sin + dy * cos}px`;
+            subOverlay.style.width   = `${Math.hypot(S1.x - S0.x, S1.y - S0.y)}px`;
+            subOverlay.style.height  = `${Math.hypot(S3.x - S0.x, S3.y - S0.y)}px`;
+          }
         }
+        return;
       }
+
+      // Fallback (axis-aligned): empty text layer with no measurable geometry.
+      const textEl = (layerEl.tagName.toLowerCase() === 'text'
+        ? layerEl
+        : layerEl.querySelector('text')) as SVGTextElement | null;
+      const tctm = textEl?.getScreenCTM();
+      if (!textEl || !tctm) return;
+      const x  = parseFloat(textEl.getAttribute('x') ?? layerEl.getAttribute('data-cx') ?? '0');
+      const y  = parseFloat(textEl.getAttribute('y') ?? layerEl.getAttribute('data-cy') ?? '0');
+      const fs = parseFloat(textEl.getAttribute('font-size') ?? layerEl.getAttribute('data-fontsize') ?? '16');
+      const pt = svgEl.createSVGPoint();
+      pt.x = x; pt.y = y;
+      const sp = pt.matrixTransform(tctm);
+      const h  = Math.max(fs * tctm.a, 12);
+      const w  = Math.max(h * 3, 40);
+      const anchor = textEl.getAttribute('text-anchor');
+      const left = anchor === 'end' ? sp.x - w : anchor === 'middle' ? sp.x - w / 2 : sp.x;
+
+      overlay.style.transform = '';
+      overlay.style.left   = `${left + offX - pad}px`;
+      overlay.style.top    = `${sp.y - h / 2 + offY - pad}px`;
+      overlay.style.width  = `${w + pad * 2}px`;
+      overlay.style.height = `${h + pad * 2}px`;
     } catch {
-      // getBoundingClientRect can throw if the element is not in the DOM
+      // matrixTransform / getBBox can throw if the element is detached
     }
-  }, [showSelectionOverlay, selectionLayerId, selectedSubElId, activeSvg?.content, canvasDrag]);
+  }, [showSelectionOverlay, selectionLayerId, selectedSubElId, backgroundLayerId]);
+
+  // Keep a live ref so the drag/rotate window listeners can reposition without
+  // being torn down and recreated on every render.
+  const positionOverlayRef = useRef(positionSelectionOverlay);
+  useEffect(() => { positionOverlayRef.current = positionSelectionOverlay; });
+
+  useLayoutEffect(() => {
+    positionSelectionOverlay();
+  }, [positionSelectionOverlay, activeSvg?.content, canvasDrag, canvasRotate]);
 
   // ── Layer reorder ──────────────────────────────────────────────────────────
 
@@ -676,6 +779,38 @@ export function SvgDropZone() {
       startClientX: e.clientX, startClientY: e.clientY,
       startSvgX: svgPt.x,     startSvgY: svgPt.y,
       baseTransforms,
+    });
+  }, [activeSvg, selectedLayers, backgroundLayerId, snapshotForUndo]);
+
+  // mousedown on rotate handle: rotate the single selected non-background layer
+  const handleRotateHandleMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    e.stopPropagation();
+    if (selectedLayers.size !== 1 || !activeSvg?.layers.length) return;
+    const id = [...selectedLayers][0];
+    if (id === backgroundLayerId) return;
+    const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
+    if (!svgEl) return;
+    const layerEl = svgEl.querySelector(`#${CSS.escape(id)}`) as SVGGraphicsElement | null;
+    if (!layerEl) return;
+
+    const box = bboxInRootSpace(svgEl, layerEl);
+    if (!box) return;
+    const cx = box.x + box.width / 2;
+    const cy = box.y + box.height / 2;
+
+    const pt = svgEl.createSVGPoint();
+    pt.x = e.clientX; pt.y = e.clientY;
+    const svgPt = pt.matrixTransform(svgEl.getScreenCTM()!.inverse());
+    const startAngle = Math.atan2(svgPt.y - cy, svgPt.x - cx) * 180 / Math.PI;
+    dragMovedRef.current = false;
+
+    snapshotForUndo(activeSvg.content, activeSvg.layers);
+    setCanvasRotate({
+      layerId: id,
+      cx, cy,
+      startClientX: e.clientX, startClientY: e.clientY,
+      startAngle,
+      baseTransform: layerEl.getAttribute('transform') ?? '',
     });
   }, [activeSvg, selectedLayers, backgroundLayerId, snapshotForUndo]);
 
@@ -1005,6 +1140,55 @@ export function SvgDropZone() {
     const content = new XMLSerializer().serializeToString(doc.documentElement);
     setActiveSvg((prev) => (prev ? { ...prev, content } : null));
   }, [activeSvg, backgroundLayerId, snapshotForUndo]);
+
+  // ── Match every layer's rotation to the selected layer ────────────────────
+  // Reads the selected layer's rotation (relative to the SVG root) and rotates
+  // each other non-background layer about its own centre so its final rotation
+  // matches. Requires exactly one selected layer as the reference.
+
+  const matchRotationToSelected = useCallback(() => {
+    if (!activeSvg || selectedLayers.size !== 1) return;
+    const selId = [...selectedLayers][0];
+    if (selId === backgroundLayerId) return;
+    const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
+    if (!svgEl) return;
+    const rootCtm = svgEl.getScreenCTM();
+    const selEl = svgEl.getElementById(selId) as SVGGraphicsElement | null;
+    const selCtm = selEl?.getScreenCTM();
+    if (!rootCtm || !selEl || !selCtm) return;
+
+    // Rotation of an element relative to root = angle of (root⁻¹ · elementCTM).
+    const rootInv = rootCtm.inverse();
+    const angleOf = (m: DOMMatrix) => Math.atan2(m.b, m.a) * 180 / Math.PI;
+    const targetAngle = angleOf(rootInv.multiply(selCtm));
+
+    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+    let changed = false;
+    activeSvg.layers.forEach(({ id }) => {
+      if (id === backgroundLayerId || id === selId) return;
+      const liveEl = svgEl.getElementById(id) as SVGGraphicsElement | null;
+      const docEl = doc.getElementById(id);
+      const ctm = liveEl?.getScreenCTM();
+      if (!liveEl || !docEl || !ctm) return;
+      const delta = targetAngle - angleOf(rootInv.multiply(ctm));
+      if (Math.abs(delta) < 0.01) return;
+      const box = bboxInRootSpace(svgEl, liveEl);
+      if (!box) return;
+      const cx = box.x + box.width / 2;
+      const cy = box.y + box.height / 2;
+      const existing = docEl.getAttribute('transform') ?? '';
+      docEl.setAttribute(
+        'transform',
+        `rotate(${delta.toFixed(2)}, ${cx.toFixed(2)}, ${cy.toFixed(2)}) ${existing}`.trim(),
+      );
+      changed = true;
+    });
+
+    if (!changed) return;
+    snapshotForUndo(activeSvg.content, activeSvg.layers);
+    const content = new XMLSerializer().serializeToString(doc.documentElement);
+    setActiveSvg((prev) => (prev ? { ...prev, content } : null));
+  }, [activeSvg, selectedLayers, backgroundLayerId, snapshotForUndo]);
 
   // ── Load + register a Google Font ─────────────────────────────────────────
 
@@ -2094,6 +2278,19 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                     </svg>
                 </button>
 
+                {/* Match all layers to the selected layer's rotation */}
+                <button
+                  onClick={matchRotationToSelected}
+                  disabled={selectedLayers.size !== 1 || selectionLayerId === backgroundLayerId}
+                  title="Match all layers to the selected layer's rotation"
+                  className="h-7 w-7 flex items-center justify-center rounded border border-zinc-700 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-zinc-400 disabled:cursor-not-allowed"
+                >
+                    <svg xmlns="http://www.w3.org/2000/svg" className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3" />
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M17.4 3.6v3.1h-3.1" />
+                    </svg>
+                </button>
+
                 {/* Undo */}
                 {undoCount > 0 && (
                   <button
@@ -2284,6 +2481,42 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                               pointerEvents: 'all',
                             }}
                           />
+                        )}
+                        {/* Rotate handle — single-layer selection only. Sits on a
+                            stalk above the top-centre of the selection box. */}
+                        {selectedLayers.size === 1 && (
+                          <>
+                            <div
+                              style={{
+                                position: 'absolute',
+                                left: '50%',
+                                top: -24,
+                                width: 1,
+                                height: 24,
+                                marginLeft: -0.5,
+                                background: '#3b82f6',
+                                pointerEvents: 'none',
+                              }}
+                            />
+                            <div
+                              onMouseDown={handleRotateHandleMouseDown}
+                              onClick={(e) => e.stopPropagation()}
+                              title="Drag to rotate (hold Shift to snap to 15°)"
+                              style={{
+                                position: 'absolute',
+                                left: '50%',
+                                top: -32,
+                                marginLeft: -8,
+                                width: 16,
+                                height: 16,
+                                borderRadius: '50%',
+                                background: 'white',
+                                border: '2px solid #3b82f6',
+                                cursor: 'grab',
+                                pointerEvents: 'all',
+                              }}
+                            />
+                          </>
                         )}
                       </div>
                     )}
