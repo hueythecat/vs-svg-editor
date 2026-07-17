@@ -45,6 +45,15 @@ type SampleName = (typeof SAMPLES)[number]['name'];
 const isEditableTextField = (el: Element) =>
   el.getAttribute('data-text-layer') === '1' || el.id.startsWith('_text_');
 
+// Reasons offered when a one-star rating leads the user to abort the project.
+const ABORT_REASONS = [
+  'AI call did not work as intended',
+  'Not satisfied with the result',
+  'Too difficult to use',
+  'Missing features I need',
+  'Something else',
+];
+
 // Rewrites a cloned element's id and every descendant id to a fresh namespace, and fixes
 // intra-subtree references (href / xlink:href / url(#…)) so a duplicated layer doesn't
 // collide with, or point back at, the original — e.g. curved text's arc path referenced
@@ -197,6 +206,8 @@ export function SvgDropZone() {
   const [ratingOpen, setRatingOpen]   = useState(false);   // export satisfaction prompt
   const [rating, setRating]           = useState(0);        // chosen star count (1–5)
   const [ratingHover, setRatingHover] = useState(0);        // hovered star for preview
+  const [abortReasonOpen, setAbortReasonOpen] = useState(false); // secondary abort-reason overlay
+  const [abortReason, setAbortReason] = useState<string | null>(null);
   const [textForm, setTextForm] = useState({ content: 'Text', font: 'Arial', size: 48, weight: 400, color: '#000000', curve: 0, letterSpacing: 0 });
   const [aiLoading, setAiLoading]         = useState(false);
   const [aiError, setAiError]             = useState<string | null>(null);
@@ -825,6 +836,8 @@ export function SvgDropZone() {
   // Export is gated behind a quick satisfaction prompt.
   const cancelRating = useCallback(() => {
     setRatingOpen(false);
+    setAbortReasonOpen(false);
+    setAbortReason(null);
     setRating(0);
     setRatingHover(0);
   }, []);
@@ -838,6 +851,20 @@ export function SvgDropZone() {
     setRatingHover(0);
     exportSvg();
   }, [rating, exportSvg]);
+
+  // A one-star rating turns the primary action into "Abort Project", which opens
+  // a secondary overlay asking why. Confirming records the reason and closes the
+  // project (returns to the drop zone) instead of exporting.
+  const confirmAbort = useCallback(() => {
+    if (!abortReason) return;
+    console.log('[export] project aborted — rating:', rating, 'reason:', abortReason);
+    setAbortReasonOpen(false);
+    setRatingOpen(false);
+    setAbortReason(null);
+    setRating(0);
+    setRatingHover(0);
+    clear();
+  }, [abortReason, rating, clear]);
 
   // mousedown on canvas: drag any selected non-background layer
   const handleDragHandleMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
@@ -2437,17 +2464,106 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
               </button>
               <button
                 type="button"
-                onClick={submitRating}
+                onClick={rating === 1 ? () => setAbortReasonOpen(true) : submitRating}
                 disabled={rating < 1}
                 style={{
                   height: 32, borderRadius: 6, border: 'none',
                   padding: '0 12px', fontSize: 12, fontWeight: 500, color: '#fff',
-                  background: '#2563eb',
+                  background: rating === 1 ? '#dc2626' : '#2563eb',
                   opacity: rating < 1 ? 0.4 : 1,
                   cursor: rating < 1 ? 'not-allowed' : 'pointer',
                 }}
               >
-                Submit &amp; Export
+                {rating === 1 ? 'Abort Project' : 'Submit & Export'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Secondary overlay: reason for aborting (one-star path) ────── */}
+      {abortReasonOpen && (
+        <div
+          onClick={() => setAbortReasonOpen(false)}
+          style={{
+            position: 'fixed', inset: 0, zIndex: 60,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            background: 'rgba(0,0,0,0.6)',
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: 380, maxWidth: '90vw',
+              borderRadius: 12, border: '1px solid #27272a',
+              background: '#18181b', padding: 24,
+              boxShadow: '0 20px 50px rgba(0,0,0,0.5)',
+            }}
+          >
+            <h2 style={{ textAlign: 'center', fontSize: 16, fontWeight: 600, color: '#f4f4f5', margin: 0 }}>
+              Why are you aborting?
+            </h2>
+            <p style={{ marginTop: 4, textAlign: 'center', fontSize: 12, color: '#a1a1aa' }}>
+              Tell us what went wrong. This closes the current project.
+            </p>
+
+            <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {ABORT_REASONS.map((reason) => {
+                const selected = abortReason === reason;
+                return (
+                  <button
+                    key={reason}
+                    type="button"
+                    onClick={() => setAbortReason(reason)}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 10,
+                      textAlign: 'left', width: '100%',
+                      height: 40, padding: '0 12px', borderRadius: 8,
+                      border: `1px solid ${selected ? '#dc2626' : '#3f3f46'}`,
+                      background: selected ? 'rgba(220,38,38,0.12)' : 'transparent',
+                      color: selected ? '#fca5a5' : '#d4d4d8',
+                      fontSize: 13, cursor: 'pointer',
+                    }}
+                  >
+                    <span
+                      style={{
+                        width: 14, height: 14, borderRadius: '50%', flexShrink: 0,
+                        border: `2px solid ${selected ? '#dc2626' : '#52525b'}`,
+                        background: selected ? '#dc2626' : 'transparent',
+                        boxShadow: selected ? 'inset 0 0 0 2px #18181b' : 'none',
+                      }}
+                    />
+                    {reason}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div style={{ marginTop: 24, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8 }}>
+              <button
+                type="button"
+                onClick={() => setAbortReasonOpen(false)}
+                style={{
+                  height: 32, borderRadius: 6, border: '1px solid #3f3f46',
+                  padding: '0 12px', fontSize: 12, fontWeight: 500,
+                  color: '#d4d4d8', background: 'transparent', cursor: 'pointer',
+                }}
+              >
+                Back
+              </button>
+              <button
+                type="button"
+                onClick={confirmAbort}
+                disabled={!abortReason}
+                style={{
+                  height: 32, borderRadius: 6, border: 'none',
+                  padding: '0 12px', fontSize: 12, fontWeight: 500, color: '#fff',
+                  background: '#dc2626',
+                  opacity: abortReason ? 1 : 0.4,
+                  cursor: abortReason ? 'pointer' : 'not-allowed',
+                }}
+              >
+                Abort Project
               </button>
             </div>
           </div>
