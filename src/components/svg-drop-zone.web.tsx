@@ -187,6 +187,16 @@ export function SvgDropZone() {
     startAngle: number;                  // pointer angle at grab, degrees
     baseTransform: string;
   } | null>(null);
+  const [canvasScale, setCanvasScale] = useState<{
+    layerId: string;
+    cx: number; cy: number;              // scale centre in SVG root space
+    startClientX: number; startClientY: number;
+    startDist: number;                   // pointer distance from centre at grab (root units)
+    baseTransform: string;
+  } | null>(null);
+  const [ratingOpen, setRatingOpen]   = useState(false);   // export satisfaction prompt
+  const [rating, setRating]           = useState(0);        // chosen star count (1–5)
+  const [ratingHover, setRatingHover] = useState(0);        // hovered star for preview
   const [textForm, setTextForm] = useState({ content: 'Text', font: 'Arial', size: 48, weight: 400, color: '#000000', curve: 0, letterSpacing: 0 });
   const [aiLoading, setAiLoading]         = useState(false);
   const [aiError, setAiError]             = useState<string | null>(null);
@@ -486,6 +496,54 @@ export function SvgDropZone() {
     };
   }, [canvasRotate]);
 
+  // Global mouse listeners while a layer is being scaled
+  useEffect(() => {
+    if (!canvasScale) return;
+    const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
+
+    const onMove = (e: MouseEvent) => {
+      if (!svgEl) return;
+      if (Math.abs(e.clientX - canvasScale.startClientX) > 2 ||
+          Math.abs(e.clientY - canvasScale.startClientY) > 2) {
+        dragMovedRef.current = true;
+      }
+      if (!dragMovedRef.current) return;
+      const pt = svgEl.createSVGPoint();
+      pt.x = e.clientX; pt.y = e.clientY;
+      const cur = pt.matrixTransform(svgEl.getScreenCTM()!.inverse());
+      const dist = Math.hypot(cur.x - canvasScale.cx, cur.y - canvasScale.cy);
+      const s = Math.max(dist / canvasScale.startDist, 0.05);   // uniform, guarded away from 0
+      const layerEl = svgEl.querySelector(`#${CSS.escape(canvasScale.layerId)}`);
+      if (layerEl) {
+        // Scale about the layer's centre, then apply the original transform.
+        layerEl.setAttribute(
+          'transform',
+          `translate(${canvasScale.cx}, ${canvasScale.cy}) scale(${s.toFixed(4)}) translate(${-canvasScale.cx}, ${-canvasScale.cy}) ${canvasScale.baseTransform}`.trim(),
+        );
+      }
+      positionOverlayRef.current();
+    };
+
+    const onUp = () => {
+      if (svgEl && dragMovedRef.current) {
+        const content = new XMLSerializer().serializeToString(svgEl);
+        setActiveSvg((prev) => (prev ? { ...prev, content } : null));
+      }
+      setCanvasScale(null);
+    };
+
+    document.body.style.cursor = 'nwse-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [canvasScale]);
+
   // Scroll the matching panel row into view whenever selectedLayer changes
   useEffect(() => {
     if (!selectedLayer) return;
@@ -545,6 +603,18 @@ export function SvgDropZone() {
   // overlay entirely when that layer is the locked background layer.
   const selectionLayerId = selectedLayers.size ? [...selectedLayers][0] : null;
   const showSelectionOverlay = !!selectionLayerId && selectionLayerId !== backgroundLayerId;
+
+  // Whether the primary selected layer holds text — scaling is offered only for
+  // non-text artwork (text should be resized via font-size, not a scale transform).
+  const selectionIsTextLayer = useMemo(() => {
+    if (!activeSvg || !selectionLayerId) return false;
+    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+    const el = doc.getElementById(selectionLayerId);
+    if (!el) return false;
+    return el.getAttribute('data-text-layer') === '1'
+      || el.tagName.toLowerCase() === 'text'
+      || !!el.querySelector('text');
+  }, [activeSvg?.content, selectionLayerId]);
 
   // ── Selection overlay (HTML div, direct DOM manipulation) ───────────────────
   // Pure ref manipulation — no state, no re-renders. React only manages the
@@ -675,7 +745,7 @@ export function SvgDropZone() {
 
   useLayoutEffect(() => {
     positionSelectionOverlay();
-  }, [positionSelectionOverlay, activeSvg?.content, canvasDrag, canvasRotate]);
+  }, [positionSelectionOverlay, activeSvg?.content, canvasDrag, canvasRotate, canvasScale]);
 
   // ── Layer reorder ──────────────────────────────────────────────────────────
 
@@ -752,6 +822,23 @@ export function SvgDropZone() {
     URL.revokeObjectURL(url);
   }, [activeSvg, hiddenLayers, extraFonts]);
 
+  // Export is gated behind a quick satisfaction prompt.
+  const cancelRating = useCallback(() => {
+    setRatingOpen(false);
+    setRating(0);
+    setRatingHover(0);
+  }, []);
+
+  const submitRating = useCallback(() => {
+    if (rating < 1) return;
+    // No backend yet — surface the rating so it can be wired to analytics later.
+    console.log('[export] satisfaction rating:', rating);
+    setRatingOpen(false);
+    setRating(0);
+    setRatingHover(0);
+    exportSvg();
+  }, [rating, exportSvg]);
+
   // mousedown on canvas: drag any selected non-background layer
   const handleDragHandleMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     e.stopPropagation();
@@ -810,6 +897,39 @@ export function SvgDropZone() {
       cx, cy,
       startClientX: e.clientX, startClientY: e.clientY,
       startAngle,
+      baseTransform: layerEl.getAttribute('transform') ?? '',
+    });
+  }, [activeSvg, selectedLayers, backgroundLayerId, snapshotForUndo]);
+
+  // mousedown on scale handle: uniformly scale the single selected non-text layer
+  const handleScaleHandleMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    e.stopPropagation();
+    if (selectedLayers.size !== 1 || !activeSvg?.layers.length) return;
+    const id = [...selectedLayers][0];
+    if (id === backgroundLayerId) return;
+    const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
+    if (!svgEl) return;
+    const layerEl = svgEl.querySelector(`#${CSS.escape(id)}`) as SVGGraphicsElement | null;
+    if (!layerEl) return;
+
+    const box = bboxInRootSpace(svgEl, layerEl);
+    if (!box) return;
+    const cx = box.x + box.width / 2;
+    const cy = box.y + box.height / 2;
+
+    const pt = svgEl.createSVGPoint();
+    pt.x = e.clientX; pt.y = e.clientY;
+    const svgPt = pt.matrixTransform(svgEl.getScreenCTM()!.inverse());
+    const startDist = Math.hypot(svgPt.x - cx, svgPt.y - cy);
+    if (startDist < 1e-3) return;
+    dragMovedRef.current = false;
+
+    snapshotForUndo(activeSvg.content, activeSvg.layers);
+    setCanvasScale({
+      layerId: id,
+      cx, cy,
+      startClientX: e.clientX, startClientY: e.clientY,
+      startDist,
       baseTransform: layerEl.getAttribute('transform') ?? '',
     });
   }, [activeSvg, selectedLayers, backgroundLayerId, snapshotForUndo]);
@@ -2241,6 +2361,99 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
   return (
     <div className="flex h-screen bg-zinc-950 overflow-hidden">
 
+      {/* ── Export satisfaction prompt ───────────────────────────────── */}
+      {/* Inline styles (not NativeWind classes) so the modal renders reliably
+          regardless of which utilities the Tailwind build has generated. */}
+      {ratingOpen && (
+        <div
+          onClick={cancelRating}
+          style={{
+            position: 'fixed', inset: 0, zIndex: 50,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            background: 'rgba(0,0,0,0.6)',
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: 352, maxWidth: '90vw',
+              borderRadius: 12, border: '1px solid #27272a',
+              background: '#18181b', padding: 24,
+              boxShadow: '0 20px 50px rgba(0,0,0,0.5)',
+            }}
+          >
+            <h2 style={{ textAlign: 'center', fontSize: 16, fontWeight: 600, color: '#f4f4f5', margin: 0 }}>
+              How satisfied are you?
+            </h2>
+            <p style={{ marginTop: 4, textAlign: 'center', fontSize: 12, color: '#a1a1aa' }}>
+              Rate your experience before exporting.
+            </p>
+
+            <div
+              onMouseLeave={() => setRatingHover(0)}
+              style={{ marginTop: 20, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
+            >
+              {[1, 2, 3, 4, 5].map((star) => {
+                const active = star <= (ratingHover || rating);
+                return (
+                  <button
+                    key={star}
+                    type="button"
+                    aria-label={`${star} star${star > 1 ? 's' : ''}`}
+                    onMouseEnter={() => setRatingHover(star)}
+                    onClick={() => setRating(star)}
+                    style={{
+                      background: 'none', border: 'none', padding: 2, cursor: 'pointer',
+                      lineHeight: 0, transform: active ? 'scale(1.06)' : 'scale(1)',
+                      transition: 'transform 0.1s',
+                    }}
+                  >
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      width={32} height={32}
+                      viewBox="0 0 24 24"
+                      fill={active ? '#fbbf24' : 'none'}
+                      stroke={active ? '#fbbf24' : '#52525b'}
+                      strokeWidth={1.5}
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M11.48 3.5a.562.562 0 0 1 1.04 0l2.125 5.11a.563.563 0 0 0 .475.346l5.518.442c.499.04.701.663.321.988l-4.204 3.602a.563.563 0 0 0-.182.557l1.285 5.385a.562.562 0 0 1-.84.61l-4.725-2.885a.562.562 0 0 0-.586 0L6.982 20.54a.562.562 0 0 1-.84-.61l1.285-5.386a.562.562 0 0 0-.182-.557l-4.204-3.602a.562.562 0 0 1 .321-.988l5.518-.442a.563.563 0 0 0 .475-.345L11.48 3.5Z" />
+                    </svg>
+                  </button>
+                );
+              })}
+            </div>
+
+            <div style={{ marginTop: 24, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8 }}>
+              <button
+                type="button"
+                onClick={cancelRating}
+                style={{
+                  height: 32, borderRadius: 6, border: '1px solid #3f3f46',
+                  padding: '0 12px', fontSize: 12, fontWeight: 500,
+                  color: '#d4d4d8', background: 'transparent', cursor: 'pointer',
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={submitRating}
+                disabled={rating < 1}
+                style={{
+                  height: 32, borderRadius: 6, border: 'none',
+                  padding: '0 12px', fontSize: 12, fontWeight: 500, color: '#fff',
+                  background: '#2563eb',
+                  opacity: rating < 1 ? 0.4 : 1,
+                  cursor: rating < 1 ? 'not-allowed' : 'pointer',
+                }}
+              >
+                Submit &amp; Export
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Left sidebar ─────────────────────────────────────────────── */}
       <SamplesSidebar
         samples={SAMPLES}
@@ -2306,7 +2519,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
 
                 {/* Export */}
                 <button
-                  onClick={exportSvg}
+                  onClick={() => { setRating(0); setRatingHover(0); setRatingOpen(true); }}
                   className="h-7 flex items-center gap-1.5 px-2.5 rounded border border-zinc-700 text-zinc-300 hover:text-zinc-100 hover:bg-zinc-800 text-xs font-medium transition-colors"
                 >
                   <svg xmlns="http://www.w3.org/2000/svg" className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
@@ -2517,6 +2730,27 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                               }}
                             />
                           </>
+                        )}
+                        {/* Scale handle — bottom-right corner, non-text layers only.
+                            Uniform scale about the layer's centre. */}
+                        {selectedLayers.size === 1 && !selectionIsTextLayer && (
+                          <div
+                            onMouseDown={handleScaleHandleMouseDown}
+                            onClick={(e) => e.stopPropagation()}
+                            title="Drag to scale"
+                            style={{
+                              position: 'absolute',
+                              right: -7,
+                              bottom: -7,
+                              width: 14,
+                              height: 14,
+                              borderRadius: 2,
+                              background: 'white',
+                              border: '2px solid #3b82f6',
+                              cursor: 'nwse-resize',
+                              pointerEvents: 'all',
+                            }}
+                          />
                         )}
                       </div>
                     )}
