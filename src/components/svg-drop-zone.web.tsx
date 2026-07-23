@@ -238,6 +238,8 @@ export function SvgDropZone() {
   const textContentRef  = useRef<HTMLInputElement>(null);
   const overlayRef      = useRef<HTMLDivElement>(null);
   const subOverlayRef   = useRef<HTMLDivElement>(null);
+  // Shown when an AI action is invoked on a gated asset (edit === 0).
+  const [showUpsell, setShowUpsell] = useState(false);
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -258,10 +260,10 @@ export function SvgDropZone() {
   }, []);
 
   const applyParsed = useCallback(
-    (raw: string, name: string, src: string, objectUrl?: string) => {
+    (raw: string, name: string, src: string, objectUrl?: string, edit?: 0 | 1) => {
       const cleaned = stripScripts(raw);
       const { content, layers } = parseSvg(cleaned);
-      setActiveSvg((prev) => { revokePrev(prev); return { name, src, content, originalContent: content, layers, objectUrl }; });
+      setActiveSvg((prev) => { revokePrev(prev); return { name, src, content, originalContent: content, layers, objectUrl, edit }; });
       setHiddenLayers(new Set());
       setSelectedLayer(null);
       setSelectedLayers(new Set());
@@ -284,13 +286,14 @@ export function SvgDropZone() {
 
   const openSample = useCallback(
     // Widened from a SAMPLES member so fetched-download previews (whose src is a
-    // data: URI) can be opened through the same path — only name/src/label are read.
-    async (sample: { label: string; name: string; src: string }) => {
+    // data: URI) can be opened through the same path. edit carries the download's
+    // gate (0 = AI features behind an upsell); static samples omit it → allowed.
+    async (sample: { label: string; name: string; src: string; edit?: 0 | 1 }) => {
       setIsLoading(true);
       setActiveSample(sample.name);
       try {
         const text = await fetch(sample.src).then((r) => r.text());
-        applyParsed(text, sample.name, sample.src);
+        applyParsed(text, sample.name, sample.src, undefined, sample.edit);
       } catch (err) {
         console.error('Failed to load sample', sample.name, err);
         setIsLoading(false);
@@ -1381,6 +1384,8 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
 
   const runCustomise = useCallback(async () => {
     if (!activeSvg) return;
+    // Gated assets (edit === 0) can't use the AI features — show the upsell instead.
+    if (activeSvg.edit === 0) { setShowUpsell(true); return; }
     setCustomiseLoading(true);
     setAiLoading(true);
     setAiError(null);
@@ -1453,13 +1458,30 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
         console.log('[customise] background skip emptied the content set — analysing all layers');
         contentEls = eligibleEls;
       }
-      contentEls.forEach((el) => markEls(el));
+      // Mark a content layer ITSELF only when it's a LEAF shape (no element children),
+      // then mark its descendants. A bare leaf <path> layer (e.g. the "PREMIUM MONOGRAM"
+      // outline in a monogram logo) otherwise carries no data-ai-idx, so the model can
+      // never return it in removeIds and the outline is left behind under the new text.
+      // A container <g> must stay UNMARKED — marking it would expose the whole artwork's
+      // index and let the model wipe everything; its children (incl. nested word-groups)
+      // are marked by markEls, which is what keeps grouped logos removable sub-part by
+      // sub-part.
+      const markContent = (el: Element) => {
+        const tag = el.tagName.toLowerCase().replace(/.*:/, '');
+        if (SHAPE_TAGS.has(tag) && el.children.length === 0 && !isEditableTextField(el)) {
+          const sid = String(aiIdx++);
+          el.setAttribute('data-ai-idx', sid);
+          aiIdMap.set(sid, el);
+        }
+        markEls(el);
+      };
+      contentEls.forEach((el) => markContent(el));
       const contentXml = contentEls.map((el) => new XMLSerializer().serializeToString(el)).join('');
       // Scoped raster: defs + content layers only (no background) at the full viewBox.
       const contentSvg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="${viewBox}">${defsXml}${contentXml}</svg>`;
       const pngBase64 = await svgToBase64Png(contentSvg, Math.round(vw * scale), Math.round(vh * scale));
 
-      setAiStatusMsg('Detecting text…');
+      setAiStatusMsg('Reviewing vector…');
       const rawText = await callLlmVision({
         model: TEXT_PARSE_MODEL, maxTokens: 8192, pngBase64, tag: 'customise',
         prompt: `Analyze this SVG image and its source.
@@ -1923,7 +1945,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences:
       if (cachedRaw) {
         parsed = JSON.parse(cachedRaw) as StripResult;
       } else {
-        setAiStatusMsg('Detecting text…');
+        setAiStatusMsg('Reviewing vector…');
         const rawText = await callLlmVision({
           model: TEXT_PARSE_MODEL, maxTokens: 8192, pngBase64, tag: 'strip-text',
           prompt: `Analyze this SVG layer image and its source code.
@@ -2281,6 +2303,85 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
         <div className="pointer-events-none fixed inset-0 bg-blue-500/10 border-2 border-blue-500/40 z-10" />
       )}
 
+      {/* ── AI upsell (gated asset) ──────────────────────────────────── */}
+      {/* Inline styles (not NativeWind classes) so the modal renders reliably. */}
+      {showUpsell && (
+        <div
+          onClick={() => setShowUpsell(false)}
+          style={{
+            position: 'fixed', inset: 0, zIndex: 60,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            background: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(2px)',
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: 420, maxWidth: '90vw',
+              background: '#18181b', border: '1px solid #3f3f46', borderRadius: 14,
+              padding: 24, boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
+              display: 'flex', flexDirection: 'column', gap: 16,
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <SparklesIcon className="size-5 text-indigo-400" />
+              <span style={{ fontSize: 17, fontWeight: 600, color: '#fafafa' }}>Unlock AI editing</span>
+            </div>
+            <p style={{ fontSize: 13.5, lineHeight: 1.5, color: '#a1a1aa', margin: 0 }}>
+              You need an active subscription or credits to use the AI features on this asset.
+            </p>
+            <div
+              style={{
+                display: 'flex', flexDirection: 'column', gap: 12,
+                padding: 14, borderRadius: 10,
+                background: 'rgba(99,102,241,0.08)', border: '1px solid rgba(99,102,241,0.25)',
+              }}
+            >
+              <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: '#818cf8' }}>
+                AI features
+              </span>
+              {[
+                ['Suggests fonts', 'Recommends Google Fonts that match the design’s style and mood.'],
+                ['Converts text paths to editable text', 'Detects lettering baked into outlines and turns it back into real, editable text.'],
+              ].map(([title, desc]) => (
+                <div key={title} style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                  <span style={{ marginTop: 2, flexShrink: 0, display: 'inline-flex' }}>
+                    <SparklesIcon className="size-4 text-indigo-400" />
+                  </span>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: '#e4e4e7' }}>{title}</span>
+                    <span style={{ fontSize: 12, lineHeight: 1.45, color: '#a1a1aa' }}>{desc}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 4 }}>
+              <button
+                type="button"
+                onClick={() => setShowUpsell(false)}
+                style={{
+                  height: 34, padding: '0 14px', borderRadius: 8,
+                  border: '1px solid #3f3f46', background: 'transparent',
+                  color: '#d4d4d8', fontSize: 13, cursor: 'pointer',
+                }}
+              >
+                Maybe later
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowUpsell(false)}
+                style={{
+                  height: 34, padding: '0 16px', borderRadius: 8, border: 'none',
+                  background: '#6366f1', color: '#fff', fontSize: 13, fontWeight: 600, cursor: 'pointer',
+                }}
+              >
+                Upgrade
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* ── Export satisfaction prompt ───────────────────────────────── */}
       {/* Inline styles (not NativeWind classes) so the modal renders reliably
           regardless of which utilities the Tailwind build has generated. */}
@@ -2624,6 +2725,22 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                   backgroundSize: '20px 20px',
                 }}
               >
+                {/* Beta badge, pinned to the canvas top-left. Inline styles (not NativeWind
+                    classes) so it renders regardless of which Tailwind utilities are built. */}
+                <span
+                  style={{
+                    position: 'absolute', top: 10, left: 10, zIndex: 20,
+                    pointerEvents: 'none',
+                    padding: '2px 8px', borderRadius: 6,
+                    fontSize: 10, fontWeight: 700, letterSpacing: '0.08em',
+                    textTransform: 'uppercase',
+                    color: '#fcd34d',
+                    background: 'rgba(245,158,11,0.12)',
+                    border: '1px solid rgba(245,158,11,0.35)',
+                  }}
+                >
+                  Beta
+                </span>
                 {aiLoading && (
                   <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-zinc-950/60 backdrop-blur-[2px]">
                     <SparklesIcon className="size-10 text-indigo-400 animate-pulse" />

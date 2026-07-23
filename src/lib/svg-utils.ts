@@ -12,6 +12,7 @@ export interface ActiveSvg {
   originalContent: string; // content as first parsed — used for reset
   layers: SvgLayer[];    // top-level <g> children, in document order
   objectUrl?: string;
+  edit?: 0 | 1;          // 0 = AI features gated behind an upsell; undefined/1 = allowed
 }
 
 // ─── SVG processing ───────────────────────────────────────────────────────────

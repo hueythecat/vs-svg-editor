@@ -1,7 +1,7 @@
-import React, { useState } from 'react';
 import { cn } from '@/lib/utils';
+import React, { useState } from 'react';
 
-type Sample = { label: string; name: string; src: string };
+type Sample = { label: string; name: string; src: string; edit?: 0 | 1 };
 
 // Custom drag MIME so a preview dragged onto the canvas can be told apart from an OS
 // file drop. The drop handler in svg-drop-zone reads this same key.
@@ -11,13 +11,14 @@ export const SAMPLE_DRAG_MIME = 'application/x-svg-sample';
 // (the number is the id in vectorstock_<id>.zip); names are the titles from
 // vectorstock.com. Selecting one calls /api/download, which extracts the SVG from the
 // archive and hands it back for preview.
-const DOWNLOADS = [
-  { id: '10383776', name: 'Circular Monogram Logo Emblem' },
-  { id: '16303184', name: 'Abstract Logo with Circles & Letters' },
-  { id: '21513865', name: 'Skyscraper Logo & Real Estate Symbol' },
-  { id: '26162964', name: 'Colorful Deer Emblem Logo' },
-  { id: '4505328',  name: 'Elegant Restaurant Logo Pattern' },
-] as const;
+// edit: 1 = editable, 0 = not — flag per item (defaults to 1 here; flip individually).
+const DOWNLOADS: ReadonlyArray<{ id: string; name: string; edit: 0 | 1 }> = [
+  { id: '10383776', name: 'Circular Monogram Logo Emblem',      edit: 1 },
+  { id: '16303184', name: 'Abstract Logo with Circles & Letters', edit: 1 },
+  { id: '21513865', name: 'Skyscraper Logo & Real Estate Symbol', edit: 1 },
+  { id: '26162964', name: 'Colorful Deer Emblem Logo',           edit: 1 },
+  { id: '4505328',  name: 'Elegant Restaurant Logo Pattern',     edit: 0 },
+];
 
 // Inline style (not Tailwind) so NativeWind doesn't have to have seen these classes
 // at build time — a newly-introduced control renders reliably this way.
@@ -44,12 +45,20 @@ interface SamplesSidebarProps<S extends Sample> {
 export function SamplesSidebar<S extends Sample>({ samples, activeSample, isLoading, onOpenSample, onOpenFetched }: SamplesSidebarProps<S>) {
   const [selectedDownload, setSelectedDownload] = useState<string>('');
   const [fetchStatus, setFetchStatus] = useState<string | null>(null);
+  const [fetching, setFetching] = useState(false);
   const [fetchedSamples, setFetchedSamples] = useState<Sample[]>([]);
 
-  const fetchDownload = async (id: string, title: string) => {
-    setFetchStatus('Fetching vector…');
+  const fetchDownload = async (id: string, title: string, edit: 0 | 1) => {
+    setFetchStatus(null);
+    setFetching(true);
     try {
-      const res = await fetch(`/api/download?id=${encodeURIComponent(id)}`);
+      // Placeholder API pacing: hold the "Fetching asset" overlay for at least 1s so
+      // the request reads as a deliberate step rather than an instant flash. Runs the
+      // real fetch and the delay together, so the overlay lasts max(1s, fetch time).
+      const [res] = await Promise.all([
+        fetch(`/api/download?id=${encodeURIComponent(id)}`),
+        new Promise((r) => setTimeout(r, 1000)),
+      ]);
       const data = (await res.json()) as { svg?: string | null; error?: { message?: string } };
       if (!res.ok) throw new Error(data.error?.message ?? `Request failed (${res.status})`);
 
@@ -63,10 +72,12 @@ export function SamplesSidebar<S extends Sample>({ samples, activeSample, isLoad
       const name = `vectorstock_${id}.svg`;
       // Prepend so the newest extraction sits at the top of the previews. De-dupe by
       // name so re-selecting the same id refreshes rather than stacking duplicates.
-      setFetchedSamples((prev) => [{ label: title, name, src }, ...prev.filter((s) => s.name !== name)]);
+      setFetchedSamples((prev) => [{ label: title, name, src, edit }, ...prev.filter((s) => s.name !== name)]);
       setFetchStatus(null);
     } catch (err) {
       setFetchStatus(err instanceof Error ? err.message : 'Fetch failed');
+    } finally {
+      setFetching(false);
     }
   };
 
@@ -117,6 +128,27 @@ export function SamplesSidebar<S extends Sample>({ samples, activeSample, isLoad
 
   return (
     <aside className="w-56 shrink-0 flex flex-col border-r border-zinc-800 bg-zinc-900/60">
+      {/* Full-viewport "Fetching asset" overlay shown while a download is being pulled.
+          Inline styles + a scoped keyframe so it renders regardless of the Tailwind build. */}
+      {fetching && (
+        <div
+          style={{
+            position: 'fixed', inset: 0, zIndex: 50,
+            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 14,
+            background: 'rgba(9,9,11,0.72)', backdropFilter: 'blur(2px)',
+          }}
+        >
+          <style>{'@keyframes svgspin{to{transform:rotate(360deg)}}'}</style>
+          <div
+            style={{
+              width: 34, height: 34, borderRadius: '50%',
+              border: '3px solid #3f3f46', borderTopColor: '#818cf8',
+              animation: 'svgspin 0.8s linear infinite',
+            }}
+          />
+          <span style={{ fontSize: 13, fontWeight: 500, color: '#d4d4d8' }}>Fetching asset…</span>
+        </div>
+      )}
       <div className="px-3 py-2.5 border-b border-zinc-800 flex flex-col gap-1.5">
         <span className="text-[10px] font-semibold text-zinc-500 uppercase tracking-widest">
           Dev — Downloads
@@ -128,12 +160,12 @@ export function SamplesSidebar<S extends Sample>({ samples, activeSample, isLoad
             const id = e.target.value;
             setSelectedDownload(id);
             const picked = DOWNLOADS.find((d) => d.id === id);
-            if (picked) fetchDownload(picked.id, picked.name);
+            if (picked) fetchDownload(picked.id, picked.name, picked.edit);
           }}
         >
           <option value="">Select a vector…</option>
           {DOWNLOADS.map((d) => (
-            <option key={d.id} value={d.id}>{d.name}</option>
+            <option key={d.id} value={d.id}>{d.id} — {d.name}</option>
           ))}
         </select>
         {fetchStatus && (
