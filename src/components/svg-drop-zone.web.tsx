@@ -9,18 +9,22 @@ import {
   collectLayerGradientIds,
   computeArcPath,
   extractLayerColors,
+  filterOutBackgroundIds,
   findClickedSubText,
   hashString,
+  isFullCanvasLayer,
   normalizeColor,
   parseSvg,
+  parseViewBox,
   resolveGradient,
   stripScripts,
-  svgToBase64Png
+  svgToBase64Png,
+  withOffscreenSvg
 } from '@/lib/svg-utils';
 import { cn } from '@/lib/utils';
-import type { AiActionType } from './layers-panel';
+import type { AiActionType, LlmProvider } from './layers-panel';
 import { LayersPanel } from './layers-panel';
-import { SamplesSidebar } from './samples-sidebar';
+import { SamplesSidebar, SAMPLE_DRAG_MIME } from './samples-sidebar';
 import { SparklesIcon } from './svg-icons';
 
 // ─── Samples ─────────────────────────────────────────────────────────────────
@@ -106,77 +110,20 @@ IMPORTANT: If a single horizontal line contains multiple words in different colo
 
 TASK 2 — Text element identification: Most SVG elements in the source have a data-ai-idx attribute. Identify which elements visually render as text — including <text>/<tspan> elements AND <path>/<g> elements whose shapes form letter or word outlines. IMPORTANT: if a <g> group contains child paths that together form a word, return the group's data-ai-idx (not the individual letter path indices). Return every text element's data-ai-idx in "removeIds". NOTE: already-editable text fields have deliberately NOT been given a data-ai-idx — never invent indices for them; only return indices that actually appear in the source below.`;
 
-// Mounts a hidden clone of svgRoot (carrying its data-* marks) so getBBox works on a
-// detached/parsed SVG document, runs fn against it, and always unmounts.
-const withOffscreenSvg = <T,>(svgRoot: Element, fn: (mounted: SVGSVGElement) => T): T => {
-  const measureSvg = svgRoot.cloneNode(true) as SVGSVGElement;
-  const holder = document.createElement('div');
-  holder.setAttribute('style', 'position:absolute;left:-99999px;top:0;width:1px;height:1px;overflow:hidden');
-  holder.appendChild(measureSvg);
-  document.body.appendChild(holder);
-  try {
-    return fn(measureSvg);
-  } finally {
-    document.body.removeChild(holder);
-  }
-};
-
-// Drops removeIds whose element covers ≥ BACKGROUND_AREA_LIMIT of the canvas — a
-// background or decoration the vision model mislabeled as text. Shared by the
-// strip-text and customise passes so both guard identically. svgRoot must already
-// carry the data-ai-idx marks.
-const BACKGROUND_AREA_LIMIT = 0.5; // ≥50% of the canvas ⇒ background, never a text run
-const filterOutBackgroundIds = (
-  svgRoot: Element,
-  removeIds: string[],
-  canvasW: number,
-  canvasH: number,
-  logTag: string,
-): string[] => {
-  const canvasArea = Math.max(1, canvasW * canvasH);
-  return withOffscreenSvg(svgRoot, (measureSvg) =>
-    removeIds.filter((sid) => {
-      const probe = measureSvg.querySelector(`[data-ai-idx="${sid}"]`) as SVGGraphicsElement | null;
-      if (!probe || typeof probe.getBBox !== 'function') return true; // can't measure → trust the model
-      try {
-        const b = probe.getBBox();
-        const frac = (b.width * b.height) / canvasArea;
-        if (frac >= BACKGROUND_AREA_LIMIT) {
-          console.log(`[${logTag}] skipping removeId ${sid} — bbox covers ${(frac * 100).toFixed(0)}% of canvas (background, not text)`);
-          return false;
-        }
-      } catch { /* unrenderable geometry — leave the call to the model */ }
-      return true;
-    }),
-  );
-};
-
-// True when the element (by id) spans essentially the whole canvas in BOTH dimensions
-// — i.e. a background/canvas fill, not foreground artwork. Gates whether the bottom
-// layer is excluded from the customise vision image.
-const FULL_CANVAS_MIN = 0.9; // ≥90% of both canvas dimensions ⇒ a background layer
-const isFullCanvasLayer = (
-  svgRoot: Element,
-  elementId: string,
-  canvasW: number,
-  canvasH: number,
-): boolean =>
-  withOffscreenSvg(svgRoot, (measureSvg) => {
-    const el = measureSvg.querySelector(`[id="${elementId}"]`) as SVGGraphicsElement | null;
-    if (!el || typeof el.getBBox !== 'function') return false;
-    try {
-      const b = el.getBBox();
-      return b.width >= FULL_CANVAS_MIN * canvasW && b.height >= FULL_CANVAS_MIN * canvasH;
-    } catch {
-      return false;
-    }
-  });
+// Every AI prompt below demands bare JSON, and both providers ignore that often
+// enough to matter: Claude in particular likes to wrap the object in a ```json
+// fence, which makes JSON.parse throw. Strip it before parsing — always, not just
+// where a fence has been observed, since which model answers is a runtime choice.
+const stripJsonFence = (raw: string) =>
+  raw.replace(/^```(?:json)?\s*/im, '').replace(/```\s*$/m, '').trim();
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export function SvgDropZone() {
   const [activeSvg, setActiveSvg]       = useState<ActiveSvg | null>(null);
-  const [activeSample, setActiveSample] = useState<SampleName | null>(null);
+  // string (not SampleName) because openSample now also loads fetched downloads,
+  // whose names aren't in the static SAMPLES union.
+  const [activeSample, setActiveSample] = useState<string | null>(null);
   const [hiddenLayers, setHiddenLayers] = useState<Set<string>>(new Set());
   const [selectedLayer, setSelectedLayer]   = useState<string | null>(null);
   const [selectedLayers, setSelectedLayers] = useState<Set<string>>(new Set());
@@ -235,6 +182,49 @@ export function SvgDropZone() {
   const [textCheckResult, setTextCheckResult] = useState<{ heading: string; subheading: string } | null>(null);
   const [colorReplaceOpen, setColorReplaceOpen] = useState(true);
   const [selectedSubElId, setSelectedSubElId] = useState<string | null>(null);
+  // Which LLM every AI action calls. Picking 'kimi' diverts each request to
+  // /api/kimi, which re-shapes the same Anthropic-style body for Moonshot. Mirrored
+  // into a ref so the AI callbacks below read the live choice, never a stale closure.
+  const [llmProvider, setLlmProvider] = useState<LlmProvider>('claude');
+  const llmProviderRef = useRef<LlmProvider>('claude');
+  const selectLlmProvider = (p: LlmProvider) => { llmProviderRef.current = p; setLlmProvider(p); };
+  const llmEndpoint = () => (llmProviderRef.current === 'kimi' ? '/api/kimi' : '/api/claude');
+  // Log label. /api/kimi discards the model id we send and pins its own, so naming a
+  // Claude model while Kimi is running would be a lie — say who actually answered.
+  const llmLabel = (claudeModel: string) =>
+    llmProviderRef.current === 'kimi' ? 'kimi (model pinned in /api/kimi)' : `claude ${claudeModel}`;
+
+  // Single image+text turn to the active LLM. Every AI action shared this exact
+  // fetch/error/parse skeleton; extracting it here keeps the seven call sites to just
+  // their model, token budget, and prompt. Returns the assistant's text with any
+  // ```json fence stripped — callers JSON.parse whatever shape they expect. Throws on a
+  // non-ok response, surfacing the server's error message when it sends one.
+  const callLlmVision = async (opts: {
+    model: string; maxTokens: number; pngBase64: string; prompt: string; tag: string;
+  }): Promise<string> => {
+    console.log(`[${opts.tag}] invoking LLM:`, llmLabel(opts.model));
+    const res = await fetch(llmEndpoint(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: opts.model,
+        max_tokens: opts.maxTokens,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'image', source: { type: 'base64', media_type: 'image/png', data: opts.pngBase64 } },
+            { type: 'text', text: opts.prompt },
+          ],
+        }],
+      }),
+    });
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({})) as { error?: { message?: string } };
+      throw new Error(e.error?.message ?? `API error ${res.status}`);
+    }
+    const data = await res.json() as { content?: Array<{ text?: string }> };
+    return stripJsonFence(data.content?.[0]?.text ?? '');
+  };
   const aiCacheRef              = useRef<Map<string, string>>(new Map());
   const dragMovedRef            = useRef(false);
   const colorBaselineRef        = useRef<string | null>(null);
@@ -293,7 +283,9 @@ export function SvgDropZone() {
   // ── Open sample ────────────────────────────────────────────────────────────
 
   const openSample = useCallback(
-    async (sample: (typeof SAMPLES)[number]) => {
+    // Widened from a SAMPLES member so fetched-download previews (whose src is a
+    // data: URI) can be opened through the same path — only name/src/label are read.
+    async (sample: { label: string; name: string; src: string }) => {
       setIsLoading(true);
       setActiveSample(sample.name);
       try {
@@ -1363,34 +1355,15 @@ export function SvgDropZone() {
     try {
       const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
       const root = doc.documentElement;
-      const vb = (root.getAttribute('viewBox') ?? '0 0 800 600').trim().split(/[\s,]+/).map(Number);
-      const vw = vb[2] ?? 800;
-      const vh = vb[3] ?? 600;
+      const { w: vw, h: vh } = parseViewBox(root);
       const scale = Math.min(1, 1024 / Math.max(vw, vh, 1));
       const pngBase64 = await svgToBase64Png(activeSvg.content, Math.round(vw * scale), Math.round(vh * scale));
 
-      console.log('[suggest-fonts] invoking LLM:', 'claude-sonnet-5');
-      const res = await fetch('/api/claude', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-5',
-          max_tokens: 1000,
-          messages: [{
-            role: 'user',
-            content: [
-              { type: 'image', source: { type: 'base64', media_type: 'image/png', data: pngBase64 } },
-              { type: 'text', text: `Look at this design image. Suggest 5 Google Fonts that would complement its visual style, mood, colour palette, and aesthetic. Consider the overall feel of the design.
-Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"brief reason"}]}` },
-            ],
-          }],
-        }),
+      const raw = await callLlmVision({
+        model: 'claude-sonnet-5', maxTokens: 1000, pngBase64, tag: 'suggest-fonts',
+        prompt: `Look at this design image. Suggest 5 Google Fonts that would complement its visual style, mood, colour palette, and aesthetic. Consider the overall feel of the design.
+Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"brief reason"}]}`,
       });
-
-      const data = await res.json() as { content?: Array<{ text?: string }> };
-      const raw = data.content?.[0]?.text ?? '';
       const parsed = JSON.parse(raw) as { suggestions: Array<{ font: string; reason: string }> };
       const suggestions = parsed.suggestions ?? [];
       suggestions.forEach(({ font }) => loadGoogleFontLink(font));
@@ -1417,11 +1390,7 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
       const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
       const root = doc.documentElement;
       const viewBox = root.getAttribute('viewBox') ?? '0 0 800 600';
-      const vbParts = viewBox.trim().split(/[\s,]+/).map(Number);
-      const vbX = vbParts[0] ?? 0;
-      const vbY = vbParts[1] ?? 0;
-      const vw  = vbParts[2] ?? 800;
-      const vh  = vbParts[3] ?? 600;
+      const { x: vbX, y: vbY, w: vw, h: vh } = parseViewBox(root);
 
       // Per-layer processing (below) rasterizes each layer on its own, so here we only
       // need the shared raster scale and the document <defs> (gradients/styles) that
@@ -1461,16 +1430,28 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
         }
       };
 
-      const contentEls: Element[] = [];
+      // Layers are in document order, so the first eligible one is the bottom-most —
+      // the only one that can be a background fill. Testing every layer for full-canvas
+      // area also discarded single-group artwork (one <g> holding the whole drawing
+      // spans the canvas by definition), which left nothing to analyse.
+      const eligibleEls: Element[] = [];
       for (const layer of activeSvg.layers) {
         if (layer.id.startsWith('_text_')) continue;                 // already-editable text
         const layerEl = doc.getElementById(layer.id);
         if (!layerEl || isEditableTextField(layerEl)) continue;
-        if (isFullCanvasLayer(doc.documentElement, layer.id, vw, vh)) {
-          console.log('[customise] skipping full-canvas background layer:', layer.id);
-          continue;
-        }
-        contentEls.push(layerEl);
+        eligibleEls.push(layerEl);
+      }
+      let contentEls = eligibleEls;
+      const bottomEl = eligibleEls[0];
+      if (bottomEl && isFullCanvasLayer(doc.documentElement, bottomEl.id, vw, vh)) {
+        console.log('[customise] skipping full-canvas background layer:', bottomEl.id);
+        contentEls = eligibleEls.slice(1);
+      }
+      // Dropping the background must never empty the payload — a blank raster makes the
+      // model answer "no text" no matter what the artwork holds. Analyse everything instead.
+      if (contentEls.length === 0 && eligibleEls.length > 0) {
+        console.log('[customise] background skip emptied the content set — analysing all layers');
+        contentEls = eligibleEls;
       }
       contentEls.forEach((el) => markEls(el));
       const contentXml = contentEls.map((el) => new XMLSerializer().serializeToString(el)).join('');
@@ -1479,18 +1460,9 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
       const pngBase64 = await svgToBase64Png(contentSvg, Math.round(vw * scale), Math.round(vh * scale));
 
       setAiStatusMsg('Detecting text…');
-      console.log('[customise] invoking LLM:', TEXT_PARSE_MODEL);
-      const response = await fetch('/api/claude', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: TEXT_PARSE_MODEL,
-          max_tokens: 8192,
-          messages: [{
-            role: 'user',
-            content: [
-              { type: 'image', source: { type: 'base64', media_type: 'image/png', data: pngBase64 } },
-              { type: 'text', text: `Analyze this SVG image and its source.
+      const rawText = await callLlmVision({
+        model: TEXT_PARSE_MODEL, maxTokens: 8192, pngBase64, tag: 'customise',
+        prompt: `Analyze this SVG image and its source.
 
 ${TEXT_PARSING_PROMPT}
 
@@ -1500,19 +1472,8 @@ SVG source:
 ${contentXml}
 
 Return ONLY valid JSON, no markdown:
-{"hasText":true,"rows":[{"yFraction":0.3,"xFraction":0.5,"font":"Playfair Display","sizeFraction":0.1,"weight":700,"color":"#ffffff","content":"HELLO","letterSpacing":0}],"removeIds":["3","9"],"fonts":["Playfair Display","Lato"]}` },
-            ],
-          }],
-        }),
+{"hasText":true,"rows":[{"yFraction":0.3,"xFraction":0.5,"font":"Playfair Display","sizeFraction":0.1,"weight":700,"color":"#ffffff","content":"HELLO","letterSpacing":0}],"removeIds":["3","9"],"fonts":["Playfair Display","Lato"]}`,
       });
-
-      if (!response.ok) {
-        const e = await response.json().catch(() => ({})) as { error?: { message?: string } };
-        throw new Error(e.error?.message ?? `API error ${response.status}`);
-      }
-      const data = await response.json() as { content: Array<{ type: string; text: string }> };
-      const rawText = (data.content?.[0]?.text ?? '')
-        .replace(/^```(?:json)?\s*/im, '').replace(/```\s*$/m, '').trim();
 
       let parsed: CustomiseResult;
       try {
@@ -1642,37 +1603,18 @@ Return ONLY valid JSON, no markdown:
     try {
       const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
       const root = doc.documentElement;
-      const vb = (root.getAttribute('viewBox') ?? '0 0 800 600').trim().split(/[\s,]+/).map(Number);
-      const vw = vb[2] ?? 800;
-      const vh = vb[3] ?? 600;
+      const { w: vw, h: vh } = parseViewBox(root);
       const scale = Math.min(1, 1024 / Math.max(vw, vh, 1));
       const pngBase64 = await svgToBase64Png(activeSvg.content, Math.round(vw * scale), Math.round(vh * scale));
-      console.log('[taxonomy] invoking LLM:', 'claude-sonnet-5');
-      const res = await fetch('/api/claude', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-5',
-          max_tokens: 512,
-          messages: [{
-            role: 'user',
-            content: [
-              { type: 'image', source: { type: 'base64', media_type: 'image/png', data: pngBase64 } },
-              { type: 'text', text: `Analyze this SVG design and classify its visual elements into taxonomy groups.
+      const raw = await callLlmVision({
+        model: 'claude-sonnet-5', maxTokens: 512, pngBase64, tag: 'taxonomy',
+        prompt: `Analyze this SVG design and classify its visual elements into taxonomy groups.
 
 Use ONLY these type values: background, text, icon, graphic, decoration, shape, image.
 
 Return ONLY valid JSON — no markdown, no explanation:
-{"groups":[{"type":"background","elements":["solid dark fill"]},{"type":"text","elements":["curved top banner"]}]}` },
-            ],
-          }],
-        }),
+{"groups":[{"type":"background","elements":["solid dark fill"]},{"type":"text","elements":["curved top banner"]}]}`,
       });
-      if (!res.ok) throw new Error(`API ${res.status}`);
-      const data = await res.json() as { content?: Array<{ text?: string }> };
-      const raw = (data.content?.[0]?.text ?? '').replace(/^```(?:json)?\s*/im, '').replace(/```\s*$/m, '').trim();
       const parsed = JSON.parse(raw) as { groups: TaxonomyGroup[] };
       setTaxonomy(parsed.groups ?? []);
     } catch (err) {
@@ -1848,48 +1790,22 @@ Return ONLY valid JSON — no markdown, no explanation:
       // Render layer to PNG for vision
       const svgRoot = doc.documentElement;
       const viewBox = svgRoot.getAttribute('viewBox') ?? '0 0 800 600';
-      const vbParts = viewBox.trim().split(/[\s,]+/).map(Number);
-      const vbX = vbParts[0] ?? 0;
-      const vbY = vbParts[1] ?? 0;
-      const vw  = vbParts[2] ?? 800;
-      const vh  = vbParts[3] ?? 600;
+      const { x: vbX, y: vbY, w: vw, h: vh } = parseViewBox(svgRoot);
       const defsEl = doc.querySelector('defs');
       const defsXml = defsEl ? new XMLSerializer().serializeToString(defsEl) : '';
       const previewSvg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="${viewBox}">${defsXml}${svgString}</svg>`;
       const scale = Math.min(1, 1024 / Math.max(vw, vh, 1));
       const pngBase64 = await svgToBase64Png(previewSvg, Math.round(vw * scale), Math.round(vh * scale));
 
-      const apiHeaders = {
-        'Content-Type': 'application/json',
-      };
-
       // ── Suggest font ───────────────────────────────────────────────────────
       if (action === 'suggest-font') {
-        console.log('[suggest-font] invoking LLM:', 'claude-sonnet-5');
-        const response = await fetch('/api/claude', {
-          method: 'POST',
-          headers: apiHeaders,
-          body: JSON.stringify({
-            model: 'claude-sonnet-5',
-            max_tokens: 1000,
-            messages: [{
-              role: 'user',
-              content: [
-                { type: 'image', source: { type: 'base64', media_type: 'image/png', data: pngBase64 } },
-                { type: 'text', text: `Look at this SVG layer image. Does it contain any text (including text rendered as outlined paths)?
+        const rawText = await callLlmVision({
+          model: 'claude-sonnet-5', maxTokens: 1000, pngBase64, tag: 'suggest-font',
+          prompt: `Look at this SVG layer image. Does it contain any text (including text rendered as outlined paths)?
 If yes, suggest a single Google Font that best matches the style, mood, and visual character of the text. Return only JSON: {"font":"Font Name","reason":"brief reason"}.
 If no text is detected return: {"font":null,"reason":"No text detected"}.
-Return JSON only, no markdown.` },
-              ],
-            }],
-          }),
+Return JSON only, no markdown.`,
         });
-        if (!response.ok) {
-          const e = await response.json().catch(() => ({})) as { error?: { message?: string } };
-          throw new Error(e.error?.message ?? `API error ${response.status}`);
-        }
-        const data = await response.json() as { content: Array<{ type: string; text: string }> };
-        const rawText = data.content?.[0]?.text ?? '';
         try {
           const parsed = JSON.parse(rawText) as { font: string | null; reason: string };
           if (parsed.font) { setSuggestedFontName(parsed.font); addGoogleFont(parsed.font); }
@@ -1903,35 +1819,16 @@ Return JSON only, no markdown.` },
       // ── Check text ─────────────────────────────────────────────────────────
       if (action === 'check-text') {
         setAiStatusMsg('Reading text…');
-        console.log('[check-text] invoking LLM:', 'claude-sonnet-5');
-        const response = await fetch('/api/claude', {
-          method: 'POST',
-          headers: apiHeaders,
-          body: JSON.stringify({
-            model: 'claude-sonnet-5',
-            max_tokens: 512,
-            messages: [{
-              role: 'user',
-              content: [
-                { type: 'image', source: { type: 'base64', media_type: 'image/png', data: pngBase64 } },
-                { type: 'text', text: `Look at this SVG layer image. Identify the main text content.
+        const rawText = await callLlmVision({
+          model: 'claude-sonnet-5', maxTokens: 512, pngBase64, tag: 'check-text',
+          prompt: `Look at this SVG layer image. Identify the main text content.
 Return ONLY a JSON object with these two fields:
 - "heading": the primary / largest text (the main title or headline). Empty string if none.
 - "subheading": secondary text beneath or supporting the heading (tagline, subtitle, date, etc.). Empty string if none.
 
 No markdown, no code fences, no explanation. Example:
-{"heading":"GRAND OPENING","subheading":"Saturday June 21st"}` },
-              ],
-            }],
-          }),
+{"heading":"GRAND OPENING","subheading":"Saturday June 21st"}`,
         });
-        if (!response.ok) {
-          const e = await response.json().catch(() => ({})) as { error?: { message?: string } };
-          throw new Error(e.error?.message ?? `API error ${response.status}`);
-        }
-        const data = await response.json() as { content: Array<{ type: string; text: string }> };
-        const rawText = (data.content?.[0]?.text ?? '')
-          .replace(/^```(?:json)?\s*/im, '').replace(/```\s*$/m, '').trim();
         try {
           const parsed = JSON.parse(rawText) as { heading: string; subheading: string };
           setTextCheckResult(parsed);
@@ -1962,18 +1859,9 @@ No markdown, no code fences, no explanation. Example:
         const rstMarkedSvg = new XMLSerializer().serializeToString(layerEl);
 
         setAiStatusMsg('Finding text…');
-        console.log('[remove-specific-text] invoking LLM:', 'claude-sonnet-5');
-        const response = await fetch('/api/claude', {
-          method: 'POST',
-          headers: apiHeaders,
-          body: JSON.stringify({
-            model: 'claude-sonnet-5',
-            max_tokens: 1024,
-            messages: [{
-              role: 'user',
-              content: [
-                { type: 'image', source: { type: 'base64', media_type: 'image/png', data: pngBase64 } },
-                { type: 'text', text: `You are editing an SVG layer. Find and remove ONLY the text matching: "${query}"
+        const rawText = await callLlmVision({
+          model: 'claude-sonnet-5', maxTokens: 1024, pngBase64, tag: 'remove-specific-text',
+          prompt: `You are editing an SVG layer. Find and remove ONLY the text matching: "${query}"
 
 Every SVG element has a data-ai-idx attribute. Identify which elements render that specific text — including <text>/<tspan> elements AND path/group elements whose shapes form those letters. If a <g> group's children together form the target word, return the group's index (not the individual child paths).
 
@@ -1981,18 +1869,8 @@ SVG source:
 ${rstMarkedSvg}
 
 Respond with ONLY a valid JSON object — no markdown, no code fences:
-{"removeIds":["3","9"]}` },
-              ],
-            }],
-          }),
+{"removeIds":["3","9"]}`,
         });
-        if (!response.ok) {
-          const e = await response.json().catch(() => ({})) as { error?: { message?: string } };
-          throw new Error(e.error?.message ?? `API error ${response.status}`);
-        }
-        const data = await response.json() as { content: Array<{ type: string; text: string }> };
-        const rawText = (data.content?.[0]?.text ?? '')
-          .replace(/^```(?:json)?\s*/im, '').replace(/```\s*$/m, '').trim();
         let removeIds: string[];
         try {
           removeIds = (JSON.parse(rawText) as { removeIds: string[] }).removeIds ?? [];
@@ -2046,19 +1924,9 @@ Respond with ONLY a valid JSON object — no markdown, no code fences:
         parsed = JSON.parse(cachedRaw) as StripResult;
       } else {
         setAiStatusMsg('Detecting text…');
-        const stripModel = TEXT_PARSE_MODEL;
-        console.log('[strip-text] invoking LLM:', stripModel);
-        const response = await fetch('/api/claude', {
-          method: 'POST',
-          headers: apiHeaders,
-          body: JSON.stringify({
-            model: stripModel,
-            max_tokens: 8192,
-            messages: [{
-              role: 'user',
-              content: [
-                { type: 'image', source: { type: 'base64', media_type: 'image/png', data: pngBase64 } },
-                { type: 'text', text: `Analyze this SVG layer image and its source code.
+        const rawText = await callLlmVision({
+          model: TEXT_PARSE_MODEL, maxTokens: 8192, pngBase64, tag: 'strip-text',
+          prompt: `Analyze this SVG layer image and its source code.
 
 ${TEXT_PARSING_PROMPT}
 
@@ -2066,20 +1934,8 @@ SVG source:
 ${markedSvgString}
 
 Respond with ONLY a valid JSON object — no markdown, no code fences, no explanation:
-{"hasText":true,"rows":[{"yFraction":0.5,"xFraction":0.5,"font":"Impact","sizeFraction":0.08,"weight":700,"color":"#ffffff","content":"HELLO","letterSpacing":0.05}],"removeIds":["3","9"]}` },
-              ],
-            }],
-          }),
+{"hasText":true,"rows":[{"yFraction":0.5,"xFraction":0.5,"font":"Impact","sizeFraction":0.08,"weight":700,"color":"#ffffff","content":"HELLO","letterSpacing":0.05}],"removeIds":["3","9"]}`,
         });
-
-        if (!response.ok) {
-          const e = await response.json().catch(() => ({})) as { error?: { message?: string } };
-          throw new Error(e.error?.message ?? `API error ${response.status}`);
-        }
-
-        const data = await response.json() as { content: Array<{ type: string; text: string }> };
-        const rawText = (data.content?.[0]?.text ?? '')
-          .replace(/^```(?:json)?\s*/im, '').replace(/```\s*$/m, '').trim();
 
         try {
           parsed = JSON.parse(rawText) as StripResult;
@@ -2360,9 +2216,19 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
   const handleDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     setDragCounter(0); setIsDragging(false);
+    // A preview dragged out of the left column carries its identity on a custom MIME
+    // type (set in SamplesSidebar) — open it like a click. Falls through to OS file
+    // drops, which instead arrive as dataTransfer.files.
+    const sampleJson = e.dataTransfer.getData(SAMPLE_DRAG_MIME);
+    if (sampleJson) {
+      try {
+        openSample(JSON.parse(sampleJson) as { label: string; name: string; src: string });
+        return;
+      } catch { /* malformed payload — ignore and try a file drop */ }
+    }
     const file = e.dataTransfer.files[0];
     if (file) openFile(file);
-  }, [openFile]);
+  }, [openFile, openSample]);
 
   const handleDragEnter = useCallback((e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
@@ -2378,6 +2244,19 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     e.preventDefault();
   }, []);
 
+  // Belt-and-braces: stop the browser's default "open the dropped file as a page"
+  // behaviour for any drop that lands outside React's tree (e.g. a fast release the
+  // root handler misses). Without this, such a drop navigates away and unloads the app.
+  useEffect(() => {
+    const prevent = (e: DragEvent) => e.preventDefault();
+    window.addEventListener('dragover', prevent);
+    window.addEventListener('drop', prevent);
+    return () => {
+      window.removeEventListener('dragover', prevent);
+      window.removeEventListener('drop', prevent);
+    };
+  }, []);
+
   // ── Render ─────────────────────────────────────────────────────────────────
 
   const showCanvas = activeSvg || isLoading;
@@ -2386,7 +2265,21 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
   );
 
   return (
-    <div className="flex h-screen bg-zinc-950 overflow-hidden">
+    /* Drag handlers live on the ROOT so the entire viewport — sidebar included — is a
+       drop target. A real Finder drag enters from the left over the sidebar; if that
+       column doesn't preventDefault on dragover, the browser navigates to the file
+       instead of dropping it, which read as "drag-to-open is broken". A window-level
+       preventDefault (see effect below) is the belt-and-braces backstop. */
+    <div
+      className="flex h-screen bg-zinc-950 overflow-hidden"
+      onDrop={handleDrop}
+      onDragEnter={handleDragEnter}
+      onDragLeave={handleDragLeave}
+      onDragOver={handleDragOver}
+    >
+      {isDragging && (
+        <div className="pointer-events-none fixed inset-0 bg-blue-500/10 border-2 border-blue-500/40 z-10" />
+      )}
 
       {/* ── Export satisfaction prompt ───────────────────────────────── */}
       {/* Inline styles (not NativeWind classes) so the modal renders reliably
@@ -2576,6 +2469,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
         activeSample={activeSample}
         isLoading={isLoading}
         onOpenSample={openSample}
+        onOpenFetched={openSample}
       />
 
       {/* ── Main area ────────────────────────────────────────────────── */}
@@ -2893,6 +2787,8 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                   color={{ from: colorReplaceFrom, to: colorReplaceTo, setTo: setColorReplaceTo, open: colorReplaceOpen, setOpen: setColorReplaceOpen, layerColors, baselineRef: colorBaselineRef }}
                   fonts={{ extra: extraFonts, imageFonts, imageFontsLoading, suggestOpen: suggestFontsOpen, setSuggestOpen: setSuggestFontsOpen, customiseFonts, customiseLoading, customiseDone }}
                   taxonomy={{ data: taxonomy, loading: taxonomyLoading, open: taxonomyOpen, setOpen: setTaxonomyOpen }}
+                  llmProvider={llmProvider}
+                  onSelectLlmProvider={selectLlmProvider}
                   onSelectOne={selectOne}
                   onSetSelectedLayers={setSelectedLayers}
                   onSetSelectedLayer={setSelectedLayer}
@@ -2920,17 +2816,9 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
             </div>
           </>
         ) : (
-          /* ── Drop zone ─────────────────────────────────────────────── */
-          <div
-            className="flex-1 flex items-center justify-center"
-            onDrop={handleDrop}
-            onDragEnter={handleDragEnter}
-            onDragLeave={handleDragLeave}
-            onDragOver={handleDragOver}
-          >
-            {isDragging && (
-              <div className="pointer-events-none fixed inset-0 bg-blue-500/10 border-2 border-blue-500/40 z-10" />
-            )}
+          /* ── Drop zone (empty state) — drag handlers now live on the main-area
+                wrapper above, so they keep working once a document is open too. ── */
+          <div className="flex-1 flex items-center justify-center">
             <div
               className={cn(
                 'flex flex-col items-center gap-5 rounded-2xl border-2 border-dashed px-20 py-16 transition-all duration-150 cursor-pointer select-none',

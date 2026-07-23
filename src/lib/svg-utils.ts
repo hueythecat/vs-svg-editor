@@ -241,6 +241,86 @@ export function hashString(s: string): string {
   return h.toString(36);
 }
 
+// Parses an SVG viewBox into numbers, falling back to a sane default so callers can
+// destructure without guarding. Replaces the split(/[\s,]+/).map(Number) boilerplate
+// that was repeated across every AI/raster path.
+export function parseViewBox(svgRoot: Element, fallback = '0 0 800 600'): { x: number; y: number; w: number; h: number } {
+  const parts = (svgRoot.getAttribute('viewBox') ?? fallback).trim().split(/[\s,]+/).map(Number);
+  const [fx, fy, fw, fh] = fallback.split(/[\s,]+/).map(Number);
+  return {
+    x: parts[0] ?? fx,
+    y: parts[1] ?? fy,
+    w: parts[2] ?? fw,
+    h: parts[3] ?? fh,
+  };
+}
+
+// Mounts a hidden clone of svgRoot (carrying its data-* marks) so getBBox works on a
+// detached/parsed SVG document, runs fn against it, and always unmounts.
+export const withOffscreenSvg = <T,>(svgRoot: Element, fn: (mounted: SVGSVGElement) => T): T => {
+  const measureSvg = svgRoot.cloneNode(true) as SVGSVGElement;
+  const holder = document.createElement('div');
+  holder.setAttribute('style', 'position:absolute;left:-99999px;top:0;width:1px;height:1px;overflow:hidden');
+  holder.appendChild(measureSvg);
+  document.body.appendChild(holder);
+  try {
+    return fn(measureSvg);
+  } finally {
+    document.body.removeChild(holder);
+  }
+};
+
+// Drops removeIds whose element covers ≥ BACKGROUND_AREA_LIMIT of the canvas — a
+// background or decoration the vision model mislabeled as text. Shared by the
+// strip-text and customise passes so both guard identically. svgRoot must already
+// carry the data-ai-idx marks.
+const BACKGROUND_AREA_LIMIT = 0.5; // ≥50% of the canvas ⇒ background, never a text run
+export const filterOutBackgroundIds = (
+  svgRoot: Element,
+  removeIds: string[],
+  canvasW: number,
+  canvasH: number,
+  logTag: string,
+): string[] => {
+  const canvasArea = Math.max(1, canvasW * canvasH);
+  return withOffscreenSvg(svgRoot, (measureSvg) =>
+    removeIds.filter((sid) => {
+      const probe = measureSvg.querySelector(`[data-ai-idx="${sid}"]`) as SVGGraphicsElement | null;
+      if (!probe || typeof probe.getBBox !== 'function') return true; // can't measure → trust the model
+      try {
+        const b = probe.getBBox();
+        const frac = (b.width * b.height) / canvasArea;
+        if (frac >= BACKGROUND_AREA_LIMIT) {
+          console.log(`[${logTag}] skipping removeId ${sid} — bbox covers ${(frac * 100).toFixed(0)}% of canvas (background, not text)`);
+          return false;
+        }
+      } catch { /* unrenderable geometry — leave the call to the model */ }
+      return true;
+    }),
+  );
+};
+
+// True when the element (by id) spans essentially the whole canvas in BOTH dimensions
+// — i.e. a background/canvas fill, not foreground artwork. Gates whether the bottom
+// layer is excluded from the customise vision image.
+const FULL_CANVAS_MIN = 0.9; // ≥90% of both canvas dimensions ⇒ a background layer
+export const isFullCanvasLayer = (
+  svgRoot: Element,
+  elementId: string,
+  canvasW: number,
+  canvasH: number,
+): boolean =>
+  withOffscreenSvg(svgRoot, (measureSvg) => {
+    const el = measureSvg.querySelector(`[id="${elementId}"]`) as SVGGraphicsElement | null;
+    if (!el || typeof el.getBBox !== 'function') return false;
+    try {
+      const b = el.getBBox();
+      return b.width >= FULL_CANVAS_MIN * canvasW && b.height >= FULL_CANVAS_MIN * canvasH;
+    } catch {
+      return false;
+    }
+  });
+
 export function svgToBase64Png(svgString: string, width: number, height: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const blob = new Blob([svgString], { type: 'image/svg+xml' });

@@ -12,6 +12,16 @@ export type TextLayerAttrs = {
 
 export type AiActionType = 'strip-text' | 'suggest-font' | 'remove-specific-text' | 'check-text';
 
+// Which LLM backs every AI action. Labels are what the model dropdown shows; the
+// concrete model ids live server-side in the matching /api route.
+export type LlmProvider = 'claude' | 'kimi';
+
+// Kimi is off the menu for now; the 'kimi' provider and its /api/kimi route are
+// still wired up, so re-adding the entry below is all it takes to bring it back.
+export const LLM_OPTIONS: Array<{ value: LlmProvider; label: string }> = [
+  { value: 'claude', label: 'Claude — Sonnet 5' },
+];
+
 type TextForm = {
   content: string; font: string; size: number; weight: number;
   color: string; curve: number; letterSpacing: number;
@@ -97,6 +107,8 @@ export interface LayersPanelProps {
   onAddTextLayer: () => void;
   onCurvePointerDown: () => number | null;
   onCurvePointerUp: (startCenterY: number) => void;
+  llmProvider: LlmProvider;
+  onSelectLlmProvider: (provider: LlmProvider) => void;
   onRunAiAction: (action?: AiActionType, query?: string) => void;
   onSelectFromColor: (color: string) => void;
   onClearFromColor: () => void;
@@ -128,6 +140,7 @@ export function LayersPanel({
   selectedLayer, selectedLayers, selectedSubElId, hiddenLayers, subLayerMap, selectedTextProps,
   textContentRef,
   text, ai, color, fonts, taxonomy,
+  llmProvider, onSelectLlmProvider,
   onSelectOne, onSetSelectedLayers, onSetSelectedLayer, onSetSelectedSubElId,
   onToggleLayer, onDuplicateLayer, onDeleteLayer, onReorderLayers,
   onUpdateTextLayer, onAddTextLayer, onCurvePointerDown, onCurvePointerUp,
@@ -149,6 +162,21 @@ export function LayersPanel({
 
   return (
     <aside className="w-52 shrink-0 flex flex-col border-l border-zinc-800 bg-zinc-900/60">
+
+      {/* Model — backs every AI action in the panel */}
+      <div className="border-b border-zinc-800 shrink-0 px-2 py-2 flex flex-col gap-1">
+        <span className="text-[9px] text-zinc-500 px-1 uppercase tracking-wider">Model</span>
+        <select
+          value={llmProvider}
+          disabled={ai.loading || fonts.customiseLoading || fonts.imageFontsLoading}
+          onChange={(e) => onSelectLlmProvider(e.target.value as LlmProvider)}
+          className="w-full rounded bg-zinc-800 border border-zinc-700 text-zinc-200 text-xs px-2 py-1.5 outline-none focus:border-zinc-500 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {LLM_OPTIONS.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
+      </div>
 
       {/* Image Actions — suggest fonts */}
       <div className="border-b border-zinc-800 shrink-0">
