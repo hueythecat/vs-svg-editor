@@ -25,6 +25,10 @@ import { cn } from '@/lib/utils';
 import type { AiActionType, LlmProvider } from './layers-panel';
 import { LayersPanel } from './layers-panel';
 import { SamplesSidebar, SAMPLE_DRAG_MIME } from './samples-sidebar';
+import { UpsellModal, RatingModal, AbortReasonModal } from './editor-modals';
+import { EditorToolbar } from './editor-toolbar';
+import { CanvasStage } from './editor-canvas';
+import { FontSuggestions } from './editor-font-suggestions';
 import { SparklesIcon } from './svg-icons';
 
 // ─── Samples ─────────────────────────────────────────────────────────────────
@@ -861,6 +865,25 @@ export function SvgDropZone() {
     clear();
   }, [abortReason, rating, clear]);
 
+  // Stable close/open handlers so the memoised modal components don't re-render on
+  // unrelated state changes.
+  const closeUpsell = useCallback(() => setShowUpsell(false), []);
+  const openAbortReason = useCallback(() => setAbortReasonOpen(true), []);
+  const closeAbortReason = useCallback(() => setAbortReasonOpen(false), []);
+  const openRating = useCallback(() => { setRating(0); setRatingHover(0); setRatingOpen(true); }, []);
+  const closeImageFonts = useCallback(() => setShowImageFonts(false), []);
+  // Empty-text selection overlay click: open the text form and focus its input.
+  const focusEmptyTextInput = useCallback(() => {
+    setTextFormOpen(true);
+    requestAnimationFrame(() => {
+      const input = textContentRef.current;
+      if (!input) return;
+      input.focus();
+      const end = input.value.length;
+      input.setSelectionRange(end, end);
+    });
+  }, []);
+
   // mousedown on canvas: drag any selected non-background layer
   const handleDragHandleMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     e.stopPropagation();
@@ -1157,6 +1180,20 @@ export function SvgDropZone() {
       return { ...prev, content, layers };
     });
   }, [selectedLayer, selectedSubElId, activeSvg, snapshotForUndo]);
+
+  // Toggle a suggested font: deselect if already selected, else apply it to the
+  // selected text layer (or the pending text-form default when nothing is selected).
+  // Defined after updateTextLayer/selectedTextProps so it can depend on them.
+  const onSelectImageFont = useCallback((font: string) => {
+    setSelectedImageFont((prev) => {
+      const next = prev === font ? null : font;
+      if (next) {
+        if (selectedTextProps) updateTextLayer({ font: next });
+        else setTextForm((f) => ({ ...f, font: next }));
+      }
+      return next;
+    });
+  }, [selectedTextProps, updateTextLayer]);
 
   // ── Add text layer ─────────────────────────────────────────────────────────
 
@@ -2303,266 +2340,26 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
         <div className="pointer-events-none fixed inset-0 bg-blue-500/10 border-2 border-blue-500/40 z-10" />
       )}
 
-      {/* ── AI upsell (gated asset) ──────────────────────────────────── */}
-      {/* Inline styles (not NativeWind classes) so the modal renders reliably. */}
-      {showUpsell && (
-        <div
-          onClick={() => setShowUpsell(false)}
-          style={{
-            position: 'fixed', inset: 0, zIndex: 60,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            background: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(2px)',
-          }}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              width: 420, maxWidth: '90vw',
-              background: '#18181b', border: '1px solid #3f3f46', borderRadius: 14,
-              padding: 24, boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
-              display: 'flex', flexDirection: 'column', gap: 16,
-            }}
-          >
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-              <SparklesIcon className="size-5 text-indigo-400" />
-              <span style={{ fontSize: 17, fontWeight: 600, color: '#fafafa' }}>Unlock AI editing</span>
-            </div>
-            <p style={{ fontSize: 13.5, lineHeight: 1.5, color: '#a1a1aa', margin: 0 }}>
-              You need an active subscription or credits to use the AI features on this asset.
-            </p>
-            <div
-              style={{
-                display: 'flex', flexDirection: 'column', gap: 12,
-                padding: 14, borderRadius: 10,
-                background: 'rgba(99,102,241,0.08)', border: '1px solid rgba(99,102,241,0.25)',
-              }}
-            >
-              <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: '0.08em', textTransform: 'uppercase', color: '#818cf8' }}>
-                AI features
-              </span>
-              {[
-                ['Suggests fonts', 'Recommends Google Fonts that match the design’s style and mood.'],
-                ['Converts text paths to editable text', 'Detects lettering baked into outlines and turns it back into real, editable text.'],
-              ].map(([title, desc]) => (
-                <div key={title} style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-                  <span style={{ marginTop: 2, flexShrink: 0, display: 'inline-flex' }}>
-                    <SparklesIcon className="size-4 text-indigo-400" />
-                  </span>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-                    <span style={{ fontSize: 13, fontWeight: 600, color: '#e4e4e7' }}>{title}</span>
-                    <span style={{ fontSize: 12, lineHeight: 1.45, color: '#a1a1aa' }}>{desc}</span>
-                  </div>
-                </div>
-              ))}
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 4 }}>
-              <button
-                type="button"
-                onClick={() => setShowUpsell(false)}
-                style={{
-                  height: 34, padding: '0 14px', borderRadius: 8,
-                  border: '1px solid #3f3f46', background: 'transparent',
-                  color: '#d4d4d8', fontSize: 13, cursor: 'pointer',
-                }}
-              >
-                Maybe later
-              </button>
-              <button
-                type="button"
-                onClick={() => setShowUpsell(false)}
-                style={{
-                  height: 34, padding: '0 16px', borderRadius: 8, border: 'none',
-                  background: '#6366f1', color: '#fff', fontSize: 13, fontWeight: 600, cursor: 'pointer',
-                }}
-              >
-                Upgrade
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── Export satisfaction prompt ───────────────────────────────── */}
-      {/* Inline styles (not NativeWind classes) so the modal renders reliably
-          regardless of which utilities the Tailwind build has generated. */}
-      {ratingOpen && (
-        <div
-          onClick={cancelRating}
-          style={{
-            position: 'fixed', inset: 0, zIndex: 50,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            background: 'rgba(0,0,0,0.6)',
-          }}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              width: 352, maxWidth: '90vw',
-              borderRadius: 12, border: '1px solid #27272a',
-              background: '#18181b', padding: 24,
-              boxShadow: '0 20px 50px rgba(0,0,0,0.5)',
-            }}
-          >
-            <h2 style={{ textAlign: 'center', fontSize: 16, fontWeight: 600, color: '#f4f4f5', margin: 0 }}>
-              How satisfied are you?
-            </h2>
-            <p style={{ marginTop: 4, textAlign: 'center', fontSize: 12, color: '#a1a1aa' }}>
-              Rate your experience before exporting.
-            </p>
-
-            <div
-              onMouseLeave={() => setRatingHover(0)}
-              style={{ marginTop: 20, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6 }}
-            >
-              {[1, 2, 3, 4, 5].map((star) => {
-                const active = star <= (ratingHover || rating);
-                return (
-                  <button
-                    key={star}
-                    type="button"
-                    aria-label={`${star} star${star > 1 ? 's' : ''}`}
-                    onMouseEnter={() => setRatingHover(star)}
-                    onClick={() => setRating(star)}
-                    style={{
-                      background: 'none', border: 'none', padding: 2, cursor: 'pointer',
-                      lineHeight: 0, transform: active ? 'scale(1.06)' : 'scale(1)',
-                      transition: 'transform 0.1s',
-                    }}
-                  >
-                    <svg
-                      xmlns="http://www.w3.org/2000/svg"
-                      width={32} height={32}
-                      viewBox="0 0 24 24"
-                      fill={active ? '#fbbf24' : 'none'}
-                      stroke={active ? '#fbbf24' : '#52525b'}
-                      strokeWidth={1.5}
-                    >
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M11.48 3.5a.562.562 0 0 1 1.04 0l2.125 5.11a.563.563 0 0 0 .475.346l5.518.442c.499.04.701.663.321.988l-4.204 3.602a.563.563 0 0 0-.182.557l1.285 5.385a.562.562 0 0 1-.84.61l-4.725-2.885a.562.562 0 0 0-.586 0L6.982 20.54a.562.562 0 0 1-.84-.61l1.285-5.386a.562.562 0 0 0-.182-.557l-4.204-3.602a.562.562 0 0 1 .321-.988l5.518-.442a.563.563 0 0 0 .475-.345L11.48 3.5Z" />
-                    </svg>
-                  </button>
-                );
-              })}
-            </div>
-
-            <div style={{ marginTop: 24, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8 }}>
-              <button
-                type="button"
-                onClick={cancelRating}
-                style={{
-                  height: 32, borderRadius: 6, border: '1px solid #3f3f46',
-                  padding: '0 12px', fontSize: 12, fontWeight: 500,
-                  color: '#d4d4d8', background: 'transparent', cursor: 'pointer',
-                }}
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={rating === 1 ? () => setAbortReasonOpen(true) : submitRating}
-                disabled={rating < 1}
-                style={{
-                  height: 32, borderRadius: 6, border: 'none',
-                  padding: '0 12px', fontSize: 12, fontWeight: 500, color: '#fff',
-                  background: rating === 1 ? '#dc2626' : '#2563eb',
-                  opacity: rating < 1 ? 0.4 : 1,
-                  cursor: rating < 1 ? 'not-allowed' : 'pointer',
-                }}
-              >
-                {rating === 1 ? 'Abort Project' : 'Submit & Export'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* ── Secondary overlay: reason for aborting (one-star path) ────── */}
-      {abortReasonOpen && (
-        <div
-          onClick={() => setAbortReasonOpen(false)}
-          style={{
-            position: 'fixed', inset: 0, zIndex: 60,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            background: 'rgba(0,0,0,0.6)',
-          }}
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            style={{
-              width: 380, maxWidth: '90vw',
-              borderRadius: 12, border: '1px solid #27272a',
-              background: '#18181b', padding: 24,
-              boxShadow: '0 20px 50px rgba(0,0,0,0.5)',
-            }}
-          >
-            <h2 style={{ textAlign: 'center', fontSize: 16, fontWeight: 600, color: '#f4f4f5', margin: 0 }}>
-              Why are you aborting?
-            </h2>
-            <p style={{ marginTop: 4, textAlign: 'center', fontSize: 12, color: '#a1a1aa' }}>
-              Tell us what went wrong. This closes the current project.
-            </p>
-
-            <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {ABORT_REASONS.map((reason) => {
-                const selected = abortReason === reason;
-                return (
-                  <button
-                    key={reason}
-                    type="button"
-                    onClick={() => setAbortReason(reason)}
-                    style={{
-                      display: 'flex', alignItems: 'center', gap: 10,
-                      textAlign: 'left', width: '100%',
-                      height: 40, padding: '0 12px', borderRadius: 8,
-                      border: `1px solid ${selected ? '#dc2626' : '#3f3f46'}`,
-                      background: selected ? 'rgba(220,38,38,0.12)' : 'transparent',
-                      color: selected ? '#fca5a5' : '#d4d4d8',
-                      fontSize: 13, cursor: 'pointer',
-                    }}
-                  >
-                    <span
-                      style={{
-                        width: 14, height: 14, borderRadius: '50%', flexShrink: 0,
-                        border: `2px solid ${selected ? '#dc2626' : '#52525b'}`,
-                        background: selected ? '#dc2626' : 'transparent',
-                        boxShadow: selected ? 'inset 0 0 0 2px #18181b' : 'none',
-                      }}
-                    />
-                    {reason}
-                  </button>
-                );
-              })}
-            </div>
-
-            <div style={{ marginTop: 24, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 8 }}>
-              <button
-                type="button"
-                onClick={() => setAbortReasonOpen(false)}
-                style={{
-                  height: 32, borderRadius: 6, border: '1px solid #3f3f46',
-                  padding: '0 12px', fontSize: 12, fontWeight: 500,
-                  color: '#d4d4d8', background: 'transparent', cursor: 'pointer',
-                }}
-              >
-                Back
-              </button>
-              <button
-                type="button"
-                onClick={confirmAbort}
-                disabled={!abortReason}
-                style={{
-                  height: 32, borderRadius: 6, border: 'none',
-                  padding: '0 12px', fontSize: 12, fontWeight: 500, color: '#fff',
-                  background: '#dc2626',
-                  opacity: abortReason ? 1 : 0.4,
-                  cursor: abortReason ? 'pointer' : 'not-allowed',
-                }}
-              >
-                Abort Project
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Modal overlays (extracted, memoised) — see editor-modals.tsx */}
+      <UpsellModal open={showUpsell} onClose={closeUpsell} />
+      <RatingModal
+        open={ratingOpen}
+        rating={rating}
+        hover={ratingHover}
+        onHover={setRatingHover}
+        onRate={setRating}
+        onCancel={cancelRating}
+        onSubmit={submitRating}
+        onAbort={openAbortReason}
+      />
+      <AbortReasonModal
+        open={abortReasonOpen}
+        reasons={ABORT_REASONS}
+        selected={abortReason}
+        onSelect={setAbortReason}
+        onBack={closeAbortReason}
+        onConfirm={confirmAbort}
+      />
 
       {/* ── Left sidebar ─────────────────────────────────────────────── */}
       <SamplesSidebar
@@ -2577,314 +2374,56 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
       <div className="flex flex-col flex-1 min-w-0">
         {showCanvas ? (
           <>
-            {/* Toolbar */}
-            <div className="flex items-center gap-2 px-4 h-11 border-b border-zinc-800 shrink-0">
-              {/* Filename + dirty dot */}
-              <div className="flex items-center gap-1.5 min-w-0 flex-1">
-                <span className="text-zinc-400 text-sm font-mono truncate">
-                  {isLoading && !activeSvg ? 'Loading…' : activeSvg?.name}
-                </span>
-                {isDirty && (
-                  <span className="size-1.5 rounded-full bg-amber-400 shrink-0 inline-block" title="Unsaved changes" />
-                )}
-              </div>
+            {/* Toolbar (extracted, memoised) — see editor-toolbar.tsx */}
+            <EditorToolbar
+              fileName={isLoading && !activeSvg ? 'Loading…' : (activeSvg?.name ?? '')}
+              isDirty={isDirty}
+              onCenter={centerLayersToCanvas}
+              onMatchRotation={matchRotationToSelected}
+              matchRotationDisabled={selectedLayers.size !== 1 || selectionLayerId === backgroundLayerId}
+              undoCount={undoCount}
+              onUndo={undo}
+              exportLabel={activeSvg && hiddenLayers.size > 0
+                ? `Export (${activeSvg.layers.length - hiddenLayers.size}/${activeSvg.layers.length})`
+                : 'Export'}
+              onExport={openRating}
+              onClose={clear}
+            />
 
-              <div className="flex items-center gap-1.5 shrink-0">
-                {/* Center layers to canvas midpoint */}
-                <button
-                  onClick={centerLayersToCanvas}
-                  title="Center all layers horizontally"
-                  className="h-7 w-7 flex items-center justify-center rounded border border-zinc-700 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
-                >
-                    <svg xmlns="http://www.w3.org/2000/svg" className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
-                      <circle cx="12" cy="12" r="3" />
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v2m0 14v2M3 12h2m14 0h2" />
-                    </svg>
-                </button>
-
-                {/* Match all layers to the selected layer's rotation */}
-                <button
-                  onClick={matchRotationToSelected}
-                  disabled={selectedLayers.size !== 1 || selectionLayerId === backgroundLayerId}
-                  title="Match all layers to the selected layer's rotation"
-                  className="h-7 w-7 flex items-center justify-center rounded border border-zinc-700 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-zinc-400 disabled:cursor-not-allowed"
-                >
-                    <svg xmlns="http://www.w3.org/2000/svg" className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3" />
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M17.4 3.6v3.1h-3.1" />
-                    </svg>
-                </button>
-
-                {/* Undo */}
-                {undoCount > 0 && (
-                  <button
-                    onClick={undo}
-                    title="Undo (⌘Z)"
-                    className="h-7 w-7 flex items-center justify-center rounded border border-zinc-700 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M9 15 3 9m0 0 6-6M3 9h12a6 6 0 0 1 0 12h-3" />
-                    </svg>
-                  </button>
-                )}
-
-                {/* Export */}
-                <button
-                  onClick={() => { setRating(0); setRatingHover(0); setRatingOpen(true); }}
-                  className="h-7 flex items-center gap-1.5 px-2.5 rounded border border-zinc-700 text-zinc-300 hover:text-zinc-100 hover:bg-zinc-800 text-xs font-medium transition-colors"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
-                  </svg>
-                  {activeSvg && hiddenLayers.size > 0
-                    ? `Export (${activeSvg.layers.length - hiddenLayers.size}/${activeSvg.layers.length})`
-                    : 'Export'}
-                </button>
-
-                {/* Close */}
-                <button
-                  onClick={clear}
-                  title="Close file (ESC)"
-                  className="h-7 w-7 flex items-center justify-center rounded border border-zinc-700 text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
-                >
-                  <svg xmlns="http://www.w3.org/2000/svg" className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
-                  </svg>
-                </button>
-              </div>
-            </div>
-
-            {/* Font suggestions panel */}
-            {showImageFonts && (
-              <div className="shrink-0 border-b border-zinc-800 bg-zinc-900/80 px-4 py-2 flex flex-col gap-2">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-1.5">
-                    <SparklesIcon className="size-3 text-indigo-400" />
-                    <span className="text-[10px] font-semibold text-zinc-400 uppercase tracking-widest">Font suggestions</span>
-                  </div>
-                  <button onClick={() => setShowImageFonts(false)} className="text-zinc-600 hover:text-zinc-300 text-xs transition-colors">✕</button>
-                </div>
-                {imageFontsLoading && (
-                  <div className="flex items-center gap-2 py-1">
-                    <div className="size-3 rounded-full border border-zinc-600 border-t-zinc-400 animate-spin shrink-0" />
-                    <span className="text-xs text-zinc-500">Analysing design…</span>
-                  </div>
-                )}
-                {imageFonts && imageFonts.length > 0 && (
-                  <div className="flex flex-wrap gap-2">
-                    {imageFonts.map(({ font, reason }) => {
-                      const isSelected = selectedImageFont === font;
-                      return (
-                        <div
-                          key={font}
-                          title={reason}
-                          onClick={() => {
-                            const next = isSelected ? null : font;
-                            setSelectedImageFont(next);
-                            if (next) {
-                              if (selectedTextProps) updateTextLayer({ font: next });
-                              else setTextForm((f) => ({ ...f, font: next }));
-                            }
-                          }}
-                          className={cn(
-                            'flex items-center gap-1.5 rounded px-2 py-1 cursor-pointer transition-colors',
-                            isSelected
-                              ? 'bg-indigo-600/30 ring-1 ring-indigo-500 text-indigo-200'
-                              : 'bg-zinc-800 hover:bg-zinc-700/80 text-zinc-200'
-                          )}
-                        >
-                          <span className="text-xs" style={{ fontFamily: font }}>{font}</span>
-                          <button
-                            onClick={(e) => { e.stopPropagation(); addGoogleFont(font); }}
-                            title="Add to font list"
-                            className={cn(
-                              'transition-colors text-xs ml-1',
-                              isSelected ? 'text-indigo-400 hover:text-indigo-200' : 'text-zinc-500 hover:text-zinc-200'
-                            )}
-                          >
-                            +
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
+            {/* Font suggestions panel (extracted, memoised) — see editor-font-suggestions.tsx */}
+            <FontSuggestions
+              open={showImageFonts}
+              onClose={closeImageFonts}
+              loading={imageFontsLoading}
+              fonts={imageFonts}
+              selectedFont={selectedImageFont}
+              onSelectFont={onSelectImageFont}
+              onAddFont={addGoogleFont}
+            />
 
             {/* Canvas row: SVG + layers panel */}
             <div className="flex flex-1 min-h-0">
 
-              {/* Canvas */}
-              <div
-                ref={svgCanvasRef}
-                onClick={handleCanvasClick}
-                className="relative flex-1 overflow-auto flex items-center justify-center min-w-0"
-                style={{
-                  backgroundImage: 'radial-gradient(circle, #3f3f46 1px, transparent 1px)',
-                  backgroundSize: '20px 20px',
-                }}
-              >
-                {/* Beta badge, pinned to the canvas top-left. Inline styles (not NativeWind
-                    classes) so it renders regardless of which Tailwind utilities are built. */}
-                <span
-                  style={{
-                    position: 'absolute', top: 10, left: 10, zIndex: 20,
-                    pointerEvents: 'none',
-                    padding: '2px 8px', borderRadius: 6,
-                    fontSize: 10, fontWeight: 700, letterSpacing: '0.08em',
-                    textTransform: 'uppercase',
-                    color: '#fcd34d',
-                    background: 'rgba(245,158,11,0.12)',
-                    border: '1px solid rgba(245,158,11,0.35)',
-                  }}
-                >
-                  Beta
-                </span>
-                {aiLoading && (
-                  <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-zinc-950/60 backdrop-blur-[2px]">
-                    <SparklesIcon className="size-10 text-indigo-400 animate-pulse" />
-                    <span className="mt-3 text-sm text-zinc-300 tracking-wide">{aiStatusMsg}</span>
-                  </div>
-                )}
-
-                {isLoading && !activeSvg ? (
-                  <div className="w-8 h-8 rounded-full border-2 border-zinc-700 border-t-zinc-400 animate-spin" />
-                ) : activeSvg ? (
-                  <>
-                    {hiddenLayers.size > 0 && (
-                      <style>{
-                        [...hiddenLayers]
-                          .map((id) => `.svg-canvas #${CSS.escape(id)}{display:none!important}`)
-                          .join('')
-                      }</style>
-                    )}
-                    <div
-                      className="svg-canvas"
-                      style={{ width: '80%' }}
-                      dangerouslySetInnerHTML={{ __html: activeSvg.content }}
-                    />
-                    {/* Selection overlay — React controls existence, layout effect controls position.
-                        No display/left/top/width/height in JSX so React never overrides them.
-                        Hidden for the locked background layer. */}
-                    {showSelectionOverlay && (
-                      <div
-                        ref={overlayRef}
-                        data-sel-overlay
-                        // An empty text layer has no clickable geometry, so let its
-                        // placeholder box catch clicks (re-focusing the input) instead
-                        // of falling through and selecting the background. Non-empty
-                        // layers stay click-through so glyph/sub-text clicks still work.
-                        onClick={selectionIsEmptyText ? () => {
-                          setTextFormOpen(true);
-                          requestAnimationFrame(() => {
-                            const input = textContentRef.current;
-                            if (!input) return;
-                            input.focus();
-                            const end = input.value.length;
-                            input.setSelectionRange(end, end);
-                          });
-                        } : undefined}
-                        style={{
-                          position: 'absolute',
-                          pointerEvents: selectionIsEmptyText ? 'auto' : 'none',
-                          outline: '2px dashed #3b82f6',
-                          boxSizing: 'border-box',
-                          zIndex: 5,
-                        }}
-                      >
-                        {/* Sub-layer highlight (amber) — display toggled by layout effect */}
-                        <div
-                          ref={subOverlayRef}
-                          style={{
-                            position: 'absolute',
-                            outline: '2px dashed #f59e0b',
-                            boxSizing: 'border-box',
-                            pointerEvents: 'none',
-                          }}
-                        />
-                        {/* Drag handle — single-layer selection only */}
-                        {selectedLayers.size === 1 && (
-                          <div
-                            onMouseDown={handleDragHandleMouseDown}
-                            onClick={(e) => e.stopPropagation()}
-                            style={{
-                              position: 'absolute',
-                              right: -8,
-                              top: -8,
-                              width: 16,
-                              height: 16,
-                              borderRadius: '50%',
-                              background: '#3b82f6',
-                              border: '2px solid white',
-                              cursor: 'grab',
-                              pointerEvents: 'all',
-                            }}
-                          />
-                        )}
-                        {/* Rotate handle — single-layer selection only. Sits on a
-                            stalk above the top-centre of the selection box. */}
-                        {selectedLayers.size === 1 && (
-                          <>
-                            <div
-                              style={{
-                                position: 'absolute',
-                                left: '50%',
-                                top: -24,
-                                width: 1,
-                                height: 24,
-                                marginLeft: -0.5,
-                                background: '#3b82f6',
-                                pointerEvents: 'none',
-                              }}
-                            />
-                            <div
-                              onMouseDown={handleRotateHandleMouseDown}
-                              onClick={(e) => e.stopPropagation()}
-                              title="Drag to rotate (hold Shift to snap to 15°)"
-                              style={{
-                                position: 'absolute',
-                                left: '50%',
-                                top: -32,
-                                marginLeft: -8,
-                                width: 16,
-                                height: 16,
-                                borderRadius: '50%',
-                                background: 'white',
-                                border: '2px solid #3b82f6',
-                                cursor: 'grab',
-                                pointerEvents: 'all',
-                              }}
-                            />
-                          </>
-                        )}
-                        {/* Scale handle — bottom-right corner, non-text layers only.
-                            Uniform scale about the layer's centre. */}
-                        {selectedLayers.size === 1 && !selectionIsTextLayer && (
-                          <div
-                            onMouseDown={handleScaleHandleMouseDown}
-                            onClick={(e) => e.stopPropagation()}
-                            title="Drag to scale"
-                            style={{
-                              position: 'absolute',
-                              right: -7,
-                              bottom: -7,
-                              width: 14,
-                              height: 14,
-                              borderRadius: 2,
-                              background: 'white',
-                              border: '2px solid #3b82f6',
-                              cursor: 'nwse-resize',
-                              pointerEvents: 'all',
-                            }}
-                          />
-                        )}
-                      </div>
-                    )}
-                  </>
-                ) : null}
-
-              </div>
+              {/* Canvas (extracted, memoised) — see editor-canvas.tsx */}
+              <CanvasStage
+                svgCanvasRef={svgCanvasRef}
+                overlayRef={overlayRef}
+                subOverlayRef={subOverlayRef}
+                onCanvasClick={handleCanvasClick}
+                aiLoading={aiLoading}
+                aiStatusMsg={aiStatusMsg}
+                isLoading={isLoading}
+                activeSvg={activeSvg}
+                hiddenLayers={hiddenLayers}
+                showSelectionOverlay={showSelectionOverlay}
+                selectionIsEmptyText={selectionIsEmptyText}
+                selectionIsTextLayer={selectionIsTextLayer}
+                selectedLayersSize={selectedLayers.size}
+                onEmptyTextClick={focusEmptyTextInput}
+                onDragHandleMouseDown={handleDragHandleMouseDown}
+                onRotateHandleMouseDown={handleRotateHandleMouseDown}
+                onScaleHandleMouseDown={handleScaleHandleMouseDown}
+              />
 
               {/* ── Layers panel ─────────────────────────────────────── */}
               {activeSvg && (
