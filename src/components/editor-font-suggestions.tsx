@@ -1,11 +1,14 @@
 import React from 'react';
 
-import { cn } from '@/lib/utils';
-import { SparklesIcon } from './svg-icons';
+import { C, FONT_STACK, SHADOW, sectionLabelStyle } from '@/lib/design-tokens';
+import { CloseIcon, SparklesIcon } from './svg-icons';
 
-// The "Font suggestions" strip below the toolbar (vision-model font picks). Memoised;
-// returns null when closed. The toggle/apply logic stays in the parent behind
-// onSelectFont, so this component is purely presentational.
+// The "Font suggestions" strip (vision-model font picks). Memoised; returns null when
+// closed. The toggle/apply logic stays in the parent behind onSelectFont, so this
+// component is purely presentational.
+//
+// The design has no docked chrome, so the strip floats directly under the toolbar
+// rather than sitting in a column.
 export const FontSuggestions = React.memo(function FontSuggestions({
   open, onClose, loading, fonts, selectedFont, onSelectFont, onAddFont,
 }: {
@@ -19,22 +22,52 @@ export const FontSuggestions = React.memo(function FontSuggestions({
 }) {
   if (!open) return null;
   return (
-    <div className="shrink-0 border-b border-zinc-800 bg-zinc-900/80 px-4 py-2 flex flex-col gap-2">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-1.5">
-          <SparklesIcon className="size-3 text-indigo-400" />
-          <span className="text-[10px] font-semibold text-zinc-400 uppercase tracking-widest">Font suggestions</span>
-        </div>
-        <button onClick={onClose} className="text-zinc-600 hover:text-zinc-300 text-xs transition-colors">✕</button>
+    <div
+      style={{
+        position: 'absolute',
+        top: 76,
+        left: '50%',
+        transform: 'translateX(-50%)',
+        zIndex: 18,
+        width: 360,
+        maxWidth: 'calc(100vw - 32px)',
+        background: C.surface,
+        border: `1px solid ${C.borderPanel}`,
+        borderRadius: 12,
+        boxShadow: SHADOW.toolbar,
+        padding: '11px 12px 12px',
+        fontFamily: FONT_STACK,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8 }}>
+        <span style={{ color: C.accent, display: 'flex' }}><SparklesIcon size={12} /></span>
+        <span style={{ ...sectionLabelStyle, flex: 1 }}>Font suggestions</span>
+        <button
+          type="button"
+          className="ed-ghost"
+          onClick={onClose}
+          title="Close"
+          style={{ border: 'none', background: 'transparent', color: C.textFaint, padding: 2, borderRadius: 6, cursor: 'pointer', display: 'flex' }}
+        >
+          <CloseIcon size={12} />
+        </button>
       </div>
+
       {loading && (
-        <div className="flex items-center gap-2 py-1">
-          <div className="size-3 rounded-full border border-zinc-600 border-t-zinc-400 animate-spin shrink-0" />
-          <span className="text-xs text-zinc-500">Analysing design…</span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span
+            style={{
+              width: 12, height: 12, borderRadius: '50%', flex: 'none',
+              border: `2px solid ${C.borderInput}`, borderTopColor: C.accent,
+              animation: 'ed-spin .8s linear infinite',
+            }}
+          />
+          <span style={{ fontSize: 12, color: C.textMuted }}>Analysing design…</span>
         </div>
       )}
+
       {fonts && fonts.length > 0 && (
-        <div className="flex flex-wrap gap-2">
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
           {fonts.map(({ font, reason }) => {
             const isSelected = selectedFont === font;
             return (
@@ -42,21 +75,23 @@ export const FontSuggestions = React.memo(function FontSuggestions({
                 key={font}
                 title={reason}
                 onClick={() => onSelectFont(font)}
-                className={cn(
-                  'flex items-center gap-1.5 rounded px-2 py-1 cursor-pointer transition-colors',
-                  isSelected
-                    ? 'bg-indigo-600/30 ring-1 ring-indigo-500 text-indigo-200'
-                    : 'bg-zinc-800 hover:bg-zinc-700/80 text-zinc-200'
-                )}
+                className={isSelected ? 'ed-row-selected' : 'ed-row'}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 6,
+                  padding: '6px 9px', borderRadius: 9, cursor: 'pointer',
+                  border: `1px solid ${isSelected ? C.accentTintBorder : C.borderRow}`,
+                  background: isSelected ? C.accentTint : 'transparent',
+                }}
               >
-                <span className="text-xs" style={{ fontFamily: font }}>{font}</span>
+                <span style={{ fontSize: 12.5, color: C.textBody, fontFamily: font }}>{font}</span>
                 <button
+                  type="button"
                   onClick={(e) => { e.stopPropagation(); onAddFont(font); }}
-                  title="Add to font list"
-                  className={cn(
-                    'transition-colors text-xs ml-1',
-                    isSelected ? 'text-indigo-400 hover:text-indigo-200' : 'text-zinc-500 hover:text-zinc-200'
-                  )}
+                  title="Add to the font list"
+                  style={{
+                    border: 'none', background: 'transparent', cursor: 'pointer',
+                    color: isSelected ? C.accent : C.textFaint, fontSize: 13, lineHeight: 1, padding: 0,
+                  }}
                 >
                   +
                 </button>

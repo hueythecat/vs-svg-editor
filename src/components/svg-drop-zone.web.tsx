@@ -8,11 +8,13 @@ import {
   bboxInRootSpace,
   collectLayerGradientIds,
   computeArcPath,
+  detectBackgroundLayerId,
   extractLayerColors,
   filterOutBackgroundIds,
   findClickedSubText,
   hashString,
   isFullCanvasLayer,
+  isPlainWhiteLayer,
   normalizeColor,
   parseSvg,
   parseViewBox,
@@ -21,15 +23,17 @@ import {
   svgToBase64Png,
   withOffscreenSvg
 } from '@/lib/svg-utils';
-import { cn } from '@/lib/utils';
-import type { AiActionType, LlmProvider } from './layers-panel';
-import { LayersPanel } from './layers-panel';
-import { SamplesSidebar, SAMPLE_DRAG_MIME } from './samples-sidebar';
-import { UpsellModal, RatingModal, AbortReasonModal } from './editor-modals';
+import { C, EDITOR_CSS, FONT_STACK, SHADOW } from '@/lib/design-tokens';
+import type { AiActionType, LlmProvider } from './editor-types';
+import { LLM_OPTIONS } from './editor-types';
+import { LayersPanel } from './editor-layers-panel';
+import { EditorInspector } from './editor-inspector';
+import { AiPanel, AiPill } from './editor-ai-panel';
+import { DevRail, SAMPLE_DRAG_MIME } from './dev-rail';
+import { UpsellModal, RatingModal, AbortReasonModal, ConfirmModal } from './editor-modals';
 import { EditorToolbar } from './editor-toolbar';
 import { CanvasStage } from './editor-canvas';
 import { FontSuggestions } from './editor-font-suggestions';
-import { SparklesIcon } from './svg-icons';
 
 // ─── Samples ─────────────────────────────────────────────────────────────────
 
@@ -53,13 +57,15 @@ type SampleName = (typeof SAMPLES)[number]['name'];
 const isEditableTextField = (el: Element) =>
   el.getAttribute('data-text-layer') === '1' || el.id.startsWith('_text_');
 
-// Reasons offered when a one-star rating leads the user to abort the project.
+// Reasons offered when a one-star rating leads the user to abandon the export
+// (handoff §4). Multi-select — any number can apply.
 const ABORT_REASONS = [
-  'AI call did not work as intended',
-  'Not satisfied with the result',
-  'Too difficult to use',
-  'Missing features I need',
-  'Something else',
+  'Colours or fonts came out wrong',
+  'File looks different from the canvas',
+  'Wrong file type for what I need',
+  'Text got cut off or moved',
+  'Took too long to export',
+  'Made a mistake — starting over',
 ];
 
 // Rewrites a cloned element's id and every descendant id to a fresh namespace, and fixes
@@ -129,6 +135,9 @@ export function SvgDropZone() {
   // whose names aren't in the static SAMPLES union.
   const [activeSample, setActiveSample] = useState<string | null>(null);
   const [hiddenLayers, setHiddenLayers] = useState<Set<string>>(new Set());
+  // What `hiddenLayers` starts as for this document (the canvas layer) — the baseline
+  // the dirty check and Revert compare against.
+  const [defaultHiddenLayers, setDefaultHiddenLayers] = useState<Set<string>>(new Set());
   const [selectedLayer, setSelectedLayer]   = useState<string | null>(null);
   const [selectedLayers, setSelectedLayers] = useState<Set<string>>(new Set());
   const [isLoading, setIsLoading]       = useState(false);
@@ -157,14 +166,13 @@ export function SvgDropZone() {
   const [ratingOpen, setRatingOpen]   = useState(false);   // export satisfaction prompt
   const [rating, setRating]           = useState(0);        // chosen star count (1–5)
   const [ratingHover, setRatingHover] = useState(0);        // hovered star for preview
-  const [abortReasonOpen, setAbortReasonOpen] = useState(false); // secondary abort-reason overlay
-  const [abortReason, setAbortReason] = useState<string | null>(null);
+  const [abortReasonOpen, setAbortReasonOpen] = useState(false); // secondary abandon-reason overlay
+  const [abortReasons, setAbortReasons] = useState<string[]>([]); // multi-select (§4)
+  const [abortNote, setAbortNote]       = useState('');           // optional free-text note
   const [textForm, setTextForm] = useState({ content: 'Text', font: 'Arial', size: 48, weight: 400, color: '#000000', curve: 0, letterSpacing: 0 });
   const [aiLoading, setAiLoading]         = useState(false);
   const [aiError, setAiError]             = useState<string | null>(null);
   const [aiStatusMsg, setAiStatusMsg]     = useState<string>('Thinking…');
-  const [colorReplaceFrom, setColorReplaceFrom] = useState<string>('');
-  const [colorReplaceTo, setColorReplaceTo]     = useState<string>('#000000');
   const [fontSuggestion, setFontSuggestion]   = useState<string | null>(null);
   const [suggestedFontName, setSuggestedFontName] = useState<string | null>(null);
   const [extraFonts, setExtraFonts]           = useState<string[]>([]);
@@ -178,14 +186,12 @@ export function SvgDropZone() {
   const [taxonomy, setTaxonomy]           = useState<TaxonomyGroup[] | null>(null);
   const [taxonomyLoading, setTaxonomyLoading] = useState(false);
   const [taxonomyOpen, setTaxonomyOpen]       = useState(false);
-  const [textFormOpen, setTextFormOpen]       = useState(true);
-  const [aiActionsOpen, setAiActionsOpen]     = useState(true);
-  const [suggestFontsOpen, setSuggestFontsOpen] = useState(true);
   const [removeTextQuery, setRemoveTextQuery] = useState('');
   const [showRemoveTextInput, setShowRemoveTextInput] = useState(false);
   const [textCheckResult, setTextCheckResult] = useState<{ heading: string; subheading: string } | null>(null);
-  const [colorReplaceOpen, setColorReplaceOpen] = useState(true);
   const [selectedSubElId, setSelectedSubElId] = useState<string | null>(null);
+  const [aiPanelOpen, setAiPanelOpen]         = useState(false);   // opened by the AI pill
+  const [resetConfirmOpen, setResetConfirmOpen] = useState(false); // "Revert changes?" overlay
   // Which LLM every AI action calls. Picking 'kimi' diverts each request to
   // /api/kimi, which re-shapes the same Anthropic-style body for Moonshot. Mirrored
   // into a ref so the AI callbacks below read the live choice, never a stale closure.
@@ -231,17 +237,22 @@ export function SvgDropZone() {
   };
   const aiCacheRef              = useRef<Map<string, string>>(new Map());
   const dragMovedRef            = useRef(false);
-  const colorBaselineRef        = useRef<string | null>(null);
-  const autoColorSelectedRef    = useRef(false);
+  // An open colour-picker session: the colour being replaced and the document as it
+  // was when the picker opened. Live dragging replays from that baseline, so the whole
+  // pick is one undo entry rather than one per intermediate colour.
+  const colorEditRef            = useRef<{ from: string; baseline: string } | null>(null);
   const undoStackRef             = useRef<Array<{ content: string; layers: SvgLayer[] }>>([]);
+  const redoStackRef             = useRef<Array<{ content: string; layers: SvgLayer[] }>>([]);
   const layerClipboardRef        = useRef<string | null>(null);
   const [undoCount, setUndoCount] = useState(0);
+  const [redoCount, setRedoCount] = useState(0);
   const textEditSnappedRef = useRef(false);
   const fileInputRef       = useRef<HTMLInputElement>(null);
   const svgCanvasRef    = useRef<HTMLDivElement>(null);
   const textContentRef  = useRef<HTMLInputElement>(null);
   const overlayRef      = useRef<HTMLDivElement>(null);
   const subOverlayRef   = useRef<HTMLDivElement>(null);
+  const sizeBadgeRef    = useRef<HTMLSpanElement>(null);
   // Shown when an AI action is invoked on a gated asset (edit === 0).
   const [showUpsell, setShowUpsell] = useState(false);
 
@@ -251,30 +262,57 @@ export function SvgDropZone() {
     if (svg?.objectUrl) URL.revokeObjectURL(svg.objectUrl);
   }, []);
 
+  // Any committing action pushes the current document and clears the redo stack.
   const snapshotForUndo = useCallback((content: string, layers: SvgLayer[]) => {
     undoStackRef.current = [...undoStackRef.current.slice(-9), { content, layers }];
+    redoStackRef.current = [];
     setUndoCount(undoStackRef.current.length);
+    setRedoCount(0);
   }, []);
 
   const undo = useCallback(() => {
+    if (!activeSvg) return;
     const prev = undoStackRef.current.pop();
+    if (!prev) { setUndoCount(0); return; }
+    redoStackRef.current = [...redoStackRef.current.slice(-9), { content: activeSvg.content, layers: activeSvg.layers }];
     setUndoCount(undoStackRef.current.length);
-    if (!prev) return;
+    setRedoCount(redoStackRef.current.length);
     setActiveSvg((p) => p ? { ...p, content: prev.content, layers: prev.layers } : null);
-  }, []);
+  }, [activeSvg]);
+
+  const redo = useCallback(() => {
+    if (!activeSvg) return;
+    const next = redoStackRef.current.pop();
+    if (!next) { setRedoCount(0); return; }
+    undoStackRef.current = [...undoStackRef.current.slice(-9), { content: activeSvg.content, layers: activeSvg.layers }];
+    setUndoCount(undoStackRef.current.length);
+    setRedoCount(redoStackRef.current.length);
+    setActiveSvg((p) => p ? { ...p, content: next.content, layers: next.layers } : null);
+  }, [activeSvg]);
 
   const applyParsed = useCallback(
     (raw: string, name: string, src: string, objectUrl?: string, edit?: 0 | 1) => {
       const cleaned = stripScripts(raw);
       const { content, layers } = parseSvg(cleaned);
       setActiveSvg((prev) => { revokePrev(prev); return { name, src, content, originalContent: content, layers, objectUrl, edit }; });
-      setHiddenLayers(new Set());
+      // A plain white canvas layer starts hidden, so artwork opens on the transparency
+      // checkerboard and exports transparent unless it's switched on. A coloured or
+      // patterned background is part of the design, so it stays visible.
+      // Kept as the baseline too, so starting this way doesn't read as "unsaved
+      // changes" and Revert restores it rather than revealing the canvas.
+      const bgId = detectBackgroundLayerId(content, layers);
+      const hideCanvas = !!bgId && isPlainWhiteLayer(content, bgId);
+      const defaultHidden = new Set(hideCanvas ? [bgId] : []);
+      setDefaultHiddenLayers(defaultHidden);
+      setHiddenLayers(new Set(defaultHidden));
       setSelectedLayer(null);
       setSelectedLayers(new Set());
       setIsLoading(false);
       setCustomiseDone(false);
       undoStackRef.current = [];
+      redoStackRef.current = [];
       setUndoCount(0);
+      setRedoCount(0);
       // Default font size = ~8% of the smallest viewBox dimension
       const svgEl = new DOMParser().parseFromString(content, 'image/svg+xml').documentElement;
       const vb = svgEl.getAttribute('viewBox')?.trim().split(/[\s,]+/).map(Number);
@@ -334,6 +372,7 @@ export function SvgDropZone() {
     setActiveSvg((prev) => { revokePrev(prev); return null; });
     setActiveSample(null);
     setHiddenLayers(new Set());
+    setDefaultHiddenLayers(new Set());
     setSelectedLayer(null);
     setSelectedLayers(new Set());
     setSelectedSubElId(null);
@@ -368,6 +407,19 @@ export function SvgDropZone() {
     return map;
   }, [activeSvg?.content]);
 
+  // Which layers render as text — drives the element list's type icon (§1.7).
+  const textLayerIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (!activeSvg) return ids;
+    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+    for (const layer of activeSvg.layers) {
+      const el = doc.getElementById(layer.id);
+      if (!el) continue;
+      if (el.tagName.toLowerCase() === 'text' || el.querySelector('text')) ids.add(layer.id);
+    }
+    return ids;
+  }, [activeSvg?.content]);
+
   // Click on canvas: walk up from the clicked element to find its layer. When the
   // clicked layer holds text (and the click wasn't on the drag overlay), focus the
   // side-panel text input so keyboard input edits it immediately. For a plain group
@@ -393,9 +445,8 @@ export function SvgDropZone() {
             const found = findClickedSubText(el, e.target);
             if (found?.id) setSelectedSubElId(found.id);
           }
-          // Open the Text panel and focus its input so typing edits the text in place.
-          // Place the caret at the end (rather than selecting all) so typing appends.
-          setTextFormOpen(true);
+          // Focus the inspector's Words input so typing edits the text in place. Place
+          // the caret at the end (rather than selecting all) so typing appends.
           requestAnimationFrame(() => {
             const input = textContentRef.current;
             if (!input) return;
@@ -564,50 +615,12 @@ export function SvgDropZone() {
 
   // ── Background layer detection ────────────────────────────────────────────
 
-  const backgroundLayerId = useMemo(() => {
-    if (!activeSvg || activeSvg.layers.length === 0) return null;
-    const candidate = activeSvg.layers[0];
-    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
-    const svgRoot = doc.documentElement;
-    const vb = (svgRoot.getAttribute('viewBox') ?? '').trim().split(/[\s,]+/).map(Number);
-    if (vb.length < 4) return null;
-    const [, , vw, vh] = vb;
-    const viewBoxArea = vw * vh;
-    const el = doc.getElementById(candidate.id);
-    if (!el) return null;
-
-    const coversCanvas = (node: Element): boolean => {
-      const tag = node.localName.toLowerCase();
-      if (tag === 'rect') {
-        const w = parseFloat(node.getAttribute('width') ?? '0');
-        const h = parseFloat(node.getAttribute('height') ?? '0');
-        return w * h >= viewBoxArea * 0.75;
-      }
-      if (tag === 'circle') {
-        const r = parseFloat(node.getAttribute('r') ?? '0');
-        return Math.PI * r * r >= viewBoxArea * 0.75;
-      }
-      if (tag === 'ellipse') {
-        const rx = parseFloat(node.getAttribute('rx') ?? '0');
-        const ry = parseFloat(node.getAttribute('ry') ?? '0');
-        return Math.PI * rx * ry >= viewBoxArea * 0.75;
-      }
-      return false;
-    };
-
-    // Case 1: the layer element itself is a background shape
-    if (coversCanvas(el)) return candidate.id;
-
-    // Case 2: the layer is a group whose first few children include a background shape
-    const children = Array.from(el.children).filter(
-      (c) => !['defs', 'title', 'desc'].includes(c.localName.toLowerCase())
-    );
-    if (children.length > 0 && children.length <= 6) {
-      if (children.some(coversCanvas)) return candidate.id;
-    }
-
-    return null;
-  }, [activeSvg?.src]);
+  const backgroundLayerId = useMemo(
+    () => (activeSvg ? detectBackgroundLayerId(activeSvg.content, activeSvg.layers) : null),
+    // Per document, not per edit — the background layer doesn't change as you edit.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [activeSvg?.src],
+  );
 
   // The selection overlay's first/primary layer drives its position. Hide the
   // overlay entirely when that layer is the locked background layer.
@@ -691,6 +704,9 @@ export function SvgDropZone() {
         overlay.style.height          = `${height}px`;
         overlay.style.transformOrigin = '0 0';
         overlay.style.transform       = `rotate(${theta}rad)`;
+        if (sizeBadgeRef.current) {
+          sizeBadgeRef.current.textContent = `${Math.round(width)} × ${Math.round(height)}`;
+        }
 
         // Sub-layer highlight — mapped into the overlay's rotated frame.
         if (subOverlay && selectedSubElId) {
@@ -743,6 +759,9 @@ export function SvgDropZone() {
       overlay.style.top    = `${sp.y - h / 2 + offY - pad}px`;
       overlay.style.width  = `${w + pad * 2}px`;
       overlay.style.height = `${h + pad * 2}px`;
+      if (sizeBadgeRef.current) {
+        sizeBadgeRef.current.textContent = `${Math.round(w + pad * 2)} × ${Math.round(h + pad * 2)}`;
+      }
     } catch {
       // matrixTransform / getBBox can throw if the element is detached
     }
@@ -832,11 +851,13 @@ export function SvgDropZone() {
     URL.revokeObjectURL(url);
   }, [activeSvg, hiddenLayers, extraFonts]);
 
-  // Export is gated behind a quick satisfaction prompt.
+  // Export is gated behind the rating prompt (§3): the file is only written from
+  // "Send rating & download". Cancelling — or abandoning — discards it.
   const cancelRating = useCallback(() => {
     setRatingOpen(false);
     setAbortReasonOpen(false);
-    setAbortReason(null);
+    setAbortReasons([]);
+    setAbortNote('');
     setRating(0);
     setRatingHover(0);
   }, []);
@@ -851,19 +872,23 @@ export function SvgDropZone() {
     exportSvg();
   }, [rating, exportSvg]);
 
-  // A one-star rating turns the primary action into "Abort Project", which opens
-  // a secondary overlay asking why. Confirming records the reason and closes the
-  // project (returns to the drop zone) instead of exporting.
+  // A one-star rating offers "Abandon export", which opens a secondary overlay asking
+  // why. Confirming sends the feedback and closes the project (returning to the drop
+  // zone) — nothing downloads on this path.
   const confirmAbort = useCallback(() => {
-    if (!abortReason) return;
-    console.log('[export] project aborted — rating:', rating, 'reason:', abortReason);
+    console.log('[export] export abandoned — rating:', rating, 'reasons:', abortReasons, 'note:', abortNote);
     setAbortReasonOpen(false);
     setRatingOpen(false);
-    setAbortReason(null);
+    setAbortReasons([]);
+    setAbortNote('');
     setRating(0);
     setRatingHover(0);
     clear();
-  }, [abortReason, rating, clear]);
+  }, [abortReasons, abortNote, rating, clear]);
+
+  const toggleAbortReason = useCallback((reason: string) => {
+    setAbortReasons((prev) => (prev.includes(reason) ? prev.filter((r) => r !== reason) : [...prev, reason]));
+  }, []);
 
   // Stable close/open handlers so the memoised modal components don't re-render on
   // unrelated state changes.
@@ -872,9 +897,14 @@ export function SvgDropZone() {
   const closeAbortReason = useCallback(() => setAbortReasonOpen(false), []);
   const openRating = useCallback(() => { setRating(0); setRatingHover(0); setRatingOpen(true); }, []);
   const closeImageFonts = useCallback(() => setShowImageFonts(false), []);
-  // Empty-text selection overlay click: open the text form and focus its input.
+  const closeAiPanel = useCallback(() => setAiPanelOpen(false), []);
+  // The AI pill: gated assets (edit === 0) get the upsell, everyone else the AI panel.
+  const onAiPillClick = useCallback(() => {
+    if (activeSvg?.edit === 0) { setShowUpsell(true); return; }
+    setAiPanelOpen((o) => !o);
+  }, [activeSvg?.edit]);
+  // Empty-text selection overlay click: focus the inspector's Words input.
   const focusEmptyTextInput = useCallback(() => {
-    setTextFormOpen(true);
     requestAnimationFrame(() => {
       const input = textContentRef.current;
       if (!input) return;
@@ -1277,7 +1307,8 @@ export function SvgDropZone() {
     const content = new XMLSerializer().serializeToString(svg);
     const newLayer = { id, label: textContent };
     setActiveSvg((prev) => (prev ? { ...prev, content, layers: [...prev.layers, newLayer] } : null));
-    setSelectedLayer(id); setSelectedSubElId(null);
+    // Select it outright — the inspector switches to the type form for the new layer.
+    setSelectedLayer(id); setSelectedLayers(new Set([id])); setSelectedSubElId(null);
   }, [activeSvg, textForm, snapshotForUndo]);
 
   // ── Center all layers to canvas horizontal midpoint ──────────────────────
@@ -1360,6 +1391,36 @@ export function SvgDropZone() {
         'transform',
         `rotate(${delta.toFixed(2)}, ${cx.toFixed(2)}, ${cy.toFixed(2)}) ${existing}`.trim(),
       );
+      changed = true;
+    });
+
+    if (!changed) return;
+    snapshotForUndo(activeSvg.content, activeSvg.layers);
+    const content = new XMLSerializer().serializeToString(doc.documentElement);
+    setActiveSvg((prev) => (prev ? { ...prev, content } : null));
+  }, [activeSvg, selectedLayers, backgroundLayerId, snapshotForUndo]);
+
+  // ── Rotate the selection 90° (handoff §"Toolbar actions") ─────────────────
+  // Quarter-turn about each selected layer's own centre. No-op for the background.
+
+  const rotateSelected90 = useCallback(() => {
+    if (!activeSvg || !selectedLayers.size) return;
+    const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
+    if (!svgEl) return;
+
+    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+    let changed = false;
+    [...selectedLayers].forEach((id) => {
+      if (id === backgroundLayerId) return;
+      const liveEl = svgEl.getElementById(id) as SVGGraphicsElement | null;
+      const docEl = doc.getElementById(id);
+      if (!liveEl || !docEl) return;
+      const box = bboxInRootSpace(svgEl, liveEl);
+      if (!box) return;
+      const cx = box.x + box.width / 2;
+      const cy = box.y + box.height / 2;
+      const existing = docEl.getAttribute('transform') ?? '';
+      docEl.setAttribute('transform', `rotate(90, ${cx.toFixed(2)}, ${cy.toFixed(2)}) ${existing}`.trim());
       changed = true;
     });
 
@@ -1686,11 +1747,26 @@ Return ONLY valid JSON — no markdown, no explanation:
 
   // ── Color replace ─────────────────────────────────────────────────────────
 
-  const replaceColorInLayer = useCallback((overrideTo?: string) => {
-    if (!activeSvg || !selectedLayer || !colorReplaceFrom) return;
-    const applyTo = overrideTo ?? colorReplaceTo;
-    const normalFrom = normalizeColor(colorReplaceFrom);
-    const doc = new DOMParser().parseFromString(colorBaselineRef.current ?? activeSvg.content, 'image/svg+xml');
+  // Find & replace one colour across the selected layer (handoff §"Find & replace
+  // colours"): every shape using `from` — attributes, inline styles, class rules and
+  // referenced gradient stops — becomes `to`.
+  //
+  // The picker fires continuously while the user drags, so the first call of a session
+  // records one undo entry and the document as its baseline; every later call replays
+  // the replacement from that baseline instead of stacking edits.
+  const replaceLayerColor = useCallback((from: string, to: string) => {
+    if (!activeSvg || !selectedLayer || !from) return;
+
+    let session = colorEditRef.current;
+    if (!session || session.from !== from) {
+      snapshotForUndo(activeSvg.content, activeSvg.layers);
+      session = { from, baseline: activeSvg.content };
+      colorEditRef.current = session;
+    }
+
+    const applyTo = to;
+    const normalFrom = normalizeColor(from);
+    const doc = new DOMParser().parseFromString(session.baseline, 'image/svg+xml');
     const layerEl = doc.getElementById(selectedLayer);
     if (!layerEl) return;
 
@@ -1782,19 +1858,10 @@ Return ONLY valid JSON — no markdown, no explanation:
 
     const content = new XMLSerializer().serializeToString(doc.documentElement);
     setActiveSvg((prev) => (prev ? { ...prev, content } : null));
-  }, [activeSvg, selectedLayer, colorReplaceFrom, colorReplaceTo]);
+  }, [activeSvg, selectedLayer, snapshotForUndo]);
 
-  const onSelectFromColor = useCallback((color: string) => {
-    if (!activeSvg) return;
-    snapshotForUndo(activeSvg.content, activeSvg.layers);
-    setColorReplaceFrom(color);
-    colorBaselineRef.current = activeSvg.content;
-  }, [activeSvg, snapshotForUndo]);
-
-  const onClearFromColor = useCallback(() => {
-    setColorReplaceFrom('');
-    colorBaselineRef.current = null;
-  }, []);
+  // The picker closed — the next pick starts a fresh undo entry and baseline.
+  const endColorEdit = useCallback(() => { colorEditRef.current = null; }, []);
 
   const onCurvePointerDown = useCallback((): number | null => {
     if (!selectedTextProps || !selectedLayer) return null;
@@ -2121,14 +2188,23 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
 
   // ── Reset ──────────────────────────────────────────────────────────────────
 
-  const resetSvg = useCallback(() => {
+  // Reset is confirmed through the editor's own overlay (see ConfirmModal), never a
+  // native window.confirm.
+  const requestReset = useCallback(() => {
     if (!activeSvg) return;
-    if (!window.confirm('Reset to the original SVG? All changes will be lost.')) return;
+    setResetConfirmOpen(true);
+  }, [activeSvg]);
+
+  const confirmReset = useCallback(() => {
+    setResetConfirmOpen(false);
+    if (!activeSvg) return;
     const { content, layers } = parseSvg(activeSvg.originalContent);
     setActiveSvg((prev) => (prev ? { ...prev, content, layers } : null));
-    setHiddenLayers(new Set());
-    setSelectedLayer(null); setSelectedSubElId(null);
-  }, [activeSvg]);
+    setHiddenLayers(new Set(defaultHiddenLayers));
+    setSelectedLayer(null); setSelectedLayers(new Set()); setSelectedSubElId(null);
+  }, [activeSvg, defaultHiddenLayers]);
+
+  const cancelReset = useCallback(() => setResetConfirmOpen(false), []);
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
@@ -2137,20 +2213,10 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
 
   useEffect(() => {
     textEditSnappedRef.current = false;
-    autoColorSelectedRef.current = false;
     setAiError(null); setFontSuggestion(null); setSuggestedFontName(null);
-    setColorReplaceFrom('');
     setShowRemoveTextInput(false); setRemoveTextQuery(''); setTextCheckResult(null);
-    colorBaselineRef.current = null;
+    colorEditRef.current = null;
   }, [selectedLayer]);
-
-  useEffect(() => {
-    if (autoColorSelectedRef.current || layerColors.length !== 1 || !activeSvg) return;
-    autoColorSelectedRef.current = true;
-    snapshotForUndo(activeSvg.content, activeSvg.layers);
-    setColorReplaceFrom(layerColors[0]);
-    colorBaselineRef.current = activeSvg.content;
-  }, [layerColors, activeSvg, snapshotForUndo]);
 
   useEffect(() => {
     setImageFonts(null);
@@ -2200,14 +2266,14 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey) || e.key !== 'z' || e.shiftKey) return;
+      if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== 'z') return;
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       e.preventDefault();
-      undo();
+      if (e.shiftKey) redo(); else undo();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [undo]);
+  }, [undo, redo]);
 
   // Duplicate a layer: deep-clone it, give the clone fresh ids, nudge it so it's visibly
   // offset, insert it just above the original in paint order, and select it.
@@ -2319,28 +2385,55 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
   // ── Render ─────────────────────────────────────────────────────────────────
 
   const showCanvas = activeSvg || isLoading;
-  const isDirty = !!activeSvg && (
-    hiddenLayers.size > 0 || activeSvg.content !== activeSvg.originalContent
-  );
+  // Dirty = the document changed, or visibility differs from how it opened. Compared
+  // against the default hidden set so the canvas starting hidden isn't itself an edit.
+  const visibilityChanged =
+    hiddenLayers.size !== defaultHiddenLayers.size ||
+    [...hiddenLayers].some((id) => !defaultHiddenLayers.has(id));
+  const isDirty = !!activeSvg && (visibilityChanged || activeSvg.content !== activeSvg.originalContent);
+  const selectionIsBackground = !!selectedLayer && selectedLayer === backgroundLayerId;
+
+  // The AI panel's "Use this font": applies to the selected text layer if there is one,
+  // otherwise it becomes the default for the next text layer added.
+  const useSuggestedFont = (font: string) =>
+    selectedTextProps ? updateTextLayer({ font }) : setTextForm((f) => ({ ...f, font }));
 
   return (
-    /* Drag handlers live on the ROOT so the entire viewport — sidebar included — is a
-       drop target. A real Finder drag enters from the left over the sidebar; if that
-       column doesn't preventDefault on dragover, the browser navigates to the file
-       instead of dropping it, which read as "drag-to-open is broken". A window-level
-       preventDefault (see effect below) is the belt-and-braces backstop. */
+    /* Full-bleed canvas with floating panels (handoff §1) — no docked columns, so the
+       artwork stays the focus.
+       Drag handlers live on the ROOT so the entire viewport is a drop target. A real
+       Finder drag can enter over any panel; if the region under the drag doesn't
+       preventDefault on dragover, the browser navigates to the file instead of dropping
+       it, which reads as "drag-to-open is broken". A window-level preventDefault (see
+       effect above) is the belt-and-braces backstop. */
     <div
-      className="flex h-screen bg-zinc-950 overflow-hidden"
+      style={{
+        position: 'relative',
+        height: '100vh',
+        overflow: 'hidden',
+        background: C.appBg,
+        color: C.textPrimary,
+        fontFamily: FONT_STACK,
+        WebkitFontSmoothing: 'antialiased',
+      }}
       onDrop={handleDrop}
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}
     >
+      {/* Hover/focus/scrollbar states inline styles can't express — see design-tokens.ts */}
+      <style>{EDITOR_CSS}</style>
+
       {isDragging && (
-        <div className="pointer-events-none fixed inset-0 bg-blue-500/10 border-2 border-blue-500/40 z-10" />
+        <div
+          style={{
+            position: 'fixed', inset: 0, zIndex: 40, pointerEvents: 'none',
+            background: 'rgba(91,108,255,.08)', border: `2px solid ${C.accent}`,
+          }}
+        />
       )}
 
-      {/* Modal overlays (extracted, memoised) — see editor-modals.tsx */}
+      {/* Modal overlays (memoised) — see editor-modals.tsx */}
       <UpsellModal open={showUpsell} onClose={closeUpsell} />
       <RatingModal
         open={ratingOpen}
@@ -2355,178 +2448,209 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
       <AbortReasonModal
         open={abortReasonOpen}
         reasons={ABORT_REASONS}
-        selected={abortReason}
-        onSelect={setAbortReason}
+        selected={abortReasons}
+        note={abortNote}
+        onToggle={toggleAbortReason}
+        onNote={setAbortNote}
         onBack={closeAbortReason}
         onConfirm={confirmAbort}
       />
+      <ConfirmModal
+        open={resetConfirmOpen}
+        title="Revert all changes?"
+        body="This restores the file as it was imported. Everything you've edited since — including hidden layers — is discarded."
+        confirmLabel="Revert changes"
+        danger
+        onCancel={cancelReset}
+        onConfirm={confirmReset}
+      />
 
-      {/* ── Left sidebar ─────────────────────────────────────────────── */}
-      <SamplesSidebar
+      {showCanvas ? (
+        <>
+          {/* Canvas — absolutely fills the root, behind every panel */}
+          <CanvasStage
+            svgCanvasRef={svgCanvasRef}
+            overlayRef={overlayRef}
+            subOverlayRef={subOverlayRef}
+            sizeBadgeRef={sizeBadgeRef}
+            onCanvasClick={handleCanvasClick}
+            aiLoading={aiLoading}
+            aiStatusMsg={aiStatusMsg}
+            isLoading={isLoading}
+            activeSvg={activeSvg}
+            hiddenLayers={hiddenLayers}
+            backgroundLayerId={backgroundLayerId}
+            showSelectionOverlay={showSelectionOverlay}
+            selectionIsEmptyText={selectionIsEmptyText}
+            selectionIsTextLayer={selectionIsTextLayer}
+            selectedLayersSize={selectedLayers.size}
+            onEmptyTextClick={focusEmptyTextInput}
+            onDragHandleMouseDown={handleDragHandleMouseDown}
+            onRotateHandleMouseDown={handleRotateHandleMouseDown}
+            onScaleHandleMouseDown={handleScaleHandleMouseDown}
+          />
+
+          {/* Top toolbar (§1.5) */}
+          <EditorToolbar
+            fileName={isLoading && !activeSvg ? 'Loading…' : (activeSvg?.name ?? '')}
+            isDirty={isDirty}
+            onCenter={centerLayersToCanvas}
+            onRotate90={rotateSelected90}
+            transformDisabled={!selectedLayers.size || selectionIsBackground}
+            onMatchRotation={matchRotationToSelected}
+            matchRotationDisabled={selectedLayers.size !== 1 || selectionIsBackground}
+            undoCount={undoCount}
+            onUndo={undo}
+            redoCount={redoCount}
+            onRedo={redo}
+            exportLabel={activeSvg && hiddenLayers.size > 0
+              ? `Export (${activeSvg.layers.length - hiddenLayers.size}/${activeSvg.layers.length})`
+              : 'Export'}
+            onExport={openRating}
+            onClose={clear}
+            onReset={requestReset}
+          />
+
+          {/* Font suggestions strip (memoised) — see editor-font-suggestions.tsx */}
+          <FontSuggestions
+            open={showImageFonts}
+            onClose={closeImageFonts}
+            loading={imageFontsLoading}
+            fonts={imageFonts}
+            selectedFont={selectedImageFont}
+            onSelectFont={onSelectImageFont}
+            onAddFont={addGoogleFont}
+          />
+
+          {activeSvg && (
+            <>
+              {/* Inspector (§1.6) */}
+              <EditorInspector
+                selectedLayer={selectedLayer}
+                isBackground={selectionIsBackground}
+                selectedTextProps={selectedTextProps}
+                textContentRef={textContentRef}
+                extraFonts={extraFonts}
+                layerColors={layerColors}
+                onUpdateTextLayer={updateTextLayer}
+                onCurvePointerDown={onCurvePointerDown}
+                onCurvePointerUp={onCurvePointerUp}
+                onReplaceColor={replaceLayerColor}
+                onEndColorEdit={endColorEdit}
+                onClose={() => selectOne(null)}
+              />
+
+              {/* Elements (§1.7) */}
+              <LayersPanel
+                layers={activeSvg.layers}
+                hiddenLayers={hiddenLayers}
+                selectedLayers={selectedLayers}
+                backgroundLayerId={backgroundLayerId}
+                textLayerIds={textLayerIds}
+                subLayerMap={subLayerMap}
+                selectedSubElId={selectedSubElId}
+                onAddTextLayer={addTextLayer}
+                onReorderLayers={reorderLayers}
+                onSetSelectedLayers={setSelectedLayers}
+                onSetSelectedLayer={setSelectedLayer}
+                onSelectOne={selectOne}
+                onToggleLayer={toggleLayer}
+                onDuplicateLayer={duplicateLayer}
+                onDeleteLayer={deleteLayer}
+                onSetSelectedSubElId={setSelectedSubElId}
+              />
+
+              {/* AI pill + panel (§1.8) */}
+              <AiPanel
+                open={aiPanelOpen}
+                onClose={closeAiPanel}
+                llmProvider={llmProvider}
+                llmOptions={LLM_OPTIONS}
+                onSelectLlmProvider={selectLlmProvider}
+                ai={{
+                  loading: aiLoading, error: aiError,
+                  fontSuggestion, suggestedFontName,
+                  removeTextQuery, setRemoveTextQuery,
+                  showRemoveTextInput, setShowRemoveTextInput,
+                  textCheckResult, setTextCheckResult,
+                }}
+                fonts={{
+                  extra: extraFonts, imageFonts, imageFontsLoading,
+                  customiseFonts, customiseLoading, customiseDone,
+                }}
+                taxonomy={{ data: taxonomy, loading: taxonomyLoading, open: taxonomyOpen, setOpen: setTaxonomyOpen }}
+                selectedLayer={selectedLayer}
+                backgroundLayerId={backgroundLayerId}
+                onRunAiAction={runAiLayerAction as (action?: AiActionType, query?: string) => void}
+                onCustomise={runCustomise}
+                onApplyFontGlobally={applyFontGlobally}
+                onUseSuggestedFont={useSuggestedFont}
+                onRunTaxonomy={runTaxonomyAnalysis}
+              />
+              <AiPill onClick={onAiPillClick} />
+            </>
+          )}
+        </>
+      ) : (
+        /* ── Drop zone (empty state) ──────────────────────────────────────── */
+        <div
+          style={{
+            position: 'absolute', inset: 0,
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+          }}
+        >
+          <div
+            onClick={() => fileInputRef.current?.click()}
+            style={{
+              display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 18,
+              padding: '64px 80px', borderRadius: 16,
+              border: `2px dashed ${isDragging ? C.accent : C.borderInput}`,
+              background: isDragging ? C.accentTintAlt : C.surface,
+              boxShadow: SHADOW.board,
+              cursor: 'pointer', userSelect: 'none',
+              transition: 'border-color .15s, background .15s',
+            }}
+          >
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width={40} height={40}
+              fill="none" viewBox="0 0 24 24" strokeWidth={1.25}
+              stroke={isDragging ? C.accent : C.disabled}
+            >
+              <path strokeLinecap="round" strokeLinejoin="round"
+                d="M12 16.5V9.75m0 0 3 3m-3-3-3 3M6.75 19.5a4.5 4.5 0 0 1-1.41-8.775 5.25 5.25 0 0 1 10.338-2.32 5.75 5.75 0 0 1 1.023 9.095"
+              />
+            </svg>
+            <div style={{ textAlign: 'center' }}>
+              <p style={{ margin: 0, fontSize: 13, fontWeight: 600, color: isDragging ? C.accent : C.textSecondary }}>
+                {isDragging ? 'Release to open' : 'Drop an SVG file'}
+              </p>
+              <p style={{ margin: '4px 0 0', fontSize: 12, color: C.textFaint }}>or click to browse</p>
+            </div>
+          </div>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".svg,image/svg+xml"
+            style={{ display: 'none' }}
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) openFile(file);
+              e.target.value = '';
+            }}
+          />
+        </div>
+      )}
+
+      {/* Dev rail (§1.4) — internal only, sits above every panel */}
+      <DevRail
         samples={SAMPLES}
         activeSample={activeSample}
         isLoading={isLoading}
         onOpenSample={openSample}
         onOpenFetched={openSample}
       />
-
-      {/* ── Main area ────────────────────────────────────────────────── */}
-      <div className="flex flex-col flex-1 min-w-0">
-        {showCanvas ? (
-          <>
-            {/* Toolbar (extracted, memoised) — see editor-toolbar.tsx */}
-            <EditorToolbar
-              fileName={isLoading && !activeSvg ? 'Loading…' : (activeSvg?.name ?? '')}
-              isDirty={isDirty}
-              onCenter={centerLayersToCanvas}
-              onMatchRotation={matchRotationToSelected}
-              matchRotationDisabled={selectedLayers.size !== 1 || selectionLayerId === backgroundLayerId}
-              undoCount={undoCount}
-              onUndo={undo}
-              exportLabel={activeSvg && hiddenLayers.size > 0
-                ? `Export (${activeSvg.layers.length - hiddenLayers.size}/${activeSvg.layers.length})`
-                : 'Export'}
-              onExport={openRating}
-              onClose={clear}
-            />
-
-            {/* Font suggestions panel (extracted, memoised) — see editor-font-suggestions.tsx */}
-            <FontSuggestions
-              open={showImageFonts}
-              onClose={closeImageFonts}
-              loading={imageFontsLoading}
-              fonts={imageFonts}
-              selectedFont={selectedImageFont}
-              onSelectFont={onSelectImageFont}
-              onAddFont={addGoogleFont}
-            />
-
-            {/* Canvas row: SVG + layers panel */}
-            <div className="flex flex-1 min-h-0">
-
-              {/* Canvas (extracted, memoised) — see editor-canvas.tsx */}
-              <CanvasStage
-                svgCanvasRef={svgCanvasRef}
-                overlayRef={overlayRef}
-                subOverlayRef={subOverlayRef}
-                onCanvasClick={handleCanvasClick}
-                aiLoading={aiLoading}
-                aiStatusMsg={aiStatusMsg}
-                isLoading={isLoading}
-                activeSvg={activeSvg}
-                hiddenLayers={hiddenLayers}
-                showSelectionOverlay={showSelectionOverlay}
-                selectionIsEmptyText={selectionIsEmptyText}
-                selectionIsTextLayer={selectionIsTextLayer}
-                selectedLayersSize={selectedLayers.size}
-                onEmptyTextClick={focusEmptyTextInput}
-                onDragHandleMouseDown={handleDragHandleMouseDown}
-                onRotateHandleMouseDown={handleRotateHandleMouseDown}
-                onScaleHandleMouseDown={handleScaleHandleMouseDown}
-              />
-
-              {/* ── Layers panel ─────────────────────────────────────── */}
-              {activeSvg && (
-                <LayersPanel
-                  activeSvg={activeSvg}
-                  backgroundLayerId={backgroundLayerId}
-                  isDirty={isDirty}
-                  selectedLayer={selectedLayer}
-                  selectedLayers={selectedLayers}
-                  selectedSubElId={selectedSubElId}
-                  hiddenLayers={hiddenLayers}
-                  subLayerMap={subLayerMap}
-                  selectedTextProps={selectedTextProps}
-                  textContentRef={textContentRef}
-                  text={{ form: textForm, setForm: setTextForm, open: textFormOpen, setOpen: setTextFormOpen }}
-                  ai={{ loading: aiLoading, error: aiError, actionsOpen: aiActionsOpen, setActionsOpen: setAiActionsOpen, fontSuggestion, suggestedFontName, removeTextQuery, setRemoveTextQuery, showRemoveTextInput, setShowRemoveTextInput, textCheckResult, setTextCheckResult }}
-                  color={{ from: colorReplaceFrom, to: colorReplaceTo, setTo: setColorReplaceTo, open: colorReplaceOpen, setOpen: setColorReplaceOpen, layerColors, baselineRef: colorBaselineRef }}
-                  fonts={{ extra: extraFonts, imageFonts, imageFontsLoading, suggestOpen: suggestFontsOpen, setSuggestOpen: setSuggestFontsOpen, customiseFonts, customiseLoading, customiseDone }}
-                  taxonomy={{ data: taxonomy, loading: taxonomyLoading, open: taxonomyOpen, setOpen: setTaxonomyOpen }}
-                  llmProvider={llmProvider}
-                  onSelectLlmProvider={selectLlmProvider}
-                  onSelectOne={selectOne}
-                  onSetSelectedLayers={setSelectedLayers}
-                  onSetSelectedLayer={setSelectedLayer}
-                  onSetSelectedSubElId={setSelectedSubElId}
-                  onToggleLayer={toggleLayer}
-                  onDuplicateLayer={duplicateLayer}
-                  onDeleteLayer={deleteLayer}
-                  onReorderLayers={reorderLayers}
-                  onUpdateTextLayer={updateTextLayer}
-                  onAddTextLayer={addTextLayer}
-                  onCurvePointerDown={onCurvePointerDown}
-                  onCurvePointerUp={onCurvePointerUp}
-                  onRunAiAction={runAiLayerAction as (action?: AiActionType, query?: string) => void}
-                  onSelectFromColor={onSelectFromColor}
-                  onClearFromColor={onClearFromColor}
-                  onReplaceColor={replaceColorInLayer}
-                  onAddGoogleFont={addGoogleFont}
-                  onSuggestFonts={suggestFontsForImage}
-                  onCustomise={runCustomise}
-                  onApplyFontGlobally={applyFontGlobally}
-                  onRunTaxonomy={runTaxonomyAnalysis}
-                  onReset={resetSvg}
-                />
-              )}
-            </div>
-          </>
-        ) : (
-          /* ── Drop zone (empty state) — drag handlers now live on the main-area
-                wrapper above, so they keep working once a document is open too. ── */
-          <div className="flex-1 flex items-center justify-center">
-            <div
-              className={cn(
-                'flex flex-col items-center gap-5 rounded-2xl border-2 border-dashed px-20 py-16 transition-all duration-150 cursor-pointer select-none',
-                isDragging
-                  ? 'border-blue-500 bg-blue-500/5 scale-[1.02]'
-                  : 'border-zinc-700 hover:border-zinc-600 hover:bg-zinc-900/40'
-              )}
-              onClick={() => fileInputRef.current?.click()}
-            >
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                className={cn('size-10 transition-colors', isDragging ? 'text-blue-400' : 'text-zinc-600')}
-                fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.25}
-              >
-                <path strokeLinecap="round" strokeLinejoin="round"
-                  d="M12 16.5V9.75m0 0 3 3m-3-3-3 3M6.75 19.5a4.5 4.5 0 0 1-1.41-8.775 5.25 5.25 0 0 1 10.338-2.32 5.75 5.75 0 0 1 1.023 9.095"
-                />
-              </svg>
-              <div className="text-center">
-                <p className={cn('text-sm font-medium', isDragging ? 'text-blue-300' : 'text-zinc-400')}>
-                  {isDragging ? 'Release to open' : 'Drop an SVG file'}
-                </p>
-                <p className="text-xs text-zinc-600 mt-1">or click to browse</p>
-              </div>
-            </div>
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".svg,image/svg+xml"
-              className="hidden"
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) openFile(file);
-                e.target.value = '';
-              }}
-            />
-          </div>
-        )}
-      </div>
-
-      {/* Global SVG canvas sizing — width:100% fixes SVGs with no intrinsic dimensions */}
-      <style>{`
-        .svg-canvas {
-          max-height: calc(80vh - 3rem);
-        }
-        .svg-canvas svg {
-          display: block;
-          width: 100%;
-          height: auto;
-          max-height: calc(80vh - 3rem);
-        }
-      `}</style>
     </div>
   );
 }
+

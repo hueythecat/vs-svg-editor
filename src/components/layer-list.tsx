@@ -1,15 +1,24 @@
 import React, { Dispatch, SetStateAction, useRef, useState } from 'react';
 
 import type { SvgLayer } from '@/lib/svg-utils';
-import { cn } from '@/lib/utils';
-import { DuplicateIcon, EyeIcon, EyeSlashIcon, GripIcon, TrashIcon } from './svg-icons';
+import { C, FONT_STACK } from '@/lib/design-tokens';
+import {
+  DuplicateIcon, EyeIcon, EyeSlashIcon, GripIcon, ImageIcon, ShapeIcon, TrashIcon, TypeIcon,
+} from './svg-icons';
 
-// The scrollable, drag-to-reorder layer list (plus sub-layer rows for multi-text
-// groups). All the drag/reorder machinery — refs + transient drag state — is
-// panel-local and lives here, so the parent only supplies data and callbacks.
-// Extracted from layers-panel.tsx and memoised.
+// The scrollable, drag-to-reorder element list (handoff §1.7). Rows are top = front,
+// so the document array is reversed for display. All the drag machinery — refs plus
+// transient drag state — is panel-local and lives here; the parent only supplies data
+// and callbacks.
+
+const ICON_FOR = {
+  text: TypeIcon,
+  bg: ImageIcon,
+  art: ShapeIcon,
+} as const;
+
 export const LayerList = React.memo(function LayerList({
-  layers, hiddenLayers, selectedLayers, backgroundLayerId, subLayerMap, selectedSubElId,
+  layers, hiddenLayers, selectedLayers, backgroundLayerId, textLayerIds, subLayerMap, selectedSubElId,
   onReorderLayers, onSetSelectedLayers, onSetSelectedLayer, onSelectOne,
   onToggleLayer, onDuplicateLayer, onDeleteLayer, onSetSelectedSubElId,
 }: {
@@ -17,6 +26,7 @@ export const LayerList = React.memo(function LayerList({
   hiddenLayers: Set<string>;
   selectedLayers: Set<string>;
   backgroundLayerId: string | null;
+  textLayerIds: Set<string>;
   subLayerMap: Map<string, Array<{ id: string; label: string }>>;
   selectedSubElId: string | null;
   onReorderLayers: (fromId: string, toId: string, before: boolean) => void;
@@ -36,10 +46,44 @@ export const LayerList = React.memo(function LayerList({
   const panelDropPositionRef = useRef<{ targetId: string; before: boolean } | null>(null);
   const panelReorderDoneRef  = useRef(false);
 
+  // 12px action icon — eye / duplicate / delete. Stops propagation so it doesn't
+  // also select the row.
+  const action = (
+    onClick: () => void,
+    title: string,
+    color: string,
+    node: React.ReactNode,
+  ) => (
+    <button
+      type="button"
+      title={title}
+      onPointerDown={(e) => e.stopPropagation()}
+      onClick={(e) => { e.stopPropagation(); onClick(); }}
+      style={{
+        border: 'none', background: 'transparent', padding: 0, cursor: 'pointer',
+        color, display: 'flex', flex: 'none',
+      }}
+    >
+      {node}
+    </button>
+  );
+
   return (
     <div
       ref={layerListRef}
-      className="flex flex-col overflow-y-auto py-1 flex-1"
+      className="ed-scroll"
+      style={{
+        // Takes whatever height the panel has; the panel itself is what's bounded, so
+        // the list only scrolls once it genuinely reaches the top of the viewport.
+        minHeight: 0,
+        overflowY: 'auto',
+        overflowX: 'hidden',
+        padding: '0 8px 8px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 2,
+        fontFamily: FONT_STACK,
+      }}
       onPointerMove={(e) => {
         if (!panelDragIdRef.current) return;
         setDragLayerId(panelDragIdRef.current);
@@ -76,20 +120,24 @@ export const LayerList = React.memo(function LayerList({
       }}
     >
       {layers.length === 0 ? (
-        <p className="text-xs text-zinc-600 px-3 py-4 text-center">No named layers found</p>
+        <p style={{ fontSize: 12, color: C.textFaint, padding: '12px 4px', textAlign: 'center', margin: 0 }}>
+          No named layers found
+        </p>
       ) : (
         [...layers].reverse().map((layer) => {
           const hidden     = hiddenLayers.has(layer.id);
           const isSelected = selectedLayers.has(layer.id);
           const isDragged  = dragLayerId === layer.id;
           const isCanvas   = layer.id === backgroundLayerId;
-          const isDuplicate = layer.id.startsWith('_layer_copy_');
+          const kind       = isCanvas ? 'bg' : textLayerIds.has(layer.id) ? 'text' : 'art';
+          const Icon       = ICON_FOR[kind];
           const dropBefore = dropPosition?.targetId === layer.id && dropPosition.before;
           const dropAfter  = dropPosition?.targetId === layer.id && !dropPosition.before;
           return (
             <React.Fragment key={layer.id}>
               <div
                 data-layer-id={layer.id}
+                className={isSelected ? 'ed-row-selected' : 'ed-row'}
                 onPointerDown={(e) => {
                   if (e.button !== 0) return;
                   if (e.shiftKey) {
@@ -106,22 +154,27 @@ export const LayerList = React.memo(function LayerList({
                 onClick={() => {
                   if (panelReorderDoneRef.current) panelReorderDoneRef.current = false;
                 }}
-                className={cn(
-                  'relative group flex items-center gap-2 px-2 py-1.5 mx-1 rounded-md transition-colors select-none',
-                  isSelected ? 'bg-zinc-700/60 ring-1 ring-inset ring-zinc-600' : 'hover:bg-zinc-800/60',
-                  hidden && 'opacity-40',
-                  isDragged && 'opacity-25',
-                )}
+                style={{
+                  position: 'relative',
+                  display: 'flex', alignItems: 'center', gap: 7,
+                  padding: '7px 8px', borderRadius: 8,
+                  border: `1px solid ${isSelected ? C.accentTintBorder : 'transparent'}`,
+                  background: isSelected ? C.accentTint : 'transparent',
+                  opacity: isDragged ? 0.35 : 1,
+                  userSelect: 'none',
+                  cursor: 'default',
+                }}
               >
                 {dropBefore && (
-                  <div className="pointer-events-none absolute top-0 left-1 right-1 h-0.5 -translate-y-1/2 rounded-full bg-blue-500 z-10" />
+                  <span style={{ position: 'absolute', top: -1, left: 4, right: 4, height: 2, borderRadius: 1, background: C.accent, pointerEvents: 'none' }} />
                 )}
                 {dropAfter && (
-                  <div className="pointer-events-none absolute bottom-0 left-1 right-1 h-0.5 translate-y-1/2 rounded-full bg-blue-500 z-10" />
+                  <span style={{ position: 'absolute', bottom: -1, left: 4, right: 4, height: 2, borderRadius: 1, background: C.accent, pointerEvents: 'none' }} />
                 )}
 
-                {/* Drag handle */}
+                {/* Drag grip */}
                 <span
+                  title="Drag to reorder"
                   onPointerDown={(e) => {
                     if (e.button !== 0) return;
                     e.stopPropagation();
@@ -130,47 +183,41 @@ export const LayerList = React.memo(function LayerList({
                     panelDragIdRef.current = layer.id;
                     panelDropPositionRef.current = null;
                   }}
-                  className="shrink-0 cursor-grab opacity-0 group-hover:opacity-100 text-zinc-500 hover:text-zinc-300 transition-opacity"
+                  style={{ color: C.disabled, cursor: 'grab', display: 'flex', flex: 'none' }}
                 >
-                  <GripIcon className="size-2" />
+                  <GripIcon size={11} />
                 </span>
 
-                <button
-                  onPointerDown={(e) => e.stopPropagation()}
-                  onClick={(e) => { e.stopPropagation(); onToggleLayer(layer.id); }}
-                  title={hidden ? 'Show layer' : 'Hide layer'}
-                  className="shrink-0 text-zinc-500 hover:text-zinc-200 transition-colors"
-                >
-                  {hidden ? <EyeSlashIcon className="size-3.5" /> : <EyeIcon className="size-3.5" />}
-                </button>
+                {/* Type icon */}
+                <span style={{ color: hidden ? C.textHidden : C.textFaint, display: 'flex', flex: 'none' }}>
+                  <Icon size={13} />
+                </span>
 
-                <span className="text-xs text-zinc-300 truncate leading-snug flex-1 min-w-0">
+                {/* Name */}
+                <span
+                  title={isCanvas ? 'Canvas' : layer.label}
+                  style={{
+                    flex: 1, minWidth: 0,
+                    fontSize: 13,
+                    fontWeight: isSelected ? 600 : 400,
+                    color: hidden ? C.textHidden : isSelected ? C.textPrimary : C.textSecondary,
+                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  }}
+                >
                   {isCanvas ? 'Canvas' : layer.label}
                 </span>
-                {isCanvas && (
-                  <span className="shrink-0 text-[9px] font-semibold uppercase tracking-wider text-zinc-500 bg-zinc-800 px-1 py-0.5 rounded">
-                    bg
-                  </span>
-                )}
 
-                <button
-                  onPointerDown={(e) => e.stopPropagation()}
-                  onClick={(e) => { e.stopPropagation(); onDuplicateLayer(layer.id); }}
-                  title="Duplicate layer"
-                  className="shrink-0 text-zinc-500 hover:text-zinc-200 opacity-0 group-hover:opacity-100 transition-opacity"
-                >
-                  <DuplicateIcon className="size-3.5" />
-                </button>
-                {isDuplicate && (
-                  <button
-                    onPointerDown={(e) => e.stopPropagation()}
-                    onClick={(e) => { e.stopPropagation(); onDeleteLayer(layer.id); }}
-                    title="Delete layer"
-                    className="shrink-0 text-zinc-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
-                  >
-                    <TrashIcon className="size-3.5" />
-                  </button>
-                )}
+                {/* Actions */}
+                <span style={{ display: 'flex', alignItems: 'center', gap: 7, flex: 'none' }}>
+                  {action(
+                    () => onToggleLayer(layer.id),
+                    hidden ? 'Show layer' : 'Hide layer',
+                    hidden ? C.disabled : C.accent,
+                    hidden ? <EyeSlashIcon size={12} /> : <EyeIcon size={12} />,
+                  )}
+                  {action(() => onDuplicateLayer(layer.id), 'Duplicate layer', '#8a93a3', <DuplicateIcon size={12} />)}
+                  {!isCanvas && action(() => onDeleteLayer(layer.id), 'Delete layer', C.danger, <TrashIcon size={12} />)}
+                </span>
               </div>
 
               {/* Sub-layer rows for multi-text groups */}
@@ -179,24 +226,31 @@ export const LayerList = React.memo(function LayerList({
                 return (
                   <button
                     key={sub.id}
+                    type="button"
+                    className={isSubSelected ? 'ed-row-selected' : 'ed-row'}
                     onPointerDown={(e) => e.stopPropagation()}
                     onClick={(e) => {
                       e.stopPropagation();
                       onSelectOne(layer.id);
                       onSetSelectedSubElId(sub.id);
                     }}
-                    className={cn(
-                      'w-full flex items-center gap-1.5 pl-8 pr-2 py-1 rounded-md text-left transition-colors',
-                      isSubSelected
-                        ? 'bg-amber-500/15 ring-1 ring-inset ring-amber-500/40'
-                        : 'hover:bg-zinc-800/60'
-                    )}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: 7,
+                      width: '100%', textAlign: 'left',
+                      padding: '5px 8px 5px 26px', borderRadius: 8,
+                      border: `1px solid ${isSubSelected ? C.accentTintBorder : 'transparent'}`,
+                      background: isSubSelected ? C.accentTint : 'transparent',
+                      cursor: 'pointer', fontFamily: FONT_STACK,
+                    }}
                   >
-                    <span className="shrink-0 size-1.5 rounded-full bg-zinc-600" />
-                    <span className={cn(
-                      'text-[11px] truncate leading-snug flex-1 min-w-0',
-                      isSubSelected ? 'text-amber-300' : 'text-zinc-500'
-                    )}>
+                    <span style={{ width: 5, height: 5, borderRadius: '50%', background: C.disabled, flex: 'none' }} />
+                    <span
+                      style={{
+                        flex: 1, minWidth: 0, fontSize: 11.5,
+                        color: isSubSelected ? C.textPrimary : C.textFaint,
+                        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                      }}
+                    >
                       {sub.label}
                     </span>
                   </button>

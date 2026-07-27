@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+  html,body{margin:0;height:100%;background:#eef0f3;font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased}
+  input,select,button{font-family:inherit}
+  input:focus,select:focus{outline:none;border-color:#5b6cff;box-shadow:0 0 0 3px rgba(91,108,255,.15)}
+  a{color:#5b6cff}a:hover{color:#4453d6}
+  .rowbtn:hover{background:#f2f4f7}
+</style>
+</helmet>
+<div style="position:relative;height:100vh;background:#eef0f3;color:#1b1f24;overflow:hidden">
+  <!-- full-bleed canvas -->
+  <div onPointerDown="{{ deselect }}" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;overflow:hidden">
+    <div data-board="1" style="width:380px;height:380px;position:relative;background:#fff;box-shadow:0 16px 44px rgba(0,0,0,.16);flex:none">
+      <sc-for list="{{ canvasObjs }}" as="o" hint-placeholder-count="3">
+        <div style="{{ o.wrap }}" onPointerDown="{{ o.onDown }}">
+          <sc-if value="{{ o.isText }}"><div style="{{ o.textStyle }}">{{ o.text }}</div></sc-if>
+          <sc-if value="{{ o.isArt }}"><div style="{{ o.artStyle }}"><sc-for list="{{ o.shapes }}" as="sh" hint-placeholder-count="4"><div style="{{ sh.style }}"></div></sc-for></div></sc-if>
+          <sc-if value="{{ o.selected }}">
+            <div style="position:absolute;inset:-8px;border:1.5px dashed #5b6cff;pointer-events:none;z-index:5">
+              <div style="position:absolute;top:-30px;left:50%;transform:translateX(-50%);width:1.5px;height:22px;background:#5b6cff"></div>
+              <div onPointerDown="{{ o.onRotate }}" title="Drag to rotate" style="position:absolute;top:-42px;left:50%;transform:translateX(-50%);width:20px;height:20px;border-radius:50%;background:#fff;border:1.5px solid #5b6cff;display:flex;align-items:center;justify-content:center;font-size:10px;color:#5b6cff;cursor:grab;pointer-events:auto;box-shadow:0 2px 6px rgba(0,0,0,.18)">⟳</div>
+              <div onPointerDown="{{ o.onMove }}" title="Drag to move" style="position:absolute;top:-11px;right:-11px;width:22px;height:22px;border-radius:6px;background:#5b6cff;color:#fff;display:flex;align-items:center;justify-content:center;font-size:11px;cursor:move;pointer-events:auto;box-shadow:0 2px 6px rgba(0,0,0,.18)">✥</div>
+              <div onPointerDown="{{ o.onResize }}" title="Drag to resize" style="position:absolute;bottom:-11px;right:-11px;width:22px;height:22px;border-radius:6px;background:#fff;border:1.5px solid #5b6cff;color:#5b6cff;display:flex;align-items:center;justify-content:center;font-size:11px;cursor:nwse-resize;pointer-events:auto;box-shadow:0 2px 6px rgba(0,0,0,.12)">⤢</div>
+              <div style="position:absolute;bottom:-24px;left:0;background:#5b6cff;color:#fff;font:10px ui-monospace,monospace;padding:2px 6px;border-radius:4px">{{ o.dim }}</div>
+            </div>
+          </sc-if>
+        </div>
+      </sc-for>
+    </div>
+  </div>
+
+  <!-- floating dev window top-left -->
+  <sc-if value="{{ devOpen }}" hint-placeholder-val="{{ false }}">
+  <div style="position:absolute;top:16px;left:16px;width:198px;background:#181b20;color:#c8ccd4;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.28);z-index:30;overflow:hidden">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 12px 10px"><span style="font-size:9px;font-weight:700;letter-spacing:.6px;color:#f2b03e">⚙ DEV — DOWNLOADS</span><span onClick="{{ toggleDev }}" style="cursor:pointer;color:#7c828e;font-size:15px">‹</span></div>
+    <div style="padding:0 12px 12px"><div style="background:#22262e;border:1px solid rgba(255,255,255,.08);border-radius:7px;padding:8px 10px;font-size:11.5px;color:#9aa0ab;display:flex;justify-content:space-between">Select a vector…<span>▾</span></div></div>
+    <div style="font-size:9px;font-weight:700;letter-spacing:.6px;color:#5b616d;padding:0 12px 8px">SAMPLES</div>
+    <div style="max-height:150px;overflow:auto;padding:0 12px 12px;display:flex;flex-direction:column;gap:8px">
+      <div style="border-radius:8px;overflow:hidden;border:1px solid rgba(255,255,255,.08)"><div style="height:48px;background:repeating-linear-gradient(45deg,#2a2f38,#2a2f38 6px,#242932 6px,#242932 12px)"></div><div style="font-size:10px;padding:5px 7px;color:#c8ccd4">Lighthouse</div></div>
+      <div style="border-radius:8px;overflow:hidden;border:1.5px solid #5b6cff"><div style="height:48px;background:repeating-linear-gradient(45deg,#2a2f38,#2a2f38 6px,#242932 6px,#242932 12px)"></div><div style="font-size:10px;padding:5px 7px;color:#8f9bff">Logo</div></div>
+    </div>
+  </div>
+  </sc-if>
+  <sc-if value="{{ offDev }}" hint-placeholder-val="{{ true }}">
+  <div onClick="{{ toggleDev }}" style="position:absolute;top:16px;left:16px;z-index:30;display:flex;align-items:center;gap:7px;background:#181b20;border-radius:10px;padding:8px 11px;cursor:pointer;box-shadow:0 6px 18px rgba(0,0,0,.25)"><span style="color:#f2b03e;font-size:12px">⚙</span><span style="font-size:10px;font-weight:700;letter-spacing:.6px;color:#9aa0ab">DEV</span><span style="color:#7c828e">›</span></div>
+  </sc-if>
+
+  <!-- floating top toolbar -->
+  <div style="position:absolute;top:16px;left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:4px;background:#fff;border:1px solid #e6e8eb;border-radius:12px;padding:6px;box-shadow:0 10px 30px rgba(0,0,0,.12);z-index:20">
+    <div style="width:22px;height:22px;border-radius:6px;background:#5b6cff;display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;margin-left:4px">◆</div>
+    <span style="font-size:13px;font-weight:600;padding:0 8px 0 4px">RocketJet-logo.svg</span>
+    <span style="width:1px;height:20px;background:#e6e8eb"></span>
+    <button onClick="{{ undo }}" title="Undo" style="background:transparent;border:none;font-size:15px;padding:6px 8px;border-radius:8px;cursor:pointer;color:{{ undoColor }}">↶</button>
+    <button onClick="{{ redo }}" title="Redo" style="background:transparent;border:none;font-size:15px;padding:6px 8px;border-radius:8px;cursor:pointer;color:{{ redoColor }}">↷</button>
+    <span style="width:1px;height:20px;background:#e6e8eb"></span>
+    <button onClick="{{ center }}" class="rowbtn" style="background:transparent;border:none;color:#4b5563;font-size:12.5px;padding:6px 9px;border-radius:8px;cursor:pointer">⤢ Center</button>
+    <button onClick="{{ rotate90 }}" class="rowbtn" style="background:transparent;border:none;color:#4b5563;font-size:12.5px;padding:6px 9px;border-radius:8px;cursor:pointer">⟳ 90°</button>
+    <span style="width:1px;height:20px;background:#e6e8eb"></span>
+    <button onClick="{{ exportSvg }}" style="border:none;background:#5b6cff;color:#fff;font-size:12.5px;font-weight:600;padding:7px 14px;border-radius:8px;cursor:pointer">↓ Export</button>
+  </div>
+
+  <!-- floating inspector popover top-right -->
+  <div style="position:absolute;top:76px;right:16px;width:252px;background:#fff;border:1px solid #e6e8eb;border-radius:12px;box-shadow:0 16px 40px rgba(0,0,0,.15);z-index:15;max-height:calc(100vh - 200px);overflow-y:auto;overflow-x:hidden">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:13px 14px 6px"><span style="font-size:12.5px;font-weight:700">{{ inspTitle }}</span><span onClick="{{ deselect }}" title="Close" style="cursor:pointer;color:#9aa1ab;font-size:14px;line-height:1;padding:2px 4px">✕</span></div>
+    <div style="padding:0 14px 14px">
+      <sc-if value="{{ isText }}" hint-placeholder-val="{{ true }}">
+      <label style="font-size:11px;color:#6b7280;display:block;margin:6px 0 5px">Words</label>
+      <input value="{{ tText }}" onInput="{{ setText }}" style="width:100%;box-sizing:border-box;border:1px solid #d7dbe1;border-radius:8px;padding:9px 10px;font-size:13px;margin-bottom:12px">
+      <label style="font-size:11px;color:#6b7280;display:block;margin-bottom:5px">Font</label>
+      <select value="{{ tFont }}" onChange="{{ setFont }}" style="width:100%;box-sizing:border-box;border:1px solid #d7dbe1;border-radius:8px;padding:9px 10px;font-size:13px;margin-bottom:12px;background:#fff;cursor:pointer">
+        <option>Arial</option><option>Georgia</option><option>Verdana</option><option>Trebuchet MS</option><option>Courier New</option><option>Impact</option>
+      </select>
+      <div style="display:flex;gap:10px;margin-bottom:12px">
+        <div style="flex:1"><label style="font-size:11px;color:#6b7280;display:block;margin-bottom:5px">Size</label><input type="number" value="{{ tSize }}" onInput="{{ setSize }}" style="width:100%;box-sizing:border-box;border:1px solid #d7dbe1;border-radius:8px;padding:9px 10px;font-size:13px"></div>
+        <div style="flex:1"><label style="font-size:11px;color:#6b7280;display:block;margin-bottom:5px">Weight</label>
+          <select value="{{ tWeight }}" onChange="{{ setWeight }}" style="width:100%;box-sizing:border-box;border:1px solid #d7dbe1;border-radius:8px;padding:9px 10px;font-size:13px;background:#fff;cursor:pointer">
+            <option value="400">Regular</option><option value="500">Medium</option><option value="700">Bold</option><option value="800">Black</option>
+          </select>
+        </div>
+      </div>
+      <label style="font-size:11px;color:#6b7280;display:block;margin-bottom:6px">Color</label>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <sc-for list="{{ swatches }}" as="c" hint-placeholder-count="6"><span onClick="{{ c.onPick }}" style="{{ c.style }}"></span></sc-for>
+        <label title="Custom color" style="width:24px;height:24px;border-radius:6px;border:1px dashed #c3c9d2;display:flex;align-items:center;justify-content:center;color:#9aa1ab;font-size:13px;cursor:pointer;position:relative">+<input type="color" onInput="{{ setColorCustom }}" style="position:absolute;inset:0;opacity:0;cursor:pointer"></label>
+      </div>
+      </sc-if>
+      <sc-if value="{{ isBg }}" hint-placeholder-val="{{ false }}">
+      <label style="font-size:11px;color:#6b7280;display:block;margin:6px 0 6px">Canvas color</label>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <sc-for list="{{ bgSwatches }}" as="c" hint-placeholder-count="5"><span onClick="{{ c.onPick }}" style="{{ c.style }}"></span></sc-for>
+        <label title="Custom color" style="width:24px;height:24px;border-radius:6px;border:1px dashed #c3c9d2;display:flex;align-items:center;justify-content:center;color:#9aa1ab;font-size:13px;cursor:pointer;position:relative">+<input type="color" onInput="{{ setBgCustom }}" style="position:absolute;inset:0;opacity:0;cursor:pointer"></label>
+      </div>
+      </sc-if>
+      <sc-if value="{{ isArt }}" hint-placeholder-val="{{ false }}">
+      <label style="font-size:11px;color:#6b7280;display:block;margin:6px 0 4px">Find &amp; replace colours</label>
+      <div style="font-size:11px;color:#9aa1ab;line-height:1.5;margin-bottom:10px">Click a colour to recolour every shape in the artwork that uses it.</div>
+      <div style="display:flex;flex-direction:column;gap:7px">
+        <sc-for list="{{ artColors }}" as="c" hint-placeholder-count="3">
+          <label class="rowbtn" style="display:flex;align-items:center;gap:10px;border:1px solid #eceef2;border-radius:9px;padding:6px 8px;cursor:pointer;position:relative">
+            <span style="{{ c.swStyle }}"></span>
+            <span style="flex:1;font:11px ui-monospace,monospace;color:#4b5563;text-transform:uppercase;letter-spacing:.3px">{{ c.hex }}</span>
+            <span style="font-size:12px;color:#9aa1ab">✎</span>
+            <input type="color" value="{{ c.hex }}" onChange="{{ c.onChange }}" style="position:absolute;inset:0;opacity:0;cursor:pointer">
+          </label>
+        </sc-for>
+      </div>
+      </sc-if>
+      <sc-if value="{{ isPlain }}" hint-placeholder-val="{{ true }}">
+      <div style="font-size:12px;color:#9aa1ab;line-height:1.6;padding:2px 0">Select the <b style="color:#4b5563">Text</b> layer to edit type, the <b style="color:#4b5563">artwork</b> to swap its colours, or drag anything to move, resize and rotate it.</div>
+      </sc-if>
+    </div>
+  </div>
+
+  <!-- floating layers panel bottom-left -->
+  <div style="position:absolute;left:16px;bottom:16px;width:214px;background:#fff;border:1px solid #e6e8eb;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.14);z-index:15;overflow:hidden">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:11px 12px 8px"><span style="font-size:10px;font-weight:700;letter-spacing:.5px;color:#9aa1ab">ELEMENTS · {{ count }}</span><span onClick="{{ addText }}" title="Add text layer" style="font-size:15px;color:#c3c9d2;cursor:pointer">＋</span></div>
+    <div style="max-height:170px;overflow:auto;padding:0 8px 8px;display:flex;flex-direction:column;gap:2px">
+      <sc-for list="{{ layers }}" as="o" hint-placeholder-count="3">
+        <div style="{{ o.rowStyle }}" draggable="true" onDragStart="{{ o.onDragStart }}" onDragOver="{{ allowDrop }}" onDrop="{{ o.onDrop }}" onClick="{{ o.onSelect }}">
+          <span style="color:#c3c9d2;font-size:12px;cursor:grab">⠿</span>
+          <span style="font-size:13px">{{ o.icon }}</span>
+          <span style="{{ o.nameStyle }}">{{ o.name }}</span>
+          <span style="display:flex;align-items:center;gap:7px">
+            <span onClick="{{ o.onHide }}" title="Show / hide" style="{{ o.eyeStyle }}">{{ o.eye }}</span>
+            <span onClick="{{ o.onDup }}" title="Duplicate" style="cursor:pointer;color:#8a93a3;font-size:12px">⧉</span>
+            <span onClick="{{ o.onDel }}" title="Delete" style="cursor:pointer;color:#e0575b;font-size:12px">✕</span>
+          </span>
+        </div>
+      </sc-for>
+    </div>
+  </div>
+
+  <!-- export rating overlay -->
+  <sc-if value="{{ rateOpen }}" hint-placeholder-val="{{ false }}">
+  <div style="position:absolute;inset:0;background:rgba(16,19,24,.42);z-index:60;display:flex;align-items:center;justify-content:center">
+    <div style="width:330px;background:#fff;border-radius:14px;box-shadow:0 24px 60px rgba(0,0,0,.28);padding:22px 22px 18px">
+      <div style="font-size:15px;font-weight:700;margin-bottom:5px">How did that export go?</div>
+      <div style="font-size:12.5px;color:#6b7280;line-height:1.5;margin-bottom:16px">Rate it and we’ll start your download.</div>
+      <div style="display:flex;gap:6px;margin-bottom:16px">
+        <sc-for list="{{ stars }}" as="st" hint-placeholder-count="5">
+          <span onClick="{{ st.onPick }}" onMouseEnter="{{ st.onHover }}" onMouseLeave="{{ starLeave }}" title="{{ st.title }}" style="{{ st.style }}">★</span>
+        </sc-for>
+      </div>
+      <sc-if value="{{ ratedLow }}" hint-placeholder-val="{{ false }}">
+      <div style="background:#fff5f5;border:1px solid #f7d7d8;border-radius:10px;padding:11px 12px;margin-bottom:14px">
+        <div style="font-size:12.5px;color:#8a3d40;line-height:1.5;margin-bottom:10px">Sorry that missed the mark. You can abandon this export before it downloads and tell us why.</div>
+        <button onClick="{{ openReasons }}" style="border:1px solid #e0575b;background:#fff;color:#c94146;font-size:12.5px;font-weight:600;padding:8px 13px;border-radius:8px;cursor:pointer">Abandon export</button>
+      </div>
+      </sc-if>
+      <div style="display:flex;justify-content:flex-end;gap:8px">
+        <button onClick="{{ closeRate }}" class="rowbtn" style="background:transparent;border:none;color:#6b7280;font-size:12.5px;padding:8px 12px;border-radius:8px;cursor:pointer">Cancel</button>
+        <button onClick="{{ submitRating }}" style="border:none;background:{{ submitBg }};color:#fff;font-size:12.5px;font-weight:600;padding:8px 16px;border-radius:8px;cursor:pointer">Send rating &amp; download</button>
+      </div>
+    </div>
+  </div>
+  </sc-if>
+
+  <!-- cancellation reasons overlay -->
+  <sc-if value="{{ reasonsOpen }}" hint-placeholder-val="{{ false }}">
+  <div style="position:absolute;inset:0;background:rgba(16,19,24,.5);z-index:70;display:flex;align-items:center;justify-content:center">
+    <div style="width:352px;background:#fff;border-radius:14px;box-shadow:0 24px 60px rgba(0,0,0,.3);padding:22px 22px 18px;max-height:88vh;overflow:auto">
+      <div style="font-size:15px;font-weight:700;margin-bottom:5px">Why are you abandoning this export?</div>
+      <div style="font-size:12.5px;color:#6b7280;line-height:1.5;margin-bottom:14px">Pick anything that applies. It goes straight to the team.</div>
+      <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:13px">
+        <sc-for list="{{ reasonList }}" as="r" hint-placeholder-count="5">
+          <div onClick="{{ r.onToggle }}" class="rowbtn" style="{{ r.rowStyle }}">
+            <span style="{{ r.boxStyle }}">{{ r.tick }}</span>
+            <span style="font-size:13px;color:#374151">{{ r.label }}</span>
+          </div>
+        </sc-for>
+      </div>
+      <label style="font-size:11px;color:#6b7280;display:block;margin-bottom:5px">Anything else? (optional)</label>
+      <textarea onInput="{{ setOther }}" placeholder="Tell us what happened…" style="width:100%;box-sizing:border-box;border:1px solid #d7dbe1;border-radius:8px;padding:9px 10px;font-size:13px;min-height:64px;resize:vertical;margin-bottom:14px"></textarea>
+      <div style="display:flex;justify-content:flex-end;gap:8px">
+        <button onClick="{{ backToRating }}" class="rowbtn" style="background:transparent;border:none;color:#6b7280;font-size:12.5px;padding:8px 12px;border-radius:8px;cursor:pointer">Back</button>
+        <button onClick="{{ sendReasons }}" style="border:none;background:#e0575b;color:#fff;font-size:12.5px;font-weight:600;padding:8px 16px;border-radius:8px;cursor:pointer">Abandon &amp; send</button>
+      </div>
+    </div>
+  </div>
+  </sc-if>
+
+  <!-- unlock AI overlay -->
+  <sc-if value="{{ aiOpen }}" hint-placeholder-val="{{ false }}">
+  <div onClick="{{ closeAi }}" style="position:absolute;inset:0;background:rgba(16,19,24,.46);z-index:80;display:flex;align-items:center;justify-content:center">
+    <div onClick="{{ stop }}" style="width:376px;background:#fff;border-radius:14px;box-shadow:0 24px 60px rgba(0,0,0,.3);overflow:hidden">
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:18px 20px 0">
+        <div style="display:flex;align-items:center;gap:9px">
+          <span style="width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,#5b6cff,#8f6bff);display:flex;align-items:center;justify-content:center;color:#fff;font-size:13px">✦</span>
+          <span style="font-size:15px;font-weight:700">Unlock AI editing</span>
+        </div>
+        <span onClick="{{ closeAi }}" title="Close" style="cursor:pointer;color:#9aa1ab;font-size:14px;line-height:1;padding:2px 4px">✕</span>
+      </div>
+      <div style="padding:9px 20px 0;font-size:12.5px;color:#6b7280;line-height:1.55">You need an active subscription or credits to use the AI features on this asset.</div>
+      <div style="padding:16px 20px 4px;font-size:10px;font-weight:700;letter-spacing:.5px;color:#9aa1ab">AI FEATURES</div>
+      <div style="padding:0 20px;display:flex;flex-direction:column;gap:9px">
+        <div style="display:flex;gap:11px;border:1px solid #eceef2;border-radius:10px;padding:12px">
+          <span style="font-size:14px;color:#5b6cff;line-height:1.2">А</span>
+          <div><div style="font-size:13px;font-weight:600;margin-bottom:3px">Suggests fonts</div><div style="font-size:12px;color:#6b7280;line-height:1.5">Recommends Google Fonts that match the design’s style and mood.</div></div>
+        </div>
+        <div style="display:flex;gap:11px;border:1px solid #eceef2;border-radius:10px;padding:12px">
+          <span style="font-size:14px;color:#5b6cff;line-height:1.2">◇</span>
+          <div><div style="font-size:13px;font-weight:600;margin-bottom:3px">Converts text paths to editable text</div><div style="font-size:12px;color:#6b7280;line-height:1.5">Detects lettering baked into outlines and turns it back into real, editable text.</div></div>
+        </div>
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;padding:18px 20px 18px">
+        <button onClick="{{ closeAi }}" class="rowbtn" style="background:transparent;border:none;color:#6b7280;font-size:12.5px;padding:9px 12px;border-radius:8px;cursor:pointer">Maybe later</button>
+        <button onClick="{{ closeAi }}" style="border:none;background:linear-gradient(90deg,#5b6cff,#8f6bff);color:#fff;font-size:12.5px;font-weight:700;padding:9px 17px;border-radius:8px;cursor:pointer">Upgrade to unlock</button>
+      </div>
+    </div>
+  </div>
+  </sc-if>
+
+  <!-- floating AI pill bottom-right -->
+  <div onClick="{{ tryAi }}" title="Customise with AI (Pro)" style="position:absolute;right:16px;bottom:16px;display:flex;align-items:center;gap:9px;background:linear-gradient(90deg,#5b6cff,#8f6bff);border-radius:11px;padding:11px 15px;box-shadow:0 10px 26px rgba(91,108,255,.35);cursor:pointer;z-index:15">
+    <span style="font-size:13px">✦</span><span style="font-size:12.5px;font-weight:700;color:#fff">Customise with AI</span><span style="font-size:9px;font-weight:700;background:rgba(255,255,255,.28);color:#fff;padding:2px 6px;border-radius:5px">PRO</span>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:&quot;100%&quot;,&quot;height&quot;:&quot;100%&quot;}}">
+const ACC = '#5b6cff';
+const PALETTE = ['#1f6fd6','#f2802e','#111111','#12b76a','#e0575b','#8f6bff'];
+const BGS = ['#ffffff','#111111','#eef0f3','#fff4e6','#0b2a4a'];
+const ART_SHAPES = [
+  { t:'rect',   x:0,  y:0,  w:100, h:100, r:14, ci:0 },
+  { t:'circle', x:13, y:11, w:38,  h:38,  ci:1 },
+  { t:'circle', x:57, y:19, w:24,  h:24,  ci:1 },
+  { t:'rect',   x:15, y:65, w:62,  h:17,  r:6,  ci:2 },
+];
+const AW = 380, AH = 380;
+const REASONS = ['Colours or fonts came out wrong','File looks different from the canvas','Wrong file type for what I need','Text got cut off or moved','Took too long to export','Made a mistake — starting over'];
+function esc(s){ return String(s).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c])); }
+
+class Component extends DCLogic {
+  state = {
+    devOpen:false, selectedId:'t1', past:[], future:[],
+    rateOpen:false, rating:0, hoverStar:0, reasonsOpen:false, reasons:[], other:'', aiOpen:false,
+    objects:[
+      { id:'bg',  type:'bg',   name:'Background', color:'#ffffff', hidden:false },
+      { id:'art', type:'art',  name:'Logo mark', x:134, y:60, w:112, h:112, rot:0, hidden:false, colors:['#dfe6ef','#5b6cff','#f2802e'] },
+      { id:'t1',  type:'text', name:'Text', x:50, y:212, w:280, h:56, rot:0, hidden:false, text:'RocketJet', font:'Arial', size:40, weight:800, color:'#1f6fd6' },
+    ],
+  };
+  nextId = 2;
+
+  componentDidMount(){
+    this._move = (e)=>this.onMove(e); this._up = ()=>this.onUp();
+    window.addEventListener('pointermove', this._move);
+    window.addEventListener('pointerup', this._up);
+  }
+  componentWillUnmount(){
+    window.removeEventListener('pointermove', this._move);
+    window.removeEventListener('pointerup', this._up);
+  }
+
+  sel(){ return this.state.objects.find(o=>o.id===this.state.selectedId); }
+  commit(){ this.setState(s=>({ past:[...s.past, JSON.stringify(s.objects)].slice(-50), future:[] })); }
+  patch(id,f){ this.setState(s=>({ objects:s.objects.map(o=>o.id===id?{...o,...f}:o) })); }
+  select(id){ this.setState({ selectedId:id }); }
+  toggleDev(){ this.setState(s=>({ devOpen:!s.devOpen })); }
+
+  undo(){ this.setState(s=>{ if(!s.past.length) return null; const p=s.past[s.past.length-1];
+    return { objects:JSON.parse(p), past:s.past.slice(0,-1), future:[JSON.stringify(s.objects),...s.future] }; }); }
+  redo(){ this.setState(s=>{ if(!s.future.length) return null; const n=s.future[0];
+    return { objects:JSON.parse(n), future:s.future.slice(1), past:[...s.past, JSON.stringify(s.objects)] }; }); }
+
+  board(){ return document.querySelector('[data-board]'); }
+  startMove(e,id){ e.stopPropagation(); const o=this.state.objects.find(x=>x.id===id); if(!o) return;
+    if(o.type==='bg'){ this.select(id); return; }
+    this.commit(); this.select(id); this.drag={ mode:'move', id, sx:e.clientX, sy:e.clientY, ox:o.x, oy:o.y }; }
+  startResize(e,id){ e.stopPropagation(); const o=this.state.objects.find(x=>x.id===id);
+    this.commit(); this.drag={ mode:'resize', id, sx:e.clientX, sy:e.clientY, ow:o.w, oh:o.h, os:o.size }; }
+  startRotate(e,id){ e.stopPropagation(); const o=this.state.objects.find(x=>x.id===id); const b=this.board(); if(!b) return; const r=b.getBoundingClientRect();
+    this.commit(); this.drag={ mode:'rotate', id, cx:r.left+o.x+o.w/2, cy:r.top+o.y+o.h/2 }; }
+
+  onMove(e){ const d=this.drag; if(!d) return; const o=this.state.objects.find(x=>x.id===d.id); if(!o) return;
+    if(d.mode==='move') this.patch(d.id,{ x:d.ox+(e.clientX-d.sx), y:d.oy+(e.clientY-d.sy) });
+    else if(d.mode==='resize'){ const w=Math.max(24,d.ow+(e.clientX-d.sx)), ht=Math.max(20,d.oh+(e.clientY-d.sy));
+      const f = o.type==='text' ? { size:Math.max(8, Math.round(d.os*(ht/d.oh))) } : {}; this.patch(d.id,{ w, h:ht, ...f }); }
+    else if(d.mode==='rotate'){ const a=Math.atan2(e.clientY-d.cy, e.clientX-d.cx)*180/Math.PI+90; this.patch(d.id,{ rot:Math.round(a) }); } }
+  onUp(){ this.drag=null; }
+
+  toggleHide(e,id){ e.stopPropagation(); this.commit(); this.patch(id,{ hidden:!this.state.objects.find(o=>o.id===id).hidden }); }
+  duplicate(e,id){ e.stopPropagation(); this.commit(); this.setState(s=>{ const i=s.objects.findIndex(o=>o.id===id); const o=s.objects[i];
+    const c={ ...o, id:'o'+(this.nextId++), name:o.name+' copy', x:(o.x||0)+16, y:(o.y||0)+16 };
+    const arr=s.objects.slice(); arr.splice(i+1,0,c); return { objects:arr, selectedId:c.id }; }); }
+  remove(e,id){ e.stopPropagation(); const o=this.state.objects.find(x=>x.id===id); if(!o||o.type==='bg') return; this.commit();
+    this.setState(s=>({ objects:s.objects.filter(x=>x.id!==id), selectedId:s.selectedId===id?'bg':s.selectedId })); }
+  addText(){ this.commit(); const id='o'+(this.nextId++);
+    this.setState(s=>({ objects:[...s.objects,{ id, type:'text', name:'Text', x:90, y:150, w:200, h:48, rot:0, hidden:false, text:'Your text', font:'Arial', size:34, weight:700, color:'#111111' }], selectedId:id })); }
+  onDragStart(i){ this.dragFrom=i; }
+  onDrop(to){ const from=this.dragFrom; if(from==null||from===to) return; this.commit();
+    this.setState(s=>{ const n=s.objects.length, arr=s.objects.slice(), si=n-1-from, ti=n-1-to; const [m]=arr.splice(si,1); arr.splice(ti,0,m); return { objects:arr }; }); }
+
+  setText(e){ this.patch(this.state.selectedId,{ text:e.target.value }); }
+  setFont(e){ this.commit(); this.patch(this.state.selectedId,{ font:e.target.value }); }
+  setSize(e){ const v=parseInt(e.target.value||'0',10); this.patch(this.state.selectedId,{ size:isNaN(v)?12:v }); }
+  setWeight(e){ this.commit(); this.patch(this.state.selectedId,{ weight:parseInt(e.target.value,10) }); }
+  setColor(c){ this.commit(); this.patch(this.state.selectedId,{ color:c }); }
+  setArtColor(i,c){ this.commit(); const o=this.sel(); if(!o||!o.colors) return; const cols=o.colors.slice(); cols[i]=c; this.patch(o.id,{ colors:cols }); }
+  setBg(c){ this.commit(); this.patch('bg',{ color:c }); }
+
+  center(){ const o=this.sel(); if(!o||o.type==='bg') return; this.commit(); this.patch(o.id,{ x:(AW-o.w)/2, y:(AH-o.h)/2 }); }
+  rotate90(){ const o=this.sel(); if(!o||o.type==='bg') return; this.commit(); this.patch(o.id,{ rot:((o.rot||0)+90)%360 }); }
+  tryAi(){ this.setState({ aiOpen:true }); }
+
+  exportSvg(){
+    this.pendingSvg = this.buildSvg();
+    this.setState({ rateOpen:true, rating:0, hoverStar:0, reasonsOpen:false, reasons:[], other:'' });
+  }
+
+  buildSvg(){
+    let s=`<svg xmlns="http://www.w3.org/2000/svg" width="${AW}" height="${AH}" viewBox="0 0 ${AW} ${AH}">`;
+    for(const o of this.state.objects){ if(o.hidden) continue;
+      if(o.type==='bg'){ s+=`<rect width="${AW}" height="${AH}" fill="${o.color}"/>`; continue; }
+      const cx=o.x+o.w/2, cy=o.y+o.h/2, tr=`rotate(${o.rot||0} ${cx} ${cy})`;
+      if(o.type==='art'){ s+=`<g transform="${tr}">`;
+        for(const sh of ART_SHAPES){ const X=o.x+sh.x/100*o.w, Y=o.y+sh.y/100*o.h, W=sh.w/100*o.w, H=sh.h/100*o.h, col=o.colors[sh.ci];
+          if(sh.t==='circle') s+=`<ellipse cx="${X+W/2}" cy="${Y+H/2}" rx="${W/2}" ry="${H/2}" fill="${col}"/>`;
+          else s+=`<rect x="${X}" y="${Y}" width="${W}" height="${H}" rx="${(sh.r||0)/100*o.w}" fill="${col}"/>`; }
+        s+=`</g>`; }
+      else if(o.type==='text') s+=`<g transform="${tr}"><text x="${cx}" y="${cy}" font-family="${o.font}" font-size="${o.size}" font-weight="${o.weight}" fill="${o.color}" text-anchor="middle" dominant-baseline="central">${esc(o.text)}</text></g>`;
+    }
+    s+='</svg>';
+    return s;
+  }
+
+  download(){
+    const s = this.pendingSvg; if(!s) return;
+    try{ const b=new Blob([s],{type:'image/svg+xml'}); const u=URL.createObjectURL(b);
+      const a=document.createElement('a'); a.href=u; a.download='RocketJet-logo.svg'; document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(()=>URL.revokeObjectURL(u),2000); }catch(e){}
+    this.pendingSvg=null;
+  }
+
+  submitRating(){ if(!this.state.rating) return; this.download(); this.closeRate(); }
+
+  setRating(n){ this.setState({ rating:n }); }
+  closeRate(){ this.pendingSvg=null; this.setState({ rateOpen:false, reasonsOpen:false, hoverStar:0 }); }
+  toggleReason(r){ this.setState(s=>({ reasons: s.reasons.includes(r) ? s.reasons.filter(x=>x!==r) : [...s.reasons, r] })); }
+  sendReasons(){ this.closeRate(); }
+
+  renderVals(){
+    const s=this.state, sel=this.sel();
+    const canvasObjs = s.objects.map(o=>{
+      const selected = o.id===s.selectedId;
+      if(o.type==='bg'){
+        return { wrap:`position:absolute;inset:0;background:${o.color};cursor:pointer;box-sizing:border-box;${selected?`outline:2px solid ${ACC};outline-offset:-2px;`:''}${o.hidden?'display:none;':''}`,
+          onDown:(e)=>this.startMove(e,o.id), isText:false, isArt:false, selected:false, text:'', textStyle:'', artStyle:'', dim:'',
+          onRotate:()=>{}, onMove:()=>{}, onResize:()=>{} };
+      }
+      return {
+        wrap:`position:absolute;left:${o.x}px;top:${o.y}px;width:${o.w}px;height:${o.h}px;transform:rotate(${o.rot||0}deg);transform-origin:center center;cursor:move;opacity:${o.hidden?0.35:1};${o.hidden&&!selected?'display:none;':''}`,
+        onDown:(e)=>this.startMove(e,o.id),
+        isText:o.type==='text', isArt:o.type==='art', selected,
+        text:o.text||'',
+        shapes: o.type==='art' ? ART_SHAPES.map(sh=>({ style:`position:absolute;left:${sh.x}%;top:${sh.y}%;width:${sh.w}%;height:${sh.h}%;background:${(o.colors||[])[sh.ci]};border-radius:${sh.t==='circle'?'50%':(sh.r||0)+'px'}` })) : [],
+        textStyle:`width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-family:${o.font};font-size:${o.size}px;font-weight:${o.weight};color:${o.color};text-align:center;line-height:1.05;user-select:none;white-space:nowrap`,
+        artStyle:`position:relative;width:100%;height:100%`,
+        dim:`${Math.round(o.w)} × ${Math.round(o.h)}`,
+        onRotate:(e)=>this.startRotate(e,o.id), onMove:(e)=>this.startMove(e,o.id), onResize:(e)=>this.startResize(e,o.id),
+      };
+    });
+    const layers = s.objects.slice().reverse().map((o,di)=>({
+      name:o.name, icon:o.type==='text'?'🅣':(o.type==='art'?'◆':'▨'), eye:o.hidden?'○':'◉',
+      eyeStyle:`cursor:pointer;font-size:12px;color:${o.hidden?'#c3c9d2':ACC}`,
+      nameStyle:`flex:1;font-size:13px;${o.hidden?'color:#b6bcc6':(o.id===s.selectedId?'font-weight:600;color:#1b1f24':'color:#4b5563')}`,
+      rowStyle:`display:flex;align-items:center;gap:7px;padding:7px 8px;border-radius:8px;cursor:pointer;${o.id===s.selectedId?'background:#eef0ff;border:1px solid #d7dcff':'border:1px solid transparent'}`,
+      onSelect:()=>this.select(o.id), onHide:(e)=>this.toggleHide(e,o.id), onDup:(e)=>this.duplicate(e,o.id), onDel:(e)=>this.remove(e,o.id),
+      onDragStart:()=>this.onDragStart(di), onDrop:()=>this.onDrop(di),
+    }));
+    const mkSw = (list, cur, pick)=>list.map(c=>({ onPick:()=>pick(c),
+      style:`width:24px;height:24px;border-radius:6px;background:${c};box-sizing:border-box;cursor:pointer;${c==='#ffffff'?'border:1px solid #d7dbe1;':''}${cur===c?`outline:2px solid ${ACC};outline-offset:2px;`:''}` }));
+    const inspTitle = (sel&&sel.type==='text')?'Editing text':((sel&&sel.type==='bg')?'Background':((sel&&sel.type==='art')?'Vector colours':(sel?sel.name:'Nothing selected')));
+    const artColors = (sel&&sel.type==='art'&&sel.colors||[]).map((c,i)=>({ hex:c, onChange:(e)=>this.setArtColor(i,e.target.value),
+      swStyle:`width:22px;height:22px;border-radius:6px;background:${c};box-sizing:border-box;flex:none;${c.toLowerCase()==='#ffffff'?'border:1px solid #d7dbe1;':''}` }));
+    return {
+      canvasObjs, layers, count:s.objects.length,
+      devOpen:s.devOpen, offDev:!s.devOpen, toggleDev:()=>this.toggleDev(),
+      deselect:()=>this.select(null), allowDrop:(e)=>e.preventDefault(), addText:()=>this.addText(),
+      inspTitle,
+      isText:!!sel && sel.type==='text', isBg:!!sel && sel.type==='bg', isArt:!!sel && sel.type==='art', isPlain: !sel,
+      artColors,
+      tText: sel&&sel.text||'', tFont: sel&&sel.font||'Arial', tSize: sel&&sel.size||40, tWeight:String(sel&&sel.weight||400),
+      setText:(e)=>this.setText(e), setFont:(e)=>this.setFont(e), setSize:(e)=>this.setSize(e), setWeight:(e)=>this.setWeight(e),
+      setColorCustom:(e)=>this.setColor(e.target.value), setBgCustom:(e)=>this.setBg(e.target.value),
+      swatches: mkSw(PALETTE, sel&&sel.color, (c)=>this.setColor(c)),
+      bgSwatches: mkSw(BGS, sel&&sel.color, (c)=>this.setBg(c)),
+      undo:()=>this.undo(), redo:()=>this.redo(),
+      undoColor:s.past.length?'#4b5563':'#d3d7dd', redoColor:s.future.length?'#4b5563':'#d3d7dd',
+      rateOpen:s.rateOpen, reasonsOpen:s.reasonsOpen, ratedLow:s.rating===1,
+      stars: [1,2,3,4,5].map(n=>({ title:n+' of 5', onPick:()=>this.setRating(n), onHover:()=>this.setState({hoverStar:n}),
+        style:`font-size:29px;line-height:1;cursor:pointer;transition:color .12s,transform .12s;color:${n<=(s.hoverStar||s.rating)?'#f2b03e':'#dfe3e9'};transform:scale(${n<=s.hoverStar?1.12:1})` })),
+      starLeave:()=>this.setState({hoverStar:0}),
+      submitBg: s.rating?ACC:'#c3c9d2',
+      closeRate:()=>this.closeRate(), submitRating:()=>this.submitRating(),
+      openReasons:()=>this.setState({reasonsOpen:true}), backToRating:()=>this.setState({reasonsOpen:false}),
+      sendReasons:()=>this.sendReasons(), setOther:(e)=>this.setState({other:e.target.value}),
+      reasonList: REASONS.map(r=>{ const on=s.reasons.includes(r); return { label:r, tick:on?'✓':'', onToggle:()=>this.toggleReason(r),
+        rowStyle:`display:flex;align-items:center;gap:10px;padding:8px 9px;border-radius:9px;cursor:pointer;border:1px solid ${on?'#d7dcff':'#eceef2'};${on?'background:#f4f6ff;':''}`,
+        boxStyle:`width:17px;height:17px;border-radius:5px;flex:none;display:flex;align-items:center;justify-content:center;font-size:11px;color:#fff;box-sizing:border-box;${on?`background:${ACC};border:1px solid ${ACC};`:'background:#fff;border:1px solid #cdd3db;'}` }; }),
+      aiOpen:s.aiOpen, closeAi:()=>this.setState({aiOpen:false}), stop:(e)=>e.stopPropagation(),
+      center:()=>this.center(), rotate90:()=>this.rotate90(), exportSvg:()=>this.exportSvg(), tryAi:()=>this.tryAi(),
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -322,6 +322,70 @@ export const isFullCanvasLayer = (
     }
   });
 
+// Which top-level layer, if any, is the document's background: the bottom layer, when
+// it either is or contains a shape covering most of the viewBox. Drives the "Canvas"
+// row in the element list, locks that layer from dragging, seeds the default hidden
+// set, and decides whether the board shows a transparency checkerboard.
+//
+// Deliberately attribute-based (no layout): it runs on a parsed string before anything
+// is in the DOM, unlike isFullCanvasLayer above which measures a live bbox.
+const BACKGROUND_MIN_AREA = 0.75; // ≥75% of the viewBox area ⇒ a background shape
+export function detectBackgroundLayerId(content: string, layers: SvgLayer[]): string | null {
+  if (layers.length === 0) return null;
+  const candidate = layers[0];
+  const doc = new DOMParser().parseFromString(content, 'image/svg+xml');
+  const vb = (doc.documentElement.getAttribute('viewBox') ?? '').trim().split(/[\s,]+/).map(Number);
+  if (vb.length < 4) return null;
+  const viewBoxArea = vb[2] * vb[3];
+  const el = doc.getElementById(candidate.id);
+  if (!el) return null;
+
+  const coversCanvas = (node: Element): boolean => {
+    const tag = node.localName.toLowerCase();
+    if (tag === 'rect') {
+      const w = parseFloat(node.getAttribute('width') ?? '0');
+      const h = parseFloat(node.getAttribute('height') ?? '0');
+      return w * h >= viewBoxArea * BACKGROUND_MIN_AREA;
+    }
+    if (tag === 'circle') {
+      const r = parseFloat(node.getAttribute('r') ?? '0');
+      return Math.PI * r * r >= viewBoxArea * BACKGROUND_MIN_AREA;
+    }
+    if (tag === 'ellipse') {
+      const rx = parseFloat(node.getAttribute('rx') ?? '0');
+      const ry = parseFloat(node.getAttribute('ry') ?? '0');
+      return Math.PI * rx * ry >= viewBoxArea * BACKGROUND_MIN_AREA;
+    }
+    return false;
+  };
+
+  // Case 1: the layer element itself is a background shape
+  if (coversCanvas(el)) return candidate.id;
+
+  // Case 2: the layer is a group whose first few children include a background shape
+  const children = Array.from(el.children).filter(
+    (c) => !['defs', 'title', 'desc'].includes(c.localName.toLowerCase())
+  );
+  if (children.length > 0 && children.length <= 6 && children.some(coversCanvas)) return candidate.id;
+
+  return null;
+}
+
+// True when a layer paints nothing but white — a plain white backdrop, as opposed to a
+// background that is part of the design (a brand colour, a gradient, a photo). Only the
+// former is hidden by default, since hiding a coloured background would change how the
+// artwork reads.
+export function isPlainWhiteLayer(content: string, layerId: string): boolean {
+  const doc = new DOMParser().parseFromString(content, 'image/svg+xml');
+  const el = doc.getElementById(layerId);
+  if (!el) return false;
+  const colors = extractLayerColors(el, doc);
+  // No detectable paint at all isn't "white" — leave it alone.
+  if (colors.length === 0) return false;
+  const white = normalizeColor('#ffffff');
+  return colors.every((c) => normalizeColor(c) === white);
+}
+
 export function svgToBase64Png(svgString: string, width: number, height: number): Promise<string> {
   return new Promise((resolve, reject) => {
     const blob = new Blob([svgString], { type: 'image/svg+xml' });

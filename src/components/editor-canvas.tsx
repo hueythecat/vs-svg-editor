@@ -1,19 +1,54 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 
 import type { ActiveSvg } from '@/lib/svg-utils';
-import { SparklesIcon } from './svg-icons';
+import { C, MONO_STACK, SHADOW, FONT_STACK, checkerStyle } from '@/lib/design-tokens';
+import { MoveIcon, ResizeIcon, RotateIcon, SparklesIcon } from './svg-icons';
 
-// The canvas stage: the rendered SVG plus the selection / drag / rotate / scale
-// overlay. Memoised and fed only canvas-relevant props, so it no longer re-renders
-// when unrelated state changes (text-form typing, font suggestions, modals, the
-// download dropdown, …). Refs stay owned by the parent — whose handlers and layout
-// effects use them — and are only attached here.
+// The canvas stage (handoff §1.1–1.3): a full-bleed, flex-centred area holding the
+// white board, plus the selection / drag / rotate / scale overlay. Memoised and fed
+// only canvas-relevant props, so it doesn't re-render when unrelated state changes
+// (text-form typing, modals, AI runs, …). Refs stay owned by the parent — whose
+// handlers and layout effects use them — and are only attached here.
+
+// The board is capped rather than fixed at the prototype's 380px: real imported
+// artwork has its own aspect ratio. The width is clamped by the viewport AND by the
+// height budget times the artwork's aspect, so a tall or wide file always fits whole —
+// nothing is ever cropped. The vertical budget leaves room for the floating toolbar.
+const BOARD_MAX_W = 620;   // px
+const BOARD_MAX_VW = 52;   // vw
+const V_BUDGET = 150;      // px of chrome above/below the board
+
+// Aspect ratio (w/h) of the document, read off the root <svg> tag: viewBox first, then
+// width/height. A cheap string scan of the opening tag rather than a full DOM parse.
+function documentAspect(content: string | undefined): number {
+  if (!content) return 1;
+  const rootTag = content.slice(0, content.indexOf('>') + 1);
+  const vb = /viewBox\s*=\s*["']([^"']+)["']/i.exec(rootTag);
+  if (vb) {
+    const parts = vb[1].trim().split(/[\s,]+/).map(Number);
+    if (parts.length === 4 && parts[2] > 0 && parts[3] > 0) return parts[2] / parts[3];
+  }
+  const w = /\bwidth\s*=\s*["']([\d.]+)/i.exec(rootTag);
+  const h = /\bheight\s*=\s*["']([\d.]+)/i.exec(rootTag);
+  if (w && h && Number(h[1]) > 0) return Number(w[1]) / Number(h[1]);
+  return 1;
+}
+
+const handleBase: React.CSSProperties = {
+  position: 'absolute',
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  pointerEvents: 'all',
+  boxShadow: SHADOW.handle,
+};
+
 export const CanvasStage = React.memo(function CanvasStage({
-  svgCanvasRef, overlayRef, subOverlayRef,
+  svgCanvasRef, overlayRef, subOverlayRef, sizeBadgeRef,
   onCanvasClick,
   aiLoading, aiStatusMsg,
   isLoading, activeSvg,
-  hiddenLayers,
+  hiddenLayers, backgroundLayerId,
   showSelectionOverlay, selectionIsEmptyText, selectionIsTextLayer,
   selectedLayersSize,
   onEmptyTextClick,
@@ -22,12 +57,14 @@ export const CanvasStage = React.memo(function CanvasStage({
   svgCanvasRef: React.RefObject<HTMLDivElement | null>;
   overlayRef: React.RefObject<HTMLDivElement | null>;
   subOverlayRef: React.RefObject<HTMLDivElement | null>;
+  sizeBadgeRef: React.RefObject<HTMLSpanElement | null>;
   onCanvasClick: (e: React.MouseEvent<HTMLDivElement>) => void;
   aiLoading: boolean;
   aiStatusMsg: string;
   isLoading: boolean;
   activeSvg: ActiveSvg | null;
   hiddenLayers: Set<string>;
+  backgroundLayerId: string | null;
   showSelectionOverlay: boolean;
   selectionIsEmptyText: boolean;
   selectionIsTextLayer: boolean;
@@ -37,41 +74,64 @@ export const CanvasStage = React.memo(function CanvasStage({
   onRotateHandleMouseDown: (e: React.MouseEvent<HTMLDivElement>) => void;
   onScaleHandleMouseDown: (e: React.MouseEvent<HTMLDivElement>) => void;
 }) {
+  const single = selectedLayersSize === 1;
+  const aspect = useMemo(() => documentAspect(activeSvg?.content), [activeSvg?.content]);
+  // No full-canvas background layer — or it's hidden — means the artwork exports with
+  // transparency, so the board shows a checkerboard rather than implying a white fill.
+  const isTransparent = !backgroundLayerId || hiddenLayers.has(backgroundLayerId);
+
   return (
     <div
       ref={svgCanvasRef}
       onClick={onCanvasClick}
-      className="relative flex-1 overflow-auto flex items-center justify-center min-w-0"
       style={{
-        backgroundImage: 'radial-gradient(circle, #3f3f46 1px, transparent 1px)',
-        backgroundSize: '20px 20px',
+        position: 'absolute',
+        inset: 0,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        // Deliberate: keeps scrollbars away when artwork is dragged past the edge.
+        overflow: 'hidden',
       }}
     >
-      {/* Beta badge, pinned to the canvas top-left. Inline styles (not NativeWind
-          classes) so it renders regardless of which Tailwind utilities are built. */}
+      {/* Beta badge — sits below the dev rail so the two don't collide */}
       <span
         style={{
-          position: 'absolute', top: 10, left: 10, zIndex: 20,
+          position: 'absolute', top: 58, left: 16, zIndex: 20,
           pointerEvents: 'none',
           padding: '2px 8px', borderRadius: 6,
-          fontSize: 10, fontWeight: 700, letterSpacing: '0.08em',
-          textTransform: 'uppercase',
-          color: '#fcd34d',
-          background: 'rgba(245,158,11,0.12)',
-          border: '1px solid rgba(245,158,11,0.35)',
+          fontSize: 10, fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase',
+          color: '#8a6410',
+          background: 'rgba(242,176,62,.16)',
+          border: '1px solid rgba(242,176,62,.45)',
+          fontFamily: FONT_STACK,
         }}
       >
         Beta
       </span>
+
       {aiLoading && (
-        <div className="absolute inset-0 z-10 flex flex-col items-center justify-center bg-zinc-950/60 backdrop-blur-[2px]">
-          <SparklesIcon className="size-10 text-indigo-400 animate-pulse" />
-          <span className="mt-3 text-sm text-zinc-300 tracking-wide">{aiStatusMsg}</span>
+        <div
+          style={{
+            position: 'absolute', inset: 0, zIndex: 10,
+            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+            background: 'rgba(238,240,243,.72)', backdropFilter: 'blur(2px)',
+            fontFamily: FONT_STACK,
+          }}
+        >
+          <span style={{ color: C.accent, display: 'flex' }}><SparklesIcon size={34} /></span>
+          <span style={{ marginTop: 12, fontSize: 13, color: C.textSecondary }}>{aiStatusMsg}</span>
         </div>
       )}
 
       {isLoading && !activeSvg ? (
-        <div className="w-8 h-8 rounded-full border-2 border-zinc-700 border-t-zinc-400 animate-spin" />
+        <div
+          style={{
+            width: 32, height: 32, borderRadius: '50%',
+            border: `2px solid ${C.borderInput}`, borderTopColor: C.accent,
+            animation: 'ed-spin .8s linear infinite',
+          }}
+        />
       ) : activeSvg ? (
         <>
           {hiddenLayers.size > 0 && (
@@ -81,14 +141,31 @@ export const CanvasStage = React.memo(function CanvasStage({
                 .join('')
             }</style>
           )}
+
+          {/* Board — every object coordinate is relative to this box. Sized so the
+              whole document fits: width is capped by the viewport and by the height
+              budget × aspect, and the height simply follows. No clipping. */}
           <div
-            className="svg-canvas"
-            style={{ width: '80%' }}
-            dangerouslySetInnerHTML={{ __html: activeSvg.content }}
-          />
-          {/* Selection overlay — React controls existence, layout effect controls position.
-              No display/left/top/width/height in JSX so React never overrides them.
-              Hidden for the locked background layer. */}
+            data-board="1"
+            style={{
+              position: 'relative',
+              flex: 'none',
+              width: `min(${BOARD_MAX_VW}vw, ${BOARD_MAX_W}px, calc((100vh - ${V_BUDGET}px) * ${aspect.toFixed(4)}))`,
+              ...(isTransparent ? checkerStyle() : { background: C.surface }),
+              boxShadow: SHADOW.board,
+              display: 'flex',
+            }}
+          >
+            <div
+              className="svg-canvas"
+              style={{ width: '100%' }}
+              dangerouslySetInnerHTML={{ __html: activeSvg.content }}
+            />
+          </div>
+
+          {/* Selection overlay — React controls existence, the parent's layout effect
+              controls position. No display/left/top/width/height in JSX so React never
+              overrides them. Hidden for the locked background layer. */}
           {showSelectionOverlay && (
             <div
               ref={overlayRef}
@@ -101,54 +178,30 @@ export const CanvasStage = React.memo(function CanvasStage({
               style={{
                 position: 'absolute',
                 pointerEvents: selectionIsEmptyText ? 'auto' : 'none',
-                outline: '2px dashed #3b82f6',
+                border: `1.5px dashed ${C.accent}`,
                 boxSizing: 'border-box',
                 zIndex: 5,
               }}
             >
-              {/* Sub-layer highlight (amber) — display toggled by layout effect */}
+              {/* Sub-layer highlight — display toggled by the layout effect */}
               <div
                 ref={subOverlayRef}
                 style={{
                   position: 'absolute',
-                  outline: '2px dashed #f59e0b',
+                  outline: `1.5px dashed ${C.star}`,
                   boxSizing: 'border-box',
                   pointerEvents: 'none',
                 }}
               />
-              {/* Drag handle — single-layer selection only */}
-              {selectedLayersSize === 1 && (
-                <div
-                  onMouseDown={onDragHandleMouseDown}
-                  onClick={(e) => e.stopPropagation()}
-                  style={{
-                    position: 'absolute',
-                    right: -8,
-                    top: -8,
-                    width: 16,
-                    height: 16,
-                    borderRadius: '50%',
-                    background: '#3b82f6',
-                    border: '2px solid white',
-                    cursor: 'grab',
-                    pointerEvents: 'all',
-                  }}
-                />
-              )}
-              {/* Rotate handle — single-layer selection only. Sits on a stalk above the
-                  top-centre of the selection box. */}
-              {selectedLayersSize === 1 && (
+
+              {/* Rotate stem + handle — single-layer selection only */}
+              {single && (
                 <>
-                  <div
+                  <span
                     style={{
-                      position: 'absolute',
-                      left: '50%',
-                      top: -24,
-                      width: 1,
-                      height: 24,
-                      marginLeft: -0.5,
-                      background: '#3b82f6',
-                      pointerEvents: 'none',
+                      position: 'absolute', left: '50%', top: -30,
+                      width: 1.5, height: 22, marginLeft: -0.75,
+                      background: C.accent, pointerEvents: 'none',
                     }}
                   />
                   <div
@@ -156,42 +209,64 @@ export const CanvasStage = React.memo(function CanvasStage({
                     onClick={(e) => e.stopPropagation()}
                     title="Drag to rotate (hold Shift to snap to 15°)"
                     style={{
-                      position: 'absolute',
-                      left: '50%',
-                      top: -32,
-                      marginLeft: -8,
-                      width: 16,
-                      height: 16,
-                      borderRadius: '50%',
-                      background: 'white',
-                      border: '2px solid #3b82f6',
-                      cursor: 'grab',
-                      pointerEvents: 'all',
+                      ...handleBase,
+                      left: '50%', top: -42, marginLeft: -10,
+                      width: 20, height: 20, borderRadius: '50%',
+                      background: C.surface, border: `1.5px solid ${C.accent}`,
+                      color: C.accent, cursor: 'grab',
                     }}
-                  />
+                  >
+                    <RotateIcon size={10} />
+                  </div>
                 </>
               )}
-              {/* Scale handle — bottom-right corner, non-text layers only. Uniform
-                  scale about the layer's centre. */}
-              {selectedLayersSize === 1 && !selectionIsTextLayer && (
+
+              {/* Move handle */}
+              {single && (
+                <div
+                  onMouseDown={onDragHandleMouseDown}
+                  onClick={(e) => e.stopPropagation()}
+                  title="Drag to move"
+                  style={{
+                    ...handleBase,
+                    top: -11, right: -11,
+                    width: 22, height: 22, borderRadius: 6,
+                    background: C.accent, color: '#fff', cursor: 'move',
+                  }}
+                >
+                  <MoveIcon size={11} />
+                </div>
+              )}
+
+              {/* Resize handle — non-text layers only (text scales via its font size) */}
+              {single && !selectionIsTextLayer && (
                 <div
                   onMouseDown={onScaleHandleMouseDown}
                   onClick={(e) => e.stopPropagation()}
-                  title="Drag to scale"
+                  title="Drag to resize"
                   style={{
-                    position: 'absolute',
-                    right: -7,
-                    bottom: -7,
-                    width: 14,
-                    height: 14,
-                    borderRadius: 2,
-                    background: 'white',
-                    border: '2px solid #3b82f6',
-                    cursor: 'nwse-resize',
-                    pointerEvents: 'all',
+                    ...handleBase,
+                    bottom: -11, right: -11,
+                    width: 22, height: 22, borderRadius: 6,
+                    background: C.surface, border: `1.5px solid ${C.accent}`,
+                    color: C.accent, cursor: 'nwse-resize',
                   }}
-                />
+                >
+                  <ResizeIcon size={11} />
+                </div>
               )}
+
+              {/* Size badge — text written by the parent's positioning pass */}
+              <span
+                ref={sizeBadgeRef}
+                style={{
+                  position: 'absolute', bottom: -24, left: 0,
+                  background: C.accent, color: '#fff',
+                  fontFamily: MONO_STACK, fontSize: 10,
+                  padding: '2px 6px', borderRadius: 4,
+                  pointerEvents: 'none', whiteSpace: 'nowrap',
+                }}
+              />
             </div>
           )}
         </>

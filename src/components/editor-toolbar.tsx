@@ -1,96 +1,183 @@
 import React from 'react';
 
-// Top toolbar of the editor (filename, center/rotate/undo/export/close). Memoised and
-// fed only the values it needs, so it no longer re-renders on every unrelated state
-// change in the parent (text edits, drags, AI runs, …).
+import { C, SHADOW, FONT_STACK, toolButtonStyle } from '@/lib/design-tokens';
+import {
+  CenterIcon, CloseIcon, DownloadIcon, RedoIcon, RevertIcon, RotateIcon, UndoIcon,
+} from './svg-icons';
+
+// Floating top-centre toolbar (handoff §1.5): app chip · filename · undo/redo ·
+// Center · 90° · Export. Memoised and fed only the values it needs, so it doesn't
+// re-render on every unrelated state change in the parent (text edits, drags, AI runs).
+// Styled with inline objects rather than NativeWind classes — see design-tokens.ts.
+
+const divider = <span style={{ width: 1, height: 20, background: C.borderPanel, flex: 'none' }} />;
+
+// 15px icon button; #4b5563 when available, #d3d7dd when its stack is empty.
+function IconButton({
+  onClick, disabled, title, color, children,
+}: {
+  onClick: () => void;
+  disabled?: boolean;
+  title: string;
+  color?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      className="ed-ghost"
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      style={{
+        ...toolButtonStyle,
+        padding: 7,
+        color: disabled ? C.disabledIcon : (color ?? C.textSecondary),
+        cursor: disabled ? 'default' : 'pointer',
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
 export const EditorToolbar = React.memo(function EditorToolbar({
   fileName, isDirty,
-  onCenter, onMatchRotation, matchRotationDisabled,
-  undoCount, onUndo,
-  exportLabel, onExport, onClose,
+  onCenter, onRotate90, transformDisabled, onMatchRotation, matchRotationDisabled,
+  undoCount, onUndo, redoCount, onRedo,
+  exportLabel, onExport, onClose, onReset,
 }: {
   fileName: string;
   isDirty: boolean;
   onCenter: () => void;
+  onRotate90: () => void;
+  transformDisabled: boolean;
   onMatchRotation: () => void;
   matchRotationDisabled: boolean;
   undoCount: number;
   onUndo: () => void;
+  redoCount: number;
+  onRedo: () => void;
   exportLabel: string;
   onExport: () => void;
   onClose: () => void;
+  onReset: () => void;
 }) {
   return (
-    <div className="flex items-center gap-2 px-4 h-11 border-b border-zinc-800 shrink-0">
-      {/* Filename + dirty dot */}
-      <div className="flex items-center gap-1.5 min-w-0 flex-1">
-        <span className="text-zinc-400 text-sm font-mono truncate">{fileName}</span>
-        {isDirty && (
-          <span className="size-1.5 rounded-full bg-amber-400 shrink-0 inline-block" title="Unsaved changes" />
-        )}
-      </div>
+    <div
+      style={{
+        position: 'absolute',
+        top: 16,
+        left: '50%',
+        transform: 'translateX(-50%)',
+        zIndex: 20,
+        display: 'flex',
+        alignItems: 'center',
+        gap: 4,
+        padding: 6,
+        background: C.surface,
+        border: `1px solid ${C.borderPanel}`,
+        borderRadius: 12,
+        boxShadow: SHADOW.toolbar,
+        fontFamily: FONT_STACK,
+        maxWidth: 'calc(100vw - 32px)',
+      }}
+    >
+      {/* App chip */}
+      <span
+        style={{
+          width: 22, height: 22, borderRadius: 6, background: C.accent,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          color: '#fff', fontSize: 11, flex: 'none',
+        }}
+      >
+        ◆
+      </span>
 
-      <div className="flex items-center gap-1.5 shrink-0">
-        {/* Center layers to canvas midpoint */}
-        <button
-          onClick={onCenter}
-          title="Center all layers horizontally"
-          className="h-7 w-7 flex items-center justify-center rounded border border-zinc-700 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
-            <circle cx="12" cy="12" r="3" />
-            <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v2m0 14v2M3 12h2m14 0h2" />
-          </svg>
-        </button>
+      {/* Filename + unsaved-changes dot */}
+      <span
+        title={fileName}
+        style={{
+          fontSize: 13, fontWeight: 600, color: C.textPrimary,
+          padding: '0 4px', maxWidth: 210,
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}
+      >
+        {fileName}
+      </span>
+      {isDirty && (
+        <span
+          title="Unsaved changes"
+          style={{ width: 6, height: 6, borderRadius: '50%', background: C.star, flex: 'none' }}
+        />
+      )}
 
-        {/* Match all layers to the selected layer's rotation */}
-        <button
-          onClick={onMatchRotation}
-          disabled={matchRotationDisabled}
-          title="Match all layers to the selected layer's rotation"
-          className="h-7 w-7 flex items-center justify-center rounded border border-zinc-700 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-zinc-400 disabled:cursor-not-allowed"
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3" />
-            <path strokeLinecap="round" strokeLinejoin="round" d="M17.4 3.6v3.1h-3.1" />
-          </svg>
-        </button>
+      {divider}
 
-        {/* Undo */}
-        {undoCount > 0 && (
-          <button
-            onClick={onUndo}
-            title="Undo (⌘Z)"
-            className="h-7 w-7 flex items-center justify-center rounded border border-zinc-700 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M9 15 3 9m0 0 6-6M3 9h12a6 6 0 0 1 0 12h-3" />
-            </svg>
-          </button>
-        )}
+      <IconButton onClick={onUndo} disabled={undoCount === 0} title="Undo (⌘Z)">
+        <UndoIcon size={15} />
+      </IconButton>
+      <IconButton onClick={onRedo} disabled={redoCount === 0} title="Redo (⇧⌘Z)">
+        <RedoIcon size={15} />
+      </IconButton>
 
-        {/* Export */}
-        <button
-          onClick={onExport}
-          className="h-7 flex items-center gap-1.5 px-2.5 rounded border border-zinc-700 text-zinc-300 hover:text-zinc-100 hover:bg-zinc-800 text-xs font-medium transition-colors"
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 0 0 5.25 21h13.5A2.25 2.25 0 0 0 21 18.75V16.5M16.5 12 12 16.5m0 0L7.5 12m4.5 4.5V3" />
-          </svg>
-          {exportLabel}
-        </button>
+      {divider}
 
-        {/* Close */}
-        <button
-          onClick={onClose}
-          title="Close file (ESC)"
-          className="h-7 w-7 flex items-center justify-center rounded border border-zinc-700 text-zinc-500 hover:text-zinc-200 hover:bg-zinc-800 transition-colors"
-        >
-          <svg xmlns="http://www.w3.org/2000/svg" className="size-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.75}>
-            <path strokeLinecap="round" strokeLinejoin="round" d="M6 18 18 6M6 6l12 12" />
-          </svg>
-        </button>
-      </div>
+      <button
+        type="button"
+        className="ed-ghost"
+        onClick={onCenter}
+        title="Centre every layer on the canvas"
+        style={toolButtonStyle}
+      >
+        <CenterIcon size={14} />
+        Center
+      </button>
+      <button
+        type="button"
+        className="ed-ghost"
+        onClick={onRotate90}
+        disabled={transformDisabled}
+        title="Rotate the selection 90°"
+        style={{
+          ...toolButtonStyle,
+          color: transformDisabled ? C.disabledIcon : C.textSecondary,
+          cursor: transformDisabled ? 'default' : 'pointer',
+        }}
+      >
+        <RotateIcon size={14} />
+        90°
+      </button>
+      <IconButton
+        onClick={onMatchRotation}
+        disabled={matchRotationDisabled}
+        title="Match every layer to the selected layer's rotation"
+      >
+        <RotateIcon size={15} />
+      </IconButton>
+      <IconButton onClick={onReset} disabled={!isDirty} title="Revert to the original file">
+        <RevertIcon size={15} />
+      </IconButton>
+
+      {divider}
+
+      <button
+        type="button"
+        onClick={onExport}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 6,
+          border: 'none', background: C.accent, color: '#fff',
+          fontSize: 12.5, fontWeight: 600, fontFamily: FONT_STACK,
+          padding: '7px 14px', borderRadius: 8, cursor: 'pointer', whiteSpace: 'nowrap',
+        }}
+      >
+        <DownloadIcon size={13} />
+        {exportLabel}
+      </button>
+
+      <IconButton onClick={onClose} title="Close file (ESC)" color={C.textFaint}>
+        <CloseIcon size={15} />
+      </IconButton>
     </div>
   );
 });
