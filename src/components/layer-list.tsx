@@ -46,6 +46,30 @@ export const LayerList = React.memo(function LayerList({
   const panelDropPositionRef = useRef<{ targetId: string; before: boolean } | null>(null);
   const panelReorderDoneRef  = useRef(false);
 
+  // Which row a drag is over, resolved from row geometry rather than
+  // document.elementFromPoint. Hit testing only reported a target when the pointer was
+  // exactly over a row, so a release in the 2px gap between rows, on the panel padding,
+  // or past either end of the list silently did nothing — which is what made dropping
+  // onto the top row unreliable. Falling back to the nearest row makes "drag it above
+  // everything" work by dragging past the top.
+  const resolveDrop = (clientY: number): { targetId: string; before: boolean } | null => {
+    const container = layerListRef.current;
+    const dragId = panelDragIdRef.current;
+    if (!container || !dragId) return null;
+
+    let best: { id: string; rect: DOMRect; distance: number } | null = null;
+    for (const el of Array.from(container.querySelectorAll<HTMLElement>('[data-layer-id]'))) {
+      const rect = el.getBoundingClientRect();
+      const distance =
+        clientY < rect.top ? rect.top - clientY : clientY > rect.bottom ? clientY - rect.bottom : 0;
+      if (!best || distance < best.distance) best = { id: el.dataset.layerId!, rect, distance };
+      if (distance === 0) break;
+    }
+
+    if (!best || best.id === dragId) return null;
+    return { targetId: best.id, before: clientY < best.rect.top + best.rect.height / 2 };
+  };
+
   // 12px action icon — eye / duplicate / delete. Stops propagation so it doesn't
   // also select the row.
   const action = (
@@ -87,22 +111,27 @@ export const LayerList = React.memo(function LayerList({
       onPointerMove={(e) => {
         if (!panelDragIdRef.current) return;
         setDragLayerId(panelDragIdRef.current);
-        const under = document.elementFromPoint(e.clientX, e.clientY);
-        const row = under?.closest('[data-layer-id]') as HTMLElement | null;
-        if (!row || row.dataset.layerId === panelDragIdRef.current) {
-          panelDropPositionRef.current = null;
-          setDropPosition(null);
-          return;
+
+        // Auto-scroll when dragging at either edge, so a target row that's scrolled out
+        // of the panel can still be reached mid-drag.
+        const container = layerListRef.current;
+        if (container && container.scrollHeight > container.clientHeight) {
+          const box = container.getBoundingClientRect();
+          const EDGE = 24;
+          if (e.clientY < box.top + EDGE) container.scrollTop -= 8;
+          else if (e.clientY > box.bottom - EDGE) container.scrollTop += 8;
         }
-        const rect = row.getBoundingClientRect();
-        const pos = { targetId: row.dataset.layerId!, before: e.clientY < rect.top + rect.height / 2 };
+
+        const pos = resolveDrop(e.clientY);
         panelDropPositionRef.current = pos;
         setDropPosition(pos);
       }}
       onPointerUp={(e) => {
         if (!panelDragIdRef.current) return;
         layerListRef.current?.releasePointerCapture(e.pointerId);
-        const pos = panelDropPositionRef.current;
+        // Resolve once more from the release point: the last pointermove can lag behind
+        // where the pointer actually came up.
+        const pos = resolveDrop(e.clientY) ?? panelDropPositionRef.current;
         if (pos) {
           onReorderLayers(panelDragIdRef.current, pos.targetId, pos.before);
           panelReorderDoneRef.current = true;

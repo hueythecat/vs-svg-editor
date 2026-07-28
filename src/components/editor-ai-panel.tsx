@@ -6,7 +6,7 @@ import {
 import type {
   AiActionType, AiBundle, FontBundle, LlmProvider, TaxonomyBundle,
 } from './editor-types';
-import { CloseIcon, SparklesIcon } from './svg-icons';
+import { ChevronIcon, CloseIcon, SparklesIcon } from './svg-icons';
 
 // The AI surface of the design (handoff §1.8): a gradient pill bottom-right.
 //
@@ -53,34 +53,82 @@ const spinner = (
 
 // ── Pill ─────────────────────────────────────────────────────────────────────
 
-export const AiPill = React.memo(function AiPill({ onClick }: { onClick: () => void }) {
+// The pill runs the customise pass itself — it is the action, not a menu. The caret on
+// its right edge is the way into the AI tools panel (model, per-layer actions,
+// taxonomy), which would otherwise have no trigger.
+export const AiPill = React.memo(function AiPill({
+  onCustomise, onOpenTools, loading, done, toolsOpen,
+}: {
+  onCustomise: () => void;
+  onOpenTools: () => void;
+  loading: boolean;
+  done: boolean;
+  toolsOpen: boolean;
+}) {
+  const label = loading ? 'Customising…' : done ? 'Customised' : 'Customise';
   return (
-    <button
-      type="button"
-      onClick={onClick}
+    <div
       style={{
         position: 'absolute', right: 16, bottom: 16, zIndex: 15,
-        display: 'flex', alignItems: 'center', gap: 8,
+        display: 'flex', alignItems: 'center',
         background: C.accentGrad,
-        border: 'none', borderRadius: 11,
-        padding: '11px 15px',
+        borderRadius: 11,
         boxShadow: SHADOW.aiPill,
-        cursor: 'pointer',
         fontFamily: FONT_STACK,
+        opacity: loading ? 0.85 : 1,
       }}
     >
-      <span style={{ color: '#fff', display: 'flex' }}><SparklesIcon size={13} /></span>
-      <span style={{ color: '#fff', fontSize: 12.5, fontWeight: 700 }}>Customise with AI</span>
-      <span
+      <button
+        type="button"
+        onClick={onCustomise}
+        disabled={loading || done}
+        title={done ? 'This image has already been customised' : 'Run the AI customise pass'}
         style={{
-          fontSize: 9, fontWeight: 700, color: '#fff',
-          background: 'rgba(255,255,255,.28)',
-          padding: '2px 6px', borderRadius: 5,
+          display: 'flex', alignItems: 'center', gap: 8,
+          background: 'transparent', border: 'none',
+          padding: '11px 13px 11px 15px',
+          cursor: loading || done ? 'default' : 'pointer',
+          fontFamily: FONT_STACK,
         }}
       >
-        PRO
-      </span>
-    </button>
+        {loading ? (
+          <span
+            style={{
+              width: 13, height: 13, borderRadius: '50%', flex: 'none',
+              border: '2px solid rgba(255,255,255,.45)', borderTopColor: '#fff',
+              animation: 'ed-spin .8s linear infinite',
+            }}
+          />
+        ) : (
+          <span style={{ color: '#fff', display: 'flex' }}><SparklesIcon size={13} /></span>
+        )}
+        <span style={{ color: '#fff', fontSize: 12.5, fontWeight: 700 }}>{label}</span>
+        <span
+          style={{
+            fontSize: 9, fontWeight: 700, color: '#fff',
+            background: 'rgba(255,255,255,.28)',
+            padding: '2px 6px', borderRadius: 5,
+          }}
+        >
+          PRO
+        </span>
+      </button>
+
+      <span style={{ width: 1, height: 18, background: 'rgba(255,255,255,.3)', flex: 'none' }} />
+
+      <button
+        type="button"
+        onClick={onOpenTools}
+        title="AI tools"
+        style={{
+          display: 'flex', alignItems: 'center',
+          background: 'transparent', border: 'none',
+          padding: '11px 12px', cursor: 'pointer', color: '#fff',
+        }}
+      >
+        <ChevronIcon size={12} direction={toolsOpen ? 'down' : 'up'} />
+      </button>
+    </div>
   );
 });
 
@@ -91,7 +139,7 @@ export const AiPanel = React.memo(function AiPanel({
   llmProvider, llmOptions, onSelectLlmProvider,
   ai, fonts, taxonomy,
   selectedLayer, backgroundLayerId,
-  onRunAiAction, onCustomise, onApplyFontGlobally, onUseSuggestedFont, onRunTaxonomy,
+  onRunAiAction, onApplyFontGlobally, onUseSuggestedFont, onRunTaxonomy,
 }: {
   open: boolean;
   onClose: () => void;
@@ -104,7 +152,6 @@ export const AiPanel = React.memo(function AiPanel({
   selectedLayer: string | null;
   backgroundLayerId: string | null;
   onRunAiAction: (action?: AiActionType, query?: string) => void;
-  onCustomise: () => void;
   onApplyFontGlobally: (fontName: string) => void;
   onUseSuggestedFont: (font: string) => void;
   onRunTaxonomy: () => void;
@@ -168,21 +215,16 @@ export const AiPanel = React.memo(function AiPanel({
         </select>
       </div>
 
-      {/* Whole-image actions */}
+      {/* Whole-image results. Customise itself is run from the pill, not from here. */}
       <div style={sectionStyle}>
         <span style={{ ...sectionLabelStyle, display: 'block', marginBottom: 8 }}>This image</span>
-        <button
-          type="button"
-          onClick={onCustomise}
-          disabled={fonts.customiseLoading || fonts.imageFontsLoading || fonts.customiseDone}
-          style={secondaryButton(fonts.customiseLoading || fonts.imageFontsLoading || fonts.customiseDone)}
-        >
-          {fonts.customiseLoading && spinner}
-          {fonts.customiseLoading ? 'Analysing…' : fonts.customiseDone ? 'Customised' : 'Customise'}
-        </button>
-
-        {fonts.customiseFonts.length > 0 && (
-          <div style={{ marginTop: 10 }}>
+        {fonts.customiseLoading ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {spinner}
+            <span style={{ fontSize: 12, color: C.textMuted }}>Analysing…</span>
+          </div>
+        ) : fonts.customiseFonts.length > 0 ? (
+          <div>
             <label style={labelStyle}>Apply font globally</label>
             <select
               className="ed-input"
@@ -201,6 +243,12 @@ export const AiPanel = React.memo(function AiPanel({
               ))}
             </select>
           </div>
+        ) : (
+          <p style={{ margin: 0, fontSize: 11.5, color: C.textFaint, lineHeight: 1.5 }}>
+            {fonts.customiseDone
+              ? 'Customise found no fonts to apply.'
+              : 'Run Customise from the pill to detect text and suggest fonts.'}
+          </p>
         )}
       </div>
 

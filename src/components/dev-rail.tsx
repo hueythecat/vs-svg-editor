@@ -63,10 +63,14 @@ export function DevRail<S extends Sample>({ samples, activeSample, isLoading, on
       // reloads via fetch().text() when opened, exactly like a static sample src.
       const src = `data:image/svg+xml,${encodeURIComponent(data.svg)}`;
       const name = `vectorstock_${id}.svg`;
+      const sample: Sample = { label: title, name, src, edit };
       // Prepend so the newest extraction sits at the top of the previews. De-dupe by
       // name so re-selecting the same id refreshes rather than stacking duplicates.
-      setFetchedSamples((prev) => [{ label: title, name, src, edit }, ...prev.filter((s) => s.name !== name)]);
+      setFetchedSamples((prev) => [sample, ...prev.filter((s) => s.name !== name)]);
       setFetchStatus(null);
+      // Picking from the select opens the asset straight away — the preview card is
+      // there to come back to, not a second step before you can see it.
+      onOpenFetched?.(sample);
     } catch (err) {
       setFetchStatus(err instanceof Error ? err.message : 'Fetch failed');
     } finally {

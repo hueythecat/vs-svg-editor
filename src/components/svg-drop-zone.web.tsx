@@ -898,8 +898,9 @@ export function SvgDropZone() {
   const openRating = useCallback(() => { setRating(0); setRatingHover(0); setRatingOpen(true); }, []);
   const closeImageFonts = useCallback(() => setShowImageFonts(false), []);
   const closeAiPanel = useCallback(() => setAiPanelOpen(false), []);
-  // The AI pill: gated assets (edit === 0) get the upsell, everyone else the AI panel.
-  const onAiPillClick = useCallback(() => {
+  // The pill's caret opens the AI tools. Gated assets (edit === 0) get the upsell
+  // instead — the tools are AI features too, and runCustomise gates itself the same way.
+  const onAiToolsClick = useCallback(() => {
     if (activeSvg?.edit === 0) { setShowUpsell(true); return; }
     setAiPanelOpen((o) => !o);
   }, [activeSvg?.edit]);
@@ -2582,12 +2583,17 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                 selectedLayer={selectedLayer}
                 backgroundLayerId={backgroundLayerId}
                 onRunAiAction={runAiLayerAction as (action?: AiActionType, query?: string) => void}
-                onCustomise={runCustomise}
                 onApplyFontGlobally={applyFontGlobally}
                 onUseSuggestedFont={useSuggestedFont}
                 onRunTaxonomy={runTaxonomyAnalysis}
               />
-              <AiPill onClick={onAiPillClick} />
+              <AiPill
+                onCustomise={runCustomise}
+                onOpenTools={onAiToolsClick}
+                loading={customiseLoading}
+                done={customiseDone}
+                toolsOpen={aiPanelOpen}
+              />
             </>
           )}
         </>
