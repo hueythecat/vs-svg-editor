@@ -1698,10 +1698,28 @@ Return ONLY valid JSON, no markdown:
         });
       }
 
-      // Store suggested fonts (load them for preview) — deduped across all layers.
+      // Suggested fonts, deduped across all layers. Registered with addGoogleFont rather
+      // than just link-loaded, so they show up in the inspector's Font list and can be
+      // applied to any layer by hand.
       const validFonts = Array.from(new Set(allFonts.filter(Boolean))).slice(0, 6);
-      validFonts.forEach((f) => loadGoogleFontLink(f));
+      validFonts.forEach((f) => addGoogleFont(f));
       setCustomiseFonts(validFonts);
+
+      // The first suggestion is the pass's default: applied to every text field this run
+      // re-created, so they read as one typeface rather than a per-row guess, and it
+      // becomes the default for text layers added afterwards.
+      const primaryFont = validFonts[0] ?? '';
+      if (primaryFont) {
+        setTextForm((f) => ({ ...f, font: primaryFont }));
+        newTextLayers.forEach(({ id }) => {
+          const layerEl = doc.getElementById(id);
+          if (!layerEl) return;
+          const textEls = layerEl.localName.toLowerCase() === 'text'
+            ? [layerEl]
+            : Array.from(layerEl.querySelectorAll('text'));
+          textEls.forEach((t) => t.setAttribute('font-family', primaryFont));
+        });
+      }
 
       const content = new XMLSerializer().serializeToString(root);
       // The pass deletes elements (the outlined text it replaced); their layer rows have
