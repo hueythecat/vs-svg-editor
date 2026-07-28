@@ -29,13 +29,18 @@ interface DevRailProps<S extends Sample> {
   samples: ReadonlyArray<S>;
   activeSample: string | null;
   isLoading: boolean;
+  // Expanded state is owned by the parent so it can collapse the rail once artwork
+  // lands on the canvas — including for loads the rail didn't start (file drop, browse).
+  open: boolean;
+  onSetOpen: (open: boolean) => void;
   onOpenSample: (sample: S) => void;
   // Opens a download that was fetched and extracted at runtime (src is a data: URI).
   onOpenFetched?: (sample: Sample) => void;
 }
 
-export function DevRail<S extends Sample>({ samples, activeSample, isLoading, onOpenSample, onOpenFetched }: DevRailProps<S>) {
-  const [open, setOpen] = useState(false);
+export function DevRail<S extends Sample>({
+  samples, activeSample, isLoading, open, onSetOpen, onOpenSample, onOpenFetched,
+}: DevRailProps<S>) {
   const [selectedDownload, setSelectedDownload] = useState<string>('');
   const [fetchStatus, setFetchStatus] = useState<string | null>(null);
   const [fetching, setFetching] = useState(false);
@@ -172,7 +177,7 @@ export function DevRail<S extends Sample>({ samples, activeSample, isLoading, on
             </span>
             <button
               type="button"
-              onClick={() => setOpen(false)}
+              onClick={() => onSetOpen(false)}
               title="Collapse"
               style={{ border: 'none', background: 'transparent', color: C.devTextFaint, padding: 0, cursor: 'pointer', display: 'flex' }}
             >
@@ -229,7 +234,7 @@ export function DevRail<S extends Sample>({ samples, activeSample, isLoading, on
       ) : (
         <button
           type="button"
-          onClick={() => setOpen(true)}
+          onClick={() => onSetOpen(true)}
           title="Dev tools"
           style={{
             position: 'absolute', top: 16, left: 16, zIndex: 30,

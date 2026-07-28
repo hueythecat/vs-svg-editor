@@ -193,6 +193,7 @@ export function SvgDropZone() {
   const [selectedSubElId, setSelectedSubElId] = useState<string | null>(null);
   const [aiPanelOpen, setAiPanelOpen]         = useState(false);   // opened by the AI pill
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false); // "Revert changes?" overlay
+  const [devRailOpen, setDevRailOpen]           = useState(false); // dev rail expanded
   // Which LLM every AI action calls. Picking 'kimi' diverts each request to
   // /api/kimi, which re-shapes the same Anthropic-style body for Moonshot. Mirrored
   // into a ref so the AI callbacks below read the live choice, never a stale closure.
@@ -301,6 +302,9 @@ export function SvgDropZone() {
       // patterned background is part of the design, so it stays visible.
       // Kept as the baseline too, so starting this way doesn't read as "unsaved
       // changes" and Revert restores it rather than revealing the canvas.
+      // Artwork is on the canvas now — collapse the dev rail so it isn't sitting over
+      // the thing you just opened. Covers every load path, not just the rail's own.
+      setDevRailOpen(false);
       const bgId = detectBackgroundLayerId(content, layers);
       const hideCanvas = !!bgId && isPlainWhiteLayer(content, bgId);
       const defaultHidden = new Set(hideCanvas ? [bgId] : []);
@@ -2692,6 +2696,8 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
         samples={SAMPLES}
         activeSample={activeSample}
         isLoading={isLoading}
+        open={devRailOpen}
+        onSetOpen={setDevRailOpen}
         onOpenSample={openSample}
         onOpenFetched={openSample}
       />
