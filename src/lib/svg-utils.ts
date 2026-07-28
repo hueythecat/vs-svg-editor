@@ -334,9 +334,11 @@ export function detectBackgroundLayerId(content: string, layers: SvgLayer[]): st
   if (layers.length === 0) return null;
   const candidate = layers[0];
   const doc = new DOMParser().parseFromString(content, 'image/svg+xml');
-  const vb = (doc.documentElement.getAttribute('viewBox') ?? '').trim().split(/[\s,]+/).map(Number);
-  if (vb.length < 4) return null;
-  const viewBoxArea = vb[2] * vb[3];
+  const root = doc.documentElement;
+  const canvas = canvasSize(root);
+  if (!canvas) return null;
+  const [canvasW, canvasH] = canvas;
+  const viewBoxArea = canvasW * canvasH;
   const el = doc.getElementById(candidate.id);
   if (!el) return null;
 
@@ -368,7 +370,47 @@ export function detectBackgroundLayerId(content: string, layers: SvgLayer[]): st
   );
   if (children.length > 0 && children.length <= 6 && children.some(coversCanvas)) return candidate.id;
 
+  // Case 3: measure it. Real-world assets (the vectorstock downloads especially) draw
+  // their backdrop as a <path> or <polygon>, whose coverage can't be read off plain
+  // attributes — so fall back to a bbox measurement of the bottom layer.
+  try {
+    if (isFullCanvasLayer(root, candidate.id, canvasW, canvasH)) return candidate.id;
+  } catch {
+    /* measurement needs a live DOM; fall through when there isn't one */
+  }
+
   return null;
+}
+
+// Canvas dimensions from the root <svg>: viewBox first, then width/height attributes
+// (unit suffixes tolerated). Null when neither gives usable numbers.
+function canvasSize(root: Element): [number, number] | null {
+  const vb = (root.getAttribute('viewBox') ?? '').trim().split(/[\s,]+/).map(Number);
+  if (vb.length === 4 && vb[2] > 0 && vb[3] > 0) return [vb[2], vb[3]];
+  const w = parseFloat(root.getAttribute('width') ?? '');
+  const h = parseFloat(root.getAttribute('height') ?? '');
+  if (w > 0 && h > 0) return [w, h];
+  return null;
+}
+
+// Tags that actually paint something.
+const DRAWABLE_TAGS = new Set(['path', 'rect', 'circle', 'ellipse', 'polygon', 'polyline', 'line', 'text', 'image', 'use']);
+const DRAWABLE_SELECTOR = [...DRAWABLE_TAGS].join(',');
+
+// Drops layer entries whose element an edit has deleted — or left as an empty
+// container — so the element list can't keep rows pointing at nothing. The AI passes
+// remove elements wholesale (stripped text, removed artwork), and a <g> whose only
+// child was removed no longer draws anything even though the group itself survives.
+//
+// An empty <text> is deliberately still drawable: the editor supports a text layer with
+// no words yet, and that layer must stay selectable.
+export function pruneMissingLayers(doc: Document, layers: SvgLayer[]): SvgLayer[] {
+  return layers.filter((layer) => {
+    const el = doc.getElementById(layer.id);
+    if (!el) return false;
+    if (DRAWABLE_TAGS.has(el.localName.toLowerCase())) return true;
+    return !!el.querySelector(DRAWABLE_SELECTOR);
+  });
 }
 
 // True when a layer paints nothing but white — a plain white backdrop, as opposed to a

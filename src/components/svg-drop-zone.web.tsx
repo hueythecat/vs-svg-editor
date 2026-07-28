@@ -18,6 +18,7 @@ import {
   normalizeColor,
   parseSvg,
   parseViewBox,
+  pruneMissingLayers,
   resolveGradient,
   stripScripts,
   svgToBase64Png,
@@ -386,6 +387,21 @@ export function SvgDropZone() {
       if (next.has(id)) next.delete(id); else next.add(id);
       return next;
     });
+  }, []);
+
+  // After an edit deletes layers, drop the selection/visibility state that pointed at
+  // them: otherwise the overlay tracks an element that no longer exists and the export
+  // count still subtracts layers that have gone.
+  const dropSelectionOutside = useCallback((...groups: SvgLayer[][]) => {
+    const ids = new Set(groups.flat().map((l) => l.id));
+    const filterSet = (prev: Set<string>) => {
+      const next = new Set([...prev].filter((id) => ids.has(id)));
+      return next.size === prev.size ? prev : next;
+    };
+    setSelectedLayer((cur) => (cur && !ids.has(cur) ? null : cur));
+    setSelectedLayers(filterSet);
+    setHiddenLayers(filterSet);
+    setSelectedSubElId(null);
   }, []);
 
   // Map from layer id → sub-text children, for groups that contain multiple <text id="…"> elements
@@ -1688,10 +1704,14 @@ Return ONLY valid JSON, no markdown:
       setCustomiseFonts(validFonts);
 
       const content = new XMLSerializer().serializeToString(root);
+      // The pass deletes elements (the outlined text it replaced); their layer rows have
+      // to go with them, or the panel lists layers that no longer draw anything.
+      const kept = pruneMissingLayers(doc, activeSvg.layers);
       setActiveSvg((prev) => {
         if (!prev) return null;
-        return { ...prev, content, layers: newTextLayers.length > 0 ? [...prev.layers, ...newTextLayers] : prev.layers };
+        return { ...prev, content, layers: [...kept, ...newTextLayers] };
       });
+      dropSelectionOutside(kept, newTextLayers);
       if (newTextLayers.length > 0) { setSelectedLayer(newTextLayers[0].id); setSelectedSubElId(null); }
 
     } catch (err) {
@@ -2008,7 +2028,9 @@ Respond with ONLY a valid JSON object — no markdown, no code fences:
         for (const sid of removeIds) rstIdMap.get(sid)?.parentNode?.removeChild(rstIdMap.get(sid)!);
         for (const [, el] of rstIdMap) el.removeAttribute('data-ai-idx');
         const contentRST = new XMLSerializer().serializeToString(doc.documentElement);
-        setActiveSvg((prev) => prev ? { ...prev, content: contentRST } : null);
+        const keptRST = pruneMissingLayers(doc, activeSvg.layers);
+        setActiveSvg((prev) => prev ? { ...prev, content: contentRST, layers: keptRST } : null);
+        dropSelectionOutside(keptRST, []);
         setShowRemoveTextInput(false);
         setRemoveTextQuery('');
         return;
@@ -2169,14 +2191,13 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
       }
 
       const content = new XMLSerializer().serializeToString(doc.documentElement);
+      // Same as the customise pass: stripped elements take their layer rows with them.
+      const kept = pruneMissingLayers(doc, activeSvg.layers);
       setActiveSvg((prev) => {
         if (!prev) return null;
-        return {
-          ...prev,
-          content,
-          layers: newTextLayers.length > 0 ? [...prev.layers, ...newTextLayers] : prev.layers,
-        };
+        return { ...prev, content, layers: [...kept, ...newTextLayers] };
       });
+      dropSelectionOutside(kept, newTextLayers);
       if (newTextLayers.length > 0) { setSelectedLayer(newTextLayers[0].id); setSelectedSubElId(null); }
 
     } catch (err) {
