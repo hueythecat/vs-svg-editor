@@ -8,17 +8,15 @@ import { PlusIcon } from './svg-icons';
 // The floating "ELEMENTS" panel, bottom-left (handoff §1.7): a count header with an
 // add-text affordance, over the drag-to-reorder layer list.
 export const LayersPanel = React.memo(function LayersPanel({
-  layers, hiddenLayers, selectedLayers, backgroundLayerId, textLayerIds, subLayerMap, selectedSubElId,
+  layers, hiddenLayers, selectedLayers, backgroundLayerId, textLayerIds,
   onAddTextLayer, onReorderLayers, onSetSelectedLayers, onSetSelectedLayer, onSelectOne,
-  onToggleLayer, onDuplicateLayer, onDeleteLayer, onSetSelectedSubElId,
+  onToggleLayer, onDuplicateLayer, onDeleteLayer,
 }: {
   layers: SvgLayer[];
   hiddenLayers: Set<string>;
   selectedLayers: Set<string>;
   backgroundLayerId: string | null;
   textLayerIds: Set<string>;
-  subLayerMap: Map<string, Array<{ id: string; label: string }>>;
-  selectedSubElId: string | null;
   onAddTextLayer: () => void;
   onReorderLayers: (fromId: string, toId: string, before: boolean) => void;
   onSetSelectedLayers: Dispatch<SetStateAction<Set<string>>>;
@@ -27,7 +25,6 @@ export const LayersPanel = React.memo(function LayersPanel({
   onToggleLayer: (id: string) => void;
   onDuplicateLayer: (id: string) => void;
   onDeleteLayer: (id: string) => void;
-  onSetSelectedSubElId: Dispatch<SetStateAction<string | null>>;
 }) {
   return (
     <div
@@ -71,8 +68,6 @@ export const LayersPanel = React.memo(function LayersPanel({
         selectedLayers={selectedLayers}
         backgroundLayerId={backgroundLayerId}
         textLayerIds={textLayerIds}
-        subLayerMap={subLayerMap}
-        selectedSubElId={selectedSubElId}
         onReorderLayers={onReorderLayers}
         onSetSelectedLayers={onSetSelectedLayers}
         onSetSelectedLayer={onSetSelectedLayer}
@@ -80,7 +75,6 @@ export const LayersPanel = React.memo(function LayersPanel({
         onToggleLayer={onToggleLayer}
         onDuplicateLayer={onDuplicateLayer}
         onDeleteLayer={onDeleteLayer}
-        onSetSelectedSubElId={onSetSelectedSubElId}
       />
     </div>
   );

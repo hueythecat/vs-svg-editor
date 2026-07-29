@@ -4,6 +4,8 @@ import {
   type ActiveSvg,
   type SvgLayer,
   type TaxonomyGroup,
+  type TextRow,
+  appendTextRowLayers,
   applyTranslateDelta,
   bboxInRootSpace,
   collectLayerGradientIds,
@@ -11,7 +13,6 @@ import {
   detectBackgroundLayerId,
   extractLayerColors,
   filterOutBackgroundIds,
-  findClickedSubText,
   hashString,
   isFullCanvasLayer,
   isPlainWhiteLayer,
@@ -25,6 +26,8 @@ import {
   withOffscreenSvg
 } from '@/lib/svg-utils';
 import { C, EDITOR_CSS, FONT_STACK, SHADOW } from '@/lib/design-tokens';
+import { SHOW_DEV_UI } from '@/lib/env';
+import { readAiCache, writeAiCache } from '@/lib/ai-cache';
 import type { AiActionType, LlmProvider } from './editor-types';
 import { LLM_OPTIONS } from './editor-types';
 import { LayersPanel } from './editor-layers-panel';
@@ -68,6 +71,21 @@ const ABORT_REASONS = [
   'Took too long to export',
   'Made a mistake — starting over',
 ];
+
+// The smallest root-space box containing every one of `ids`. It frames a multi-layer
+// selection and supplies the shared pivot that multi-layer rotate/scale turn about, so
+// the selection transforms as one rigid group. Null when nothing measurable is left.
+const unionBoxInRootSpace = (svgEl: SVGSVGElement, ids: string[]): DOMRect | null => {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  ids.forEach((id) => {
+    const el = svgEl.querySelector(`#${CSS.escape(id)}`) as SVGGraphicsElement | null;
+    const b = el ? bboxInRootSpace(svgEl, el) : null;
+    if (!b) return;
+    x0 = Math.min(x0, b.x);              y0 = Math.min(y0, b.y);
+    x1 = Math.max(x1, b.x + b.width);    y1 = Math.max(y1, b.y + b.height);
+  });
+  return Number.isFinite(x0) ? new DOMRect(x0, y0, x1 - x0, y1 - y0) : null;
+};
 
 // Rewrites a cloned element's id and every descendant id to a fresh namespace, and fixes
 // intra-subtree references (href / xlink:href / url(#…)) so a duplicated layer doesn't
@@ -151,18 +169,18 @@ export function SvgDropZone() {
     baseTransforms: Record<string, string>;
   } | null>(null);
   const [canvasRotate, setCanvasRotate] = useState<{
-    layerId: string;
-    cx: number; cy: number;              // rotation centre in SVG root space
+    layerIds: string[];
+    cx: number; cy: number;              // rotation centre in SVG root space, shared by every layer
     startClientX: number; startClientY: number;
     startAngle: number;                  // pointer angle at grab, degrees
-    baseTransform: string;
+    baseTransforms: Record<string, string>;
   } | null>(null);
   const [canvasScale, setCanvasScale] = useState<{
-    layerId: string;
-    cx: number; cy: number;              // scale centre in SVG root space
+    layerIds: string[];
+    cx: number; cy: number;              // scale centre in SVG root space, shared by every layer
     startClientX: number; startClientY: number;
     startDist: number;                   // pointer distance from centre at grab (root units)
-    baseTransform: string;
+    baseTransforms: Record<string, string>;
   } | null>(null);
   const [ratingOpen, setRatingOpen]   = useState(false);   // export satisfaction prompt
   const [rating, setRating]           = useState(0);        // chosen star count (1–5)
@@ -190,7 +208,6 @@ export function SvgDropZone() {
   const [removeTextQuery, setRemoveTextQuery] = useState('');
   const [showRemoveTextInput, setShowRemoveTextInput] = useState(false);
   const [textCheckResult, setTextCheckResult] = useState<{ heading: string; subheading: string } | null>(null);
-  const [selectedSubElId, setSelectedSubElId] = useState<string | null>(null);
   const [aiPanelOpen, setAiPanelOpen]         = useState(false);   // opened by the AI pill
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false); // "Revert changes?" overlay
   const [devRailOpen, setDevRailOpen]           = useState(false); // dev rail expanded
@@ -237,7 +254,6 @@ export function SvgDropZone() {
     const data = await res.json() as { content?: Array<{ text?: string }> };
     return stripJsonFence(data.content?.[0]?.text ?? '');
   };
-  const aiCacheRef              = useRef<Map<string, string>>(new Map());
   const dragMovedRef            = useRef(false);
   // An open colour-picker session: the colour being replaced and the document as it
   // was when the picker opened. Live dragging replays from that baseline, so the whole
@@ -253,7 +269,6 @@ export function SvgDropZone() {
   const svgCanvasRef    = useRef<HTMLDivElement>(null);
   const textContentRef  = useRef<HTMLInputElement>(null);
   const overlayRef      = useRef<HTMLDivElement>(null);
-  const subOverlayRef   = useRef<HTMLDivElement>(null);
   const sizeBadgeRef    = useRef<HTMLSpanElement>(null);
   // Shown when an AI action is invoked on a gated asset (edit === 0).
   const [showUpsell, setShowUpsell] = useState(false);
@@ -370,7 +385,6 @@ export function SvgDropZone() {
   const selectOne = useCallback((id: string | null) => {
     setSelectedLayer(id);
     setSelectedLayers(id ? new Set([id]) : new Set());
-    setSelectedSubElId(null);
   }, []);
 
   const clear = useCallback(() => {
@@ -380,7 +394,6 @@ export function SvgDropZone() {
     setDefaultHiddenLayers(new Set());
     setSelectedLayer(null);
     setSelectedLayers(new Set());
-    setSelectedSubElId(null);
   }, [revokePrev]);
 
   // ── Layer toggle ───────────────────────────────────────────────────────────
@@ -405,27 +418,7 @@ export function SvgDropZone() {
     setSelectedLayer((cur) => (cur && !ids.has(cur) ? null : cur));
     setSelectedLayers(filterSet);
     setHiddenLayers(filterSet);
-    setSelectedSubElId(null);
   }, []);
-
-  // Map from layer id → sub-text children, for groups that contain multiple <text id="…"> elements
-  const subLayerMap = useMemo(() => {
-    const map = new Map<string, { id: string; label: string }[]>();
-    if (!activeSvg) return map;
-    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
-    for (const layer of activeSvg.layers) {
-      const el = doc.getElementById(layer.id);
-      if (!el || el.tagName.toLowerCase() !== 'g') continue;
-      const texts = Array.from(el.querySelectorAll('text')).filter((c) => c.id);
-      if (texts.length > 1) {
-        map.set(layer.id, texts.map((c) => ({
-          id: c.id,
-          label: c.textContent?.trim() || c.id,
-        })));
-      }
-    }
-    return map;
-  }, [activeSvg?.content]);
 
   // Which layers render as text — drives the element list's type icon (§1.7).
   const textLayerIds = useMemo(() => {
@@ -440,10 +433,11 @@ export function SvgDropZone() {
     return ids;
   }, [activeSvg?.content]);
 
-  // Click on canvas: walk up from the clicked element to find its layer. When the
-  // clicked layer holds text (and the click wasn't on the drag overlay), focus the
-  // side-panel text input so keyboard input edits it immediately. For a plain group
-  // with several <text> children, target the specific one that was clicked.
+  // Click on canvas: walk up from the clicked element to find its layer. Shift-click
+  // adds/removes it from the selection, exactly like shift-clicking its row in the
+  // element list, so a multi-layer selection can be built either way. A plain click
+  // replaces the selection; when the clicked layer holds text it also focuses the
+  // side-panel text input so keyboard input edits it immediately.
   const handleCanvasClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (!activeSvg?.layers.length) return;
     const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
@@ -454,17 +448,22 @@ export function SvgDropZone() {
     let el = e.target as Element | null;
     while (el && el !== (svgEl as Element)) {
       if (el.parentElement === (svgEl as Element) && layerIds.has(el.id)) {
-        selectOne(el.id);
+        const id = el.id;
+        if (e.shiftKey) {
+          setSelectedLayers((prev) => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id); else next.add(id);
+            return next;
+          });
+          setSelectedLayer(id);
+          return;   // building a selection, not editing — never steal focus to the text input
+        }
+        selectOne(id);
         const isText =
           el.getAttribute('data-text-layer') === '1' ||
           el.tagName.toLowerCase() === 'text' ||
           !!el.querySelector('text');
         if (isText) {
-          // selectOne clears any sub-element; re-target the clicked <text> child.
-          if (el.getAttribute('data-text-layer') !== '1' && el.tagName.toLowerCase() !== 'text') {
-            const found = findClickedSubText(el, e.target);
-            if (found?.id) setSelectedSubElId(found.id);
-          }
           // Focus the inspector's Words input so typing edits the text in place. Place
           // the caret at the end (rather than selecting all) so typing appends.
           requestAnimationFrame(() => {
@@ -546,14 +545,18 @@ export function SvgDropZone() {
       const angle = Math.atan2(cur.y - canvasRotate.cy, cur.x - canvasRotate.cx) * 180 / Math.PI;
       let delta = angle - canvasRotate.startAngle;
       if (e.shiftKey) delta = Math.round(delta / 15) * 15;   // snap to 15° with Shift
-      const layerEl = svgEl.querySelector(`#${CSS.escape(canvasRotate.layerId)}`);
-      if (layerEl) {
-        layerEl.setAttribute(
-          'transform',
-          `rotate(${delta.toFixed(2)}, ${canvasRotate.cx}, ${canvasRotate.cy}) ${canvasRotate.baseTransform}`.trim(),
-        );
-      }
-      // Recompute the overlay from the live element so it tracks the rotation.
+      // Every layer rotates about the SHARED centre, so a multi-selection turns as one
+      // rigid group rather than each layer spinning on its own axis.
+      canvasRotate.layerIds.forEach((id) => {
+        const layerEl = svgEl.querySelector(`#${CSS.escape(id)}`);
+        if (layerEl) {
+          layerEl.setAttribute(
+            'transform',
+            `rotate(${delta.toFixed(2)}, ${canvasRotate.cx}, ${canvasRotate.cy}) ${canvasRotate.baseTransforms[id]}`.trim(),
+          );
+        }
+      });
+      // Recompute the overlay from the live elements so it tracks the rotation.
       positionOverlayRef.current();
     };
 
@@ -594,14 +597,17 @@ export function SvgDropZone() {
       const cur = pt.matrixTransform(svgEl.getScreenCTM()!.inverse());
       const dist = Math.hypot(cur.x - canvasScale.cx, cur.y - canvasScale.cy);
       const s = Math.max(dist / canvasScale.startDist, 0.05);   // uniform, guarded away from 0
-      const layerEl = svgEl.querySelector(`#${CSS.escape(canvasScale.layerId)}`);
-      if (layerEl) {
-        // Scale about the layer's centre, then apply the original transform.
-        layerEl.setAttribute(
-          'transform',
-          `translate(${canvasScale.cx}, ${canvasScale.cy}) scale(${s.toFixed(4)}) translate(${-canvasScale.cx}, ${-canvasScale.cy}) ${canvasScale.baseTransform}`.trim(),
-        );
-      }
+      // Scale about the SHARED centre, then apply each layer's original transform: the
+      // selection grows as one block, so the gaps between layers scale with them.
+      canvasScale.layerIds.forEach((id) => {
+        const layerEl = svgEl.querySelector(`#${CSS.escape(id)}`);
+        if (layerEl) {
+          layerEl.setAttribute(
+            'transform',
+            `translate(${canvasScale.cx}, ${canvasScale.cy}) scale(${s.toFixed(4)}) translate(${-canvasScale.cx}, ${-canvasScale.cy}) ${canvasScale.baseTransforms[id]}`.trim(),
+          );
+        }
+      });
       positionOverlayRef.current();
     };
 
@@ -642,22 +648,15 @@ export function SvgDropZone() {
     [activeSvg?.src],
   );
 
-  // The selection overlay's first/primary layer drives its position. Hide the
-  // overlay entirely when that layer is the locked background layer.
-  const selectionLayerId = selectedLayers.size ? [...selectedLayers][0] : null;
-  const showSelectionOverlay = !!selectionLayerId && selectionLayerId !== backgroundLayerId;
-
-  // Whether the primary selected layer holds text — scaling is offered only for
-  // non-text artwork (text should be resized via font-size, not a scale transform).
-  const selectionIsTextLayer = useMemo(() => {
-    if (!activeSvg || !selectionLayerId) return false;
-    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
-    const el = doc.getElementById(selectionLayerId);
-    if (!el) return false;
-    return el.getAttribute('data-text-layer') === '1'
-      || el.tagName.toLowerCase() === 'text'
-      || !!el.querySelector('text');
-  }, [activeSvg?.content, selectionLayerId]);
+  // Every layer the overlay frames and the handles act on. The background layer is
+  // locked, so it's filtered out rather than dragged along with the rest.
+  const selectionIds = useMemo(
+    () => [...selectedLayers].filter((id) => id !== backgroundLayerId),
+    [selectedLayers, backgroundLayerId],
+  );
+  // The primary layer — drives the single-selection overlay's rotated frame.
+  const selectionLayerId = selectionIds[0] ?? null;
+  const showSelectionOverlay = selectionIds.length > 0;
 
   // ── Selection overlay (HTML div, direct DOM manipulation) ───────────────────
   // Pure ref manipulation — no state, no re-renders. React only manages the
@@ -671,11 +670,9 @@ export function SvgDropZone() {
   // to match. Called from the layout effect and live during drag/rotate so the box
   // tracks the item continuously.
   const positionSelectionOverlay = useCallback(() => {
-    const overlay    = overlayRef.current;
-    const subOverlay = subOverlayRef.current;
+    const overlay = overlayRef.current;
 
     if (overlay) overlay.style.transform = '';
-    if (subOverlay) subOverlay.style.display = 'none';
 
     if (!showSelectionOverlay || !selectionLayerId || !overlay) return;
 
@@ -692,6 +689,35 @@ export function SvgDropZone() {
       const canvasRect = canvasEl.getBoundingClientRect();
       const offX = -canvasRect.left + canvasEl.scrollLeft;
       const offY = -canvasRect.top  + canvasEl.scrollTop;
+
+      // Multi-selection: one axis-aligned box around the whole group. Deliberately NOT
+      // rotated — once the selected layers carry different transforms there is no single
+      // angle the frame could take, so it stays upright and the handles work off it.
+      if (selectionIds.length > 1) {
+        const box = unionBoxInRootSpace(svgEl, selectionIds);
+        const rootCtm = svgEl.getScreenCTM();
+        if (!box || !rootCtm) return;
+        const map = (rx: number, ry: number) => {
+          const p = svgEl.createSVGPoint();
+          p.x = rx; p.y = ry;
+          const s = p.matrixTransform(rootCtm);
+          return { x: s.x + offX, y: s.y + offY };
+        };
+        const TL = map(box.x, box.y);
+        const BR = map(box.x + box.width, box.y + box.height);
+        const width  = BR.x - TL.x + pad * 2;
+        const height = BR.y - TL.y + pad * 2;
+
+        overlay.style.transform = '';
+        overlay.style.left   = `${TL.x - pad}px`;
+        overlay.style.top    = `${TL.y - pad}px`;
+        overlay.style.width  = `${width}px`;
+        overlay.style.height = `${height}px`;
+        if (sizeBadgeRef.current) {
+          sizeBadgeRef.current.textContent = `${Math.round(width)} × ${Math.round(height)}`;
+        }
+        return;
+      }
 
       // Try the tight, transform-aware box first.
       const ctm = layerEl.getScreenCTM?.();
@@ -728,32 +754,6 @@ export function SvgDropZone() {
           sizeBadgeRef.current.textContent = `${Math.round(width)} × ${Math.round(height)}`;
         }
 
-        // Sub-layer highlight — mapped into the overlay's rotated frame.
-        if (subOverlay && selectedSubElId) {
-          const subEl  = svgEl.querySelector(`#${CSS.escape(selectedSubElId)}`) as SVGGraphicsElement | null;
-          const subCtm = subEl?.getScreenCTM?.();
-          let subBox: { x: number; y: number; w: number; h: number } | null = null;
-          try { const bb = subEl?.getBBox(); if (bb) subBox = { x: bb.x, y: bb.y, w: bb.width, h: bb.height }; } catch { /* ignore */ }
-          if (subEl && subCtm && subBox) {
-            const smap = (lx: number, ly: number) => {
-              const p = svgEl.createSVGPoint();
-              p.x = lx; p.y = ly;
-              const s = p.matrixTransform(subCtm);
-              return { x: s.x + offX, y: s.y + offY };
-            };
-            const S0 = smap(subBox.x, subBox.y);
-            const S1 = smap(subBox.x + subBox.w, subBox.y);
-            const S3 = smap(subBox.x, subBox.y + subBox.h);
-            // Express S0 in the overlay's local (un-rotated) frame.
-            const dx = S0.x - P0.x, dy = S0.y - P0.y;
-            const cos = Math.cos(-theta), sin = Math.sin(-theta);
-            subOverlay.style.display = 'block';
-            subOverlay.style.left    = `${dx * cos - dy * sin}px`;
-            subOverlay.style.top     = `${dx * sin + dy * cos}px`;
-            subOverlay.style.width   = `${Math.hypot(S1.x - S0.x, S1.y - S0.y)}px`;
-            subOverlay.style.height  = `${Math.hypot(S3.x - S0.x, S3.y - S0.y)}px`;
-          }
-        }
         return;
       }
 
@@ -785,7 +785,7 @@ export function SvgDropZone() {
     } catch {
       // matrixTransform / getBBox can throw if the element is detached
     }
-  }, [showSelectionOverlay, selectionLayerId, selectedSubElId, backgroundLayerId]);
+  }, [showSelectionOverlay, selectionLayerId, selectionIds, backgroundLayerId]);
 
   // Keep a live ref so the drag/rotate window listeners can reposition without
   // being torn down and recreated on every render.
@@ -935,48 +935,47 @@ export function SvgDropZone() {
     });
   }, []);
 
-  // mousedown on canvas: drag any selected non-background layer
+  // Snapshots the current transform of every selected layer, so a gesture can replay
+  // itself from the grab state on each mousemove instead of stacking transforms.
+  const captureBaseTransforms = useCallback((svgEl: SVGSVGElement) => {
+    const baseTransforms: Record<string, string> = {};
+    selectionIds.forEach((id) => {
+      const layerEl = svgEl.querySelector(`#${CSS.escape(id)}`);
+      if (layerEl) baseTransforms[id] = layerEl.getAttribute('transform') ?? '';
+    });
+    return baseTransforms;
+  }, [selectionIds]);
+
+  // mousedown on canvas: drag every selected non-background layer
   const handleDragHandleMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     e.stopPropagation();
-    if (!selectedLayers.size || !activeSvg?.layers.length) return;
+    if (!selectionIds.length || !activeSvg?.layers.length) return;
     const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
     if (!svgEl) return;
-
-    const draggableIds = [...selectedLayers].filter((id) => id !== backgroundLayerId);
-    if (!draggableIds.length) return;
 
     const pt = svgEl.createSVGPoint();
     pt.x = e.clientX; pt.y = e.clientY;
     const svgPt = pt.matrixTransform(svgEl.getScreenCTM()!.inverse());
     dragMovedRef.current = false;
 
-    const baseTransforms: Record<string, string> = {};
-    draggableIds.forEach((id) => {
-      const layerEl = svgEl.querySelector(`#${CSS.escape(id)}`);
-      if (layerEl) baseTransforms[id] = layerEl.getAttribute('transform') ?? '';
-    });
-
     snapshotForUndo(activeSvg.content, activeSvg.layers);
     setCanvasDrag({
-      layerIds: draggableIds,
+      layerIds: selectionIds,
       startClientX: e.clientX, startClientY: e.clientY,
       startSvgX: svgPt.x,     startSvgY: svgPt.y,
-      baseTransforms,
+      baseTransforms: captureBaseTransforms(svgEl),
     });
-  }, [activeSvg, selectedLayers, backgroundLayerId, snapshotForUndo]);
+  }, [activeSvg, selectionIds, captureBaseTransforms, snapshotForUndo]);
 
-  // mousedown on rotate handle: rotate the single selected non-background layer
+  // mousedown on rotate handle: rotate every selected non-background layer about the
+  // selection's shared centre
   const handleRotateHandleMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     e.stopPropagation();
-    if (selectedLayers.size !== 1 || !activeSvg?.layers.length) return;
-    const id = [...selectedLayers][0];
-    if (id === backgroundLayerId) return;
+    if (!selectionIds.length || !activeSvg?.layers.length) return;
     const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
     if (!svgEl) return;
-    const layerEl = svgEl.querySelector(`#${CSS.escape(id)}`) as SVGGraphicsElement | null;
-    if (!layerEl) return;
 
-    const box = bboxInRootSpace(svgEl, layerEl);
+    const box = unionBoxInRootSpace(svgEl, selectionIds);
     if (!box) return;
     const cx = box.x + box.width / 2;
     const cy = box.y + box.height / 2;
@@ -989,26 +988,23 @@ export function SvgDropZone() {
 
     snapshotForUndo(activeSvg.content, activeSvg.layers);
     setCanvasRotate({
-      layerId: id,
+      layerIds: selectionIds,
       cx, cy,
       startClientX: e.clientX, startClientY: e.clientY,
       startAngle,
-      baseTransform: layerEl.getAttribute('transform') ?? '',
+      baseTransforms: captureBaseTransforms(svgEl),
     });
-  }, [activeSvg, selectedLayers, backgroundLayerId, snapshotForUndo]);
+  }, [activeSvg, selectionIds, captureBaseTransforms, snapshotForUndo]);
 
-  // mousedown on scale handle: uniformly scale the single selected non-text layer
+  // mousedown on scale handle: uniformly scale every selected non-background layer
+  // about the selection's shared centre
   const handleScaleHandleMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     e.stopPropagation();
-    if (selectedLayers.size !== 1 || !activeSvg?.layers.length) return;
-    const id = [...selectedLayers][0];
-    if (id === backgroundLayerId) return;
+    if (!selectionIds.length || !activeSvg?.layers.length) return;
     const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
     if (!svgEl) return;
-    const layerEl = svgEl.querySelector(`#${CSS.escape(id)}`) as SVGGraphicsElement | null;
-    if (!layerEl) return;
 
-    const box = bboxInRootSpace(svgEl, layerEl);
+    const box = unionBoxInRootSpace(svgEl, selectionIds);
     if (!box) return;
     const cx = box.x + box.width / 2;
     const cy = box.y + box.height / 2;
@@ -1022,13 +1018,13 @@ export function SvgDropZone() {
 
     snapshotForUndo(activeSvg.content, activeSvg.layers);
     setCanvasScale({
-      layerId: id,
+      layerIds: selectionIds,
       cx, cy,
       startClientX: e.clientX, startClientY: e.clientY,
       startDist,
-      baseTransform: layerEl.getAttribute('transform') ?? '',
+      baseTransforms: captureBaseTransforms(svgEl),
     });
-  }, [activeSvg, selectedLayers, backgroundLayerId, snapshotForUndo]);
+  }, [activeSvg, selectionIds, captureBaseTransforms, snapshotForUndo]);
 
   // ── Selected text layer properties ────────────────────────────────────────
 
@@ -1043,20 +1039,6 @@ export function SvgDropZone() {
   const selectedTextProps = useMemo(() => {
     if (!activeSvg) return null;
     const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
-
-    if (selectedSubElId) {
-      const textEl = doc.getElementById(selectedSubElId);
-      if (!textEl || textEl.tagName.toLowerCase() !== 'text') return null;
-      return {
-        content: textEl.textContent ?? '',
-        font:    textEl.getAttribute('font-family') ?? 'Arial',
-        size:    Number(textEl.getAttribute('font-size') ?? 48),
-        weight:  Number(textEl.getAttribute('font-weight') ?? 400),
-        color:   textEl.getAttribute('fill') ?? '#000000',
-        curve:   null as number | null,
-        letterSpacing: parseFloat((textEl.getAttribute('letter-spacing') ?? '0').replace('em', '')) || 0,
-      };
-    }
 
     if (!selectedLayer) return null;
     const el = doc.getElementById(selectedLayer);
@@ -1076,7 +1058,7 @@ export function SvgDropZone() {
       curve:         isGroup ? Number(el.getAttribute('data-curve') ?? 0) : null as number | null,
       letterSpacing: parseFloat((textEl.getAttribute('letter-spacing') ?? '0').replace('em', '')) || 0,
     };
-  }, [selectedLayer, selectedSubElId, activeSvg?.content]);
+  }, [selectedLayer, activeSvg?.content]);
 
   // An empty text layer renders no geometry, so clicks inside its placeholder
   // selection box fall through to the background. Flag it so the overlay can
@@ -1090,23 +1072,6 @@ export function SvgDropZone() {
       textEditSnappedRef.current = true;
     }
     const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
-
-    if (selectedSubElId) {
-      const textEl = doc.getElementById(selectedSubElId);
-      if (!textEl) return;
-      if (attrs.content !== undefined) textEl.textContent = attrs.content;
-      if (attrs.font    !== undefined) textEl.setAttribute('font-family', attrs.font);
-      if (attrs.size    !== undefined) textEl.setAttribute('font-size', String(attrs.size));
-      if (attrs.weight  !== undefined) textEl.setAttribute('font-weight', String(attrs.weight));
-      if (attrs.color   !== undefined) textEl.setAttribute('fill', attrs.color);
-      if (attrs.letterSpacing !== undefined) {
-        if (attrs.letterSpacing === 0) textEl.removeAttribute('letter-spacing');
-        else textEl.setAttribute('letter-spacing', `${attrs.letterSpacing}em`);
-      }
-      const content = new XMLSerializer().serializeToString(doc.documentElement);
-      setActiveSvg((prev) => prev ? { ...prev, content } : null);
-      return;
-    }
 
     if (!selectedLayer) return;
     const el = doc.getElementById(selectedLayer);
@@ -1230,7 +1195,7 @@ export function SvgDropZone() {
         : prev.layers;
       return { ...prev, content, layers };
     });
-  }, [selectedLayer, selectedSubElId, activeSvg, snapshotForUndo]);
+  }, [selectedLayer, activeSvg, snapshotForUndo]);
 
   // Toggle a suggested font: deselect if already selected, else apply it to the
   // selected text layer (or the pending text-form default when nothing is selected).
@@ -1329,10 +1294,10 @@ export function SvgDropZone() {
     const newLayer = { id, label: textContent };
     setActiveSvg((prev) => (prev ? { ...prev, content, layers: [...prev.layers, newLayer] } : null));
     // Select it outright — the inspector switches to the type form for the new layer.
-    setSelectedLayer(id); setSelectedLayers(new Set([id])); setSelectedSubElId(null);
+    setSelectedLayer(id); setSelectedLayers(new Set([id]));
   }, [activeSvg, textForm, snapshotForUndo]);
 
-  // ── Center all layers to canvas horizontal midpoint ──────────────────────
+  // ── Center to canvas horizontal midpoint ─────────────────────────────────
 
   const centerLayersToCanvas = useCallback(() => {
     if (!activeSvg) return;
@@ -1347,17 +1312,35 @@ export function SvgDropZone() {
     if (vb.length < 4) return;
     const canvasCenterX = vb[0] + vb[2] / 2;
 
+    // Which layers move, and by how far.
+    const shifts: { id: string; dx: number }[] = [];
+    if (selectionIds.length > 0) {
+      // With a selection, Center acts on it and nothing else. Several layers move as
+      // one block: the union box's midpoint goes to the canvas midpoint and every
+      // selected layer shifts by that SAME delta, so the spacing between them survives
+      // — centring each one individually would stack them all on the midline. For a
+      // single layer the union is just its own box, so it centres itself.
+      const box = unionBoxInRootSpace(svgEl, selectionIds);
+      if (!box) return;
+      const dx = canvasCenterX - (box.x + box.width / 2);
+      selectionIds.forEach((id) => shifts.push({ id, dx }));
+    } else {
+      // Nothing selected: every layer is centred on its own.
+      activeSvg.layers.forEach(({ id }) => {
+        if (id === backgroundLayerId) return;
+        const liveEl = svgEl.getElementById(id);
+        if (!liveEl) return;
+        const r = liveEl.getBoundingClientRect();
+        const pt = svgEl.createSVGPoint();
+        pt.x = r.left + r.width / 2;
+        pt.y = r.top + r.height / 2;
+        const center = pt.matrixTransform(inv);
+        shifts.push({ id, dx: canvasCenterX - center.x });
+      });
+    }
+
     let changed = false;
-    activeSvg.layers.forEach(({ id }) => {
-      if (id === backgroundLayerId) return;
-      const liveEl = svgEl.getElementById(id);
-      if (!liveEl) return;
-      const r = liveEl.getBoundingClientRect();
-      const pt = svgEl.createSVGPoint();
-      pt.x = r.left + r.width / 2;
-      pt.y = r.top + r.height / 2;
-      const center = pt.matrixTransform(inv);
-      const dx = canvasCenterX - center.x;
+    shifts.forEach(({ id, dx }) => {
       if (Math.abs(dx) < 0.5) return;
       const docEl = doc.getElementById(id);
       if (!docEl) return;
@@ -1370,7 +1353,7 @@ export function SvgDropZone() {
     snapshotForUndo(activeSvg.content, activeSvg.layers);
     const content = new XMLSerializer().serializeToString(doc.documentElement);
     setActiveSvg((prev) => (prev ? { ...prev, content } : null));
-  }, [activeSvg, backgroundLayerId, snapshotForUndo]);
+  }, [activeSvg, selectionIds, backgroundLayerId, snapshotForUndo]);
 
   // ── Match every layer's rotation to the selected layer ────────────────────
   // Reads the selected layer's rotation (relative to the SVG root) and rotates
@@ -1523,12 +1506,6 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
       const defsEl = doc.querySelector('defs');
       const defsXml = defsEl ? new XMLSerializer().serializeToString(defsEl) : '';
 
-      type TextRow = {
-        yFraction: number; xFraction: number;
-        font: string; sizeFraction: number;
-        weight: number; color: string; content: string;
-        letterSpacing: number;
-      };
       type CustomiseResult = { hasText: boolean; rows: TextRow[]; removeIds: string[]; fonts: string[] };
 
       const SHAPE_TAGS = new Set(['path', 'g', 'circle', 'rect', 'ellipse', 'polygon', 'polyline', 'line', 'text', 'tspan', 'use']);
@@ -1600,10 +1577,23 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
       const contentSvg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="${viewBox}">${defsXml}${contentXml}</svg>`;
       const pngBase64 = await svgToBase64Png(contentSvg, Math.round(vw * scale), Math.round(vh * scale));
 
-      setAiStatusMsg('Reviewing vector…');
-      const rawText = await callLlmVision({
-        model: TEXT_PARSE_MODEL, maxTokens: 8192, pngBase64, tag: 'customise',
-        prompt: `Analyze this SVG image and its source.
+      // Dev-only cache. The marked source is derived deterministically from the document,
+      // so reverting and running again — or reloading mid-iteration — reproduces the
+      // exact key and reuses the stored answer instead of paying for the call twice. The
+      // removeIds in that answer address the data-ai-idx marks in contentXml, which is
+      // why the hash is taken over contentXml rather than the raw artwork.
+      const cacheKey = `customise-v1:${TEXT_PARSE_MODEL}:${hashString(contentXml)}`;
+      let parsed: CustomiseResult;
+      const cachedRaw = readAiCache(cacheKey);
+
+      if (cachedRaw) {
+        console.log('[customise] cache hit — skipping the model call:', cacheKey);
+        parsed = JSON.parse(cachedRaw) as CustomiseResult;
+      } else {
+        setAiStatusMsg('Reviewing vector…');
+        const rawText = await callLlmVision({
+          model: TEXT_PARSE_MODEL, maxTokens: 8192, pngBase64, tag: 'customise',
+          prompt: `Analyze this SVG image and its source.
 
 ${TEXT_PARSING_PROMPT}
 
@@ -1614,16 +1604,20 @@ ${contentXml}
 
 Return ONLY valid JSON, no markdown:
 {"hasText":true,"rows":[{"yFraction":0.3,"xFraction":0.5,"font":"Playfair Display","sizeFraction":0.1,"weight":700,"color":"#ffffff","content":"HELLO","letterSpacing":0}],"removeIds":["3","9"],"fonts":["Playfair Display","Lato"]}`,
-      });
+        });
 
-      let parsed: CustomiseResult;
-      try {
-        parsed = JSON.parse(rawText) as CustomiseResult;
-        if (!Array.isArray(parsed.rows)) parsed.rows = [];
-        if (!Array.isArray(parsed.removeIds)) parsed.removeIds = [];
-        if (!Array.isArray(parsed.fonts)) parsed.fonts = [];
-      } catch {
-        throw new Error('AI returned an unreadable response');
+        try {
+          parsed = JSON.parse(rawText) as CustomiseResult;
+          if (!Array.isArray(parsed.rows)) parsed.rows = [];
+          if (!Array.isArray(parsed.removeIds)) parsed.removeIds = [];
+          if (!Array.isArray(parsed.fonts)) parsed.fonts = [];
+        } catch {
+          throw new Error('AI returned an unreadable response');
+        }
+
+        // Stored post-normalisation, so a cache hit lands on the same shape the
+        // rest of the pass expects without re-running the guards.
+        writeAiCache(cacheKey, JSON.stringify(parsed));
       }
       console.log('[customise] LLM returned:', { hasText: parsed.hasText, removeIds: parsed.removeIds, rows: parsed.rows.length });
 
@@ -1639,68 +1633,9 @@ Return ONLY valid JSON, no markdown:
       const allRows = parsed.hasText ? parsed.rows : [];
       const allFonts = parsed.fonts;
 
-      // Re-add editable text layers (same placement logic as strip-text)
-      const newTextLayers: SvgLayer[] = [];
-      if (allRows.length > 0) {
-        const Y_THRESHOLD = 0.03;
-        const groups: TextRow[][] = [];
-        const sorted = [...allRows].sort((a, b) => a.yFraction - b.yFraction);
-        for (const row of sorted) {
-          const last = groups[groups.length - 1];
-          if (last && Math.abs(row.yFraction - last[0].yFraction) <= Y_THRESHOLD) {
-            last.push(row);
-          } else {
-            groups.push([row]);
-          }
-        }
-        const LS_OPTIONS = [-0.1, -0.05, 0, 0.05, 0.1, 0.15, 0.2, 0.3];
-        const snapLS = (v: number) => LS_OPTIONS.reduce((a, b) => Math.abs(b - v) < Math.abs(a - v) ? b : a);
-
-        groups.forEach((group, gi) => {
-          const newId = `_text_${Date.now()}_${gi}`;
-          const label = group.map((r) => r.content.trim()).filter(Boolean).join(' ') || 'Text';
-          group.forEach(({ font }) => addGoogleFont(font));
-
-          if (group.length === 1) {
-            const row = group[0];
-            const cx = vbX + row.xFraction * vw;
-            const cy = vbY + row.yFraction * vh;
-            const fontSize = Math.max(8, Math.round(row.sizeFraction * vh));
-            const textEl = doc.createElementNS('http://www.w3.org/2000/svg', 'text');
-            textEl.id = newId;
-            textEl.setAttribute('x', String(cx)); textEl.setAttribute('y', String(cy));
-            textEl.setAttribute('text-anchor', 'middle'); textEl.setAttribute('dominant-baseline', 'middle');
-            textEl.setAttribute('font-family', row.font || 'Arial');
-            textEl.setAttribute('font-size', String(fontSize));
-            textEl.setAttribute('font-weight', String(row.weight || 400));
-            textEl.setAttribute('fill', row.color || '#000000');
-            const ls = snapLS(row.letterSpacing ?? 0); if (ls !== 0) textEl.setAttribute('letter-spacing', `${ls}em`);
-            textEl.textContent = label;
-            root.appendChild(textEl);
-          } else {
-            const g = doc.createElementNS('http://www.w3.org/2000/svg', 'g');
-            g.id = newId; g.setAttribute('data-name', label);
-            group.forEach((row, si) => {
-              const cx = vbX + row.xFraction * vw;
-              const cy = vbY + row.yFraction * vh;
-              const fontSize = Math.max(8, Math.round(row.sizeFraction * vh));
-              const textEl = doc.createElementNS('http://www.w3.org/2000/svg', 'text');
-              textEl.id = `${newId}_${si}`;
-              textEl.setAttribute('x', String(cx)); textEl.setAttribute('y', String(cy));
-              textEl.setAttribute('text-anchor', 'middle'); textEl.setAttribute('dominant-baseline', 'middle');
-              textEl.setAttribute('font-family', row.font || 'Arial');
-              textEl.setAttribute('font-size', String(fontSize));
-              textEl.setAttribute('font-weight', String(row.weight || 400));
-              textEl.setAttribute('fill', row.color || '#000000');
-              const ls = snapLS(row.letterSpacing ?? 0); if (ls !== 0) textEl.setAttribute('letter-spacing', `${ls}em`);
-              textEl.textContent = row.content.trim() || 'Text';
-              g.appendChild(textEl);
-            });
-            root.appendChild(g);
-          }
-          newTextLayers.push({ id: newId, label });
-        });
-      }
+      // Re-add editable text layers — one per detected row (same placement logic as strip-text)
+      allRows.forEach(({ font }) => addGoogleFont(font));
+      const newTextLayers = appendTextRowLayers(doc, allRows, { x: vbX, y: vbY, w: vw, h: vh });
 
       // Suggested fonts, deduped across all layers. Registered with addGoogleFont rather
       // than just link-loaded, so they show up in the inspector's Font list and can be
@@ -1734,7 +1669,7 @@ Return ONLY valid JSON, no markdown:
         return { ...prev, content, layers: [...kept, ...newTextLayers] };
       });
       dropSelectionOutside(kept, newTextLayers);
-      if (newTextLayers.length > 0) { setSelectedLayer(newTextLayers[0].id); setSelectedSubElId(null); }
+      if (newTextLayers.length > 0) setSelectedLayer(newTextLayers[0].id);
 
     } catch (err) {
       setAiError(err instanceof Error ? err.message : 'Customise failed');
@@ -2059,12 +1994,6 @@ Respond with ONLY a valid JSON object — no markdown, no code fences:
       }
 
       // ── Strip text (detect + index-based removal) ─────────────────────────
-      type TextRow = {
-        yFraction: number; xFraction: number;
-        font: string; sizeFraction: number;
-        weight: number; color: string; content: string;
-        letterSpacing: number;
-      };
       type StripResult = { hasText: boolean; rows: TextRow[]; removeIds: string[] };
 
       // Label every shape/group element with a temporary data-ai-idx so Claude
@@ -2087,11 +2016,12 @@ Respond with ONLY a valid JSON object — no markdown, no code fences:
       markEls(layerEl);
       const markedSvgString = new XMLSerializer().serializeToString(layerEl);
 
-      const cacheKey = `strip-text-v5:${hashString(svgString)}`;
+      const cacheKey = `strip-text-v6:${TEXT_PARSE_MODEL}:${hashString(svgString)}`;
       let parsed: StripResult;
 
-      const cachedRaw = aiCacheRef.current.get(cacheKey);
+      const cachedRaw = readAiCache(cacheKey);
       if (cachedRaw) {
+        console.log('[strip-text] cache hit — skipping the model call:', cacheKey);
         parsed = JSON.parse(cachedRaw) as StripResult;
       } else {
         setAiStatusMsg('Reviewing vector…');
@@ -2115,7 +2045,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
           throw new Error('AI returned an unreadable response');
         }
 
-        aiCacheRef.current.set(cacheKey, JSON.stringify(parsed));
+        writeAiCache(cacheKey, JSON.stringify(parsed));
       }
 
       // Remove identified text elements directly from the DOM
@@ -2142,75 +2072,10 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
         el.removeAttribute('data-ai-idx');
       }
 
-      // Group rows that share the same horizontal band (yFraction within 3%) into one layer
-      const newTextLayers: SvgLayer[] = [];
-      if (parsed.hasText && parsed.rows.length > 0) {
-        const Y_THRESHOLD = 0.03;
-        const groups: (typeof parsed.rows)[] = [];
-        const sorted = [...parsed.rows].sort((a, b) => a.yFraction - b.yFraction);
-        for (const row of sorted) {
-          const last = groups[groups.length - 1];
-          if (last && Math.abs(row.yFraction - last[0].yFraction) <= Y_THRESHOLD) {
-            last.push(row);
-          } else {
-            groups.push([row]);
-          }
-        }
-
-        const LS_OPTIONS = [-0.1, -0.05, 0, 0.05, 0.1, 0.15, 0.2, 0.3];
-        const snapLS = (v: number) => LS_OPTIONS.reduce((a, b) => Math.abs(b - v) < Math.abs(a - v) ? b : a);
-
-        groups.forEach((group, gi) => {
-          const newId = `_text_${Date.now()}_${gi}`;
-          const label = group.map((r) => r.content.trim()).filter(Boolean).join(' ') || 'Text';
-          group.forEach(({ font }) => addGoogleFont(font));
-
-          if (group.length === 1) {
-            const row = group[0];
-            const cx = vbX + row.xFraction * vw;
-            const cy = vbY + row.yFraction * vh;
-            const fontSize = Math.max(8, Math.round(row.sizeFraction * vh));
-            const textEl = doc.createElementNS('http://www.w3.org/2000/svg', 'text');
-            textEl.id = newId;
-            textEl.setAttribute('x', String(cx));
-            textEl.setAttribute('y', String(cy));
-            textEl.setAttribute('text-anchor', 'middle');
-            textEl.setAttribute('dominant-baseline', 'middle');
-            textEl.setAttribute('font-family', row.font || 'Arial');
-            textEl.setAttribute('font-size', String(fontSize));
-            textEl.setAttribute('font-weight', String(row.weight || 400));
-            textEl.setAttribute('fill', row.color || '#000000');
-            const ls = snapLS(row.letterSpacing ?? 0); if (ls !== 0) textEl.setAttribute('letter-spacing', `${ls}em`);
-            textEl.textContent = label;
-            doc.documentElement.appendChild(textEl);
-          } else {
-            const g = doc.createElementNS('http://www.w3.org/2000/svg', 'g');
-            g.id = newId;
-            g.setAttribute('data-name', label);
-            group.forEach((row, si) => {
-              const cx = vbX + row.xFraction * vw;
-              const cy = vbY + row.yFraction * vh;
-              const fontSize = Math.max(8, Math.round(row.sizeFraction * vh));
-              const textEl = doc.createElementNS('http://www.w3.org/2000/svg', 'text');
-              textEl.id = `${newId}_${si}`;
-              textEl.setAttribute('x', String(cx));
-              textEl.setAttribute('y', String(cy));
-              textEl.setAttribute('text-anchor', 'middle');
-              textEl.setAttribute('dominant-baseline', 'middle');
-              textEl.setAttribute('font-family', row.font || 'Arial');
-              textEl.setAttribute('font-size', String(fontSize));
-              textEl.setAttribute('font-weight', String(row.weight || 400));
-              textEl.setAttribute('fill', row.color || '#000000');
-              const ls = snapLS(row.letterSpacing ?? 0); if (ls !== 0) textEl.setAttribute('letter-spacing', `${ls}em`);
-              textEl.textContent = row.content.trim() || 'Text';
-              g.appendChild(textEl);
-            });
-            doc.documentElement.appendChild(g);
-          }
-
-          newTextLayers.push({ id: newId, label });
-        });
-      }
+      // One editable text layer per detected row — no grouping, no sub-layers.
+      const detectedRows = parsed.hasText ? parsed.rows ?? [] : [];
+      detectedRows.forEach(({ font }) => addGoogleFont(font));
+      const newTextLayers = appendTextRowLayers(doc, detectedRows, { x: vbX, y: vbY, w: vw, h: vh });
 
       const content = new XMLSerializer().serializeToString(doc.documentElement);
       // Same as the customise pass: stripped elements take their layer rows with them.
@@ -2220,7 +2085,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
         return { ...prev, content, layers: [...kept, ...newTextLayers] };
       });
       dropSelectionOutside(kept, newTextLayers);
-      if (newTextLayers.length > 0) { setSelectedLayer(newTextLayers[0].id); setSelectedSubElId(null); }
+      if (newTextLayers.length > 0) setSelectedLayer(newTextLayers[0].id);
 
     } catch (err) {
       setAiError(err instanceof Error ? err.message : 'AI action failed');
@@ -2245,7 +2110,13 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     const { content, layers } = parseSvg(activeSvg.originalContent);
     setActiveSvg((prev) => (prev ? { ...prev, content, layers } : null));
     setHiddenLayers(new Set(defaultHiddenLayers));
-    setSelectedLayer(null); setSelectedLayers(new Set()); setSelectedSubElId(null);
+    setSelectedLayer(null); setSelectedLayers(new Set());
+    // The revert undoes the customise pass, so the pill has to go back to being
+    // runnable — it disables itself once done, and would otherwise stay stuck on
+    // "Customised" over artwork that no longer carries any of its output. The font
+    // suggestions went with that run, so they go too.
+    setCustomiseDone(false);
+    setCustomiseFonts([]);
   }, [activeSvg, defaultHiddenLayers]);
 
   const cancelReset = useCallback(() => setResetConfirmOpen(false), []);
@@ -2284,7 +2155,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
   }, [clear]);
 
   useEffect(() => {
-    if (!selectedLayers.size && !selectedSubElId) return;
+    if (!selectedLayers.size) return;
     const onArrow = (e: KeyboardEvent) => {
       if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) return;
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
@@ -2295,8 +2166,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
       setActiveSvg((prev) => {
         if (!prev) return null;
         const doc = new DOMParser().parseFromString(prev.content, 'image/svg+xml');
-        const ids = selectedSubElId ? [selectedSubElId] : [...selectedLayers];
-        ids.forEach((id) => {
+        [...selectedLayers].forEach((id) => {
           const el = doc.getElementById(id);
           if (!el) return;
           el.setAttribute('transform', applyTranslateDelta(el.getAttribute('transform') ?? '', dx, dy));
@@ -2306,7 +2176,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     };
     window.addEventListener('keydown', onArrow);
     return () => window.removeEventListener('keydown', onArrow);
-  }, [selectedLayers, selectedSubElId]);
+  }, [selectedLayers]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -2345,7 +2215,6 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     });
     setSelectedLayer(newId);
     setSelectedLayers(new Set([newId]));
-    setSelectedSubElId(null);
   }, [activeSvg, snapshotForUndo]);
 
   // Delete a layer (removes its element and its layers-list entry). Undoable.
@@ -2361,7 +2230,6 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
       if (!prev.has(layerId)) return prev;
       const next = new Set(prev); next.delete(layerId); return next;
     });
-    setSelectedSubElId(null);
   }, [activeSvg, snapshotForUndo]);
 
   // Ctrl/Cmd+C copies the selected layer; Ctrl/Cmd+V pastes it as a duplicate.
@@ -2515,7 +2383,6 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
           <CanvasStage
             svgCanvasRef={svgCanvasRef}
             overlayRef={overlayRef}
-            subOverlayRef={subOverlayRef}
             sizeBadgeRef={sizeBadgeRef}
             onCanvasClick={handleCanvasClick}
             aiLoading={aiLoading}
@@ -2526,8 +2393,6 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
             backgroundLayerId={backgroundLayerId}
             showSelectionOverlay={showSelectionOverlay}
             selectionIsEmptyText={selectionIsEmptyText}
-            selectionIsTextLayer={selectionIsTextLayer}
-            selectedLayersSize={selectedLayers.size}
             onEmptyTextClick={focusEmptyTextInput}
             onDragHandleMouseDown={handleDragHandleMouseDown}
             onRotateHandleMouseDown={handleRotateHandleMouseDown}
@@ -2591,8 +2456,6 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                 selectedLayers={selectedLayers}
                 backgroundLayerId={backgroundLayerId}
                 textLayerIds={textLayerIds}
-                subLayerMap={subLayerMap}
-                selectedSubElId={selectedSubElId}
                 onAddTextLayer={addTextLayer}
                 onReorderLayers={reorderLayers}
                 onSetSelectedLayers={setSelectedLayers}
@@ -2601,41 +2464,44 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                 onToggleLayer={toggleLayer}
                 onDuplicateLayer={duplicateLayer}
                 onDeleteLayer={deleteLayer}
-                onSetSelectedSubElId={setSelectedSubElId}
               />
 
-              {/* AI pill + panel (§1.8) */}
-              <AiPanel
-                open={aiPanelOpen}
-                onClose={closeAiPanel}
-                llmProvider={llmProvider}
-                llmOptions={LLM_OPTIONS}
-                onSelectLlmProvider={selectLlmProvider}
-                ai={{
-                  loading: aiLoading, error: aiError,
-                  fontSuggestion, suggestedFontName,
-                  removeTextQuery, setRemoveTextQuery,
-                  showRemoveTextInput, setShowRemoveTextInput,
-                  textCheckResult, setTextCheckResult,
-                }}
-                fonts={{
-                  extra: extraFonts, imageFonts, imageFontsLoading,
-                  customiseFonts, customiseLoading, customiseDone,
-                }}
-                taxonomy={{ data: taxonomy, loading: taxonomyLoading, open: taxonomyOpen, setOpen: setTaxonomyOpen }}
-                selectedLayer={selectedLayer}
-                backgroundLayerId={backgroundLayerId}
-                onRunAiAction={runAiLayerAction as (action?: AiActionType, query?: string) => void}
-                onApplyFontGlobally={applyFontGlobally}
-                onUseSuggestedFont={useSuggestedFont}
-                onRunTaxonomy={runTaxonomyAnalysis}
-              />
+              {/* AI pill + panel (§1.8). The tools panel is dev-only; in production the
+                  pill below is a plain Customise button with nothing behind it. */}
+              {SHOW_DEV_UI && (
+                <AiPanel
+                  open={aiPanelOpen}
+                  onClose={closeAiPanel}
+                  llmProvider={llmProvider}
+                  llmOptions={LLM_OPTIONS}
+                  onSelectLlmProvider={selectLlmProvider}
+                  ai={{
+                    loading: aiLoading, error: aiError,
+                    fontSuggestion, suggestedFontName,
+                    removeTextQuery, setRemoveTextQuery,
+                    showRemoveTextInput, setShowRemoveTextInput,
+                    textCheckResult, setTextCheckResult,
+                  }}
+                  fonts={{
+                    extra: extraFonts, imageFonts, imageFontsLoading,
+                    customiseFonts, customiseLoading, customiseDone,
+                  }}
+                  taxonomy={{ data: taxonomy, loading: taxonomyLoading, open: taxonomyOpen, setOpen: setTaxonomyOpen }}
+                  selectedLayer={selectedLayer}
+                  backgroundLayerId={backgroundLayerId}
+                  onRunAiAction={runAiLayerAction as (action?: AiActionType, query?: string) => void}
+                  onApplyFontGlobally={applyFontGlobally}
+                  onUseSuggestedFont={useSuggestedFont}
+                  onRunTaxonomy={runTaxonomyAnalysis}
+                />
+              )}
               <AiPill
                 onCustomise={runCustomise}
                 onOpenTools={onAiToolsClick}
                 loading={customiseLoading}
                 done={customiseDone}
                 toolsOpen={aiPanelOpen}
+                showTools={SHOW_DEV_UI}
               />
             </>
           )}
@@ -2692,15 +2558,17 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
       )}
 
       {/* Dev rail (§1.4) — internal only, sits above every panel */}
-      <DevRail
-        samples={SAMPLES}
-        activeSample={activeSample}
-        isLoading={isLoading}
-        open={devRailOpen}
-        onSetOpen={setDevRailOpen}
-        onOpenSample={openSample}
-        onOpenFetched={openSample}
-      />
+      {SHOW_DEV_UI && (
+        <DevRail
+          samples={SAMPLES}
+          activeSample={activeSample}
+          isLoading={isLoading}
+          open={devRailOpen}
+          onSetOpen={setDevRailOpen}
+          onOpenSample={openSample}
+          onOpenFetched={openSample}
+        />
+      )}
     </div>
   );
 }

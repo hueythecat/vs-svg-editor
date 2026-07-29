@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 
 import { C, FONT_STACK, SHADOW } from '@/lib/design-tokens';
+import { clearAiCache, isAiCacheEnabled, setAiCacheEnabled } from '@/lib/ai-cache';
 import { ChevronIcon, SettingsIcon } from './svg-icons';
 
 type Sample = { label: string; name: string; src: string; edit?: 0 | 1 };
@@ -45,6 +46,10 @@ export function DevRail<S extends Sample>({
   const [fetchStatus, setFetchStatus] = useState<string | null>(null);
   const [fetching, setFetching] = useState(false);
   const [fetchedSamples, setFetchedSamples] = useState<Sample[]>([]);
+  // Mirrors the persisted preference. Nothing else re-renders off it — the AI passes ask
+  // the cache module directly at call time — so it stays local to the rail. Lazy initial
+  // state: reading storage during SSR would throw, and this only ever renders client-side.
+  const [cacheOn, setCacheOn] = useState(() => isAiCacheEnabled());
 
   const fetchDownload = async (id: string, title: string, edit: 0 | 1) => {
     setFetchStatus(null);
@@ -213,6 +218,42 @@ export function DevRail<S extends Sample>({
                 {fetchStatus}
               </span>
             )}
+          </div>
+
+          {/* AI response cache — a customise/strip run is ~10s and a paid call, so this
+              is on by default and only turned off to force a genuine request. */}
+          <div style={{ padding: '0 12px 10px', display: 'flex', alignItems: 'center', gap: 8 }}>
+            <label
+              title="Reuse the stored AI response when the same artwork is run again"
+              style={{
+                flex: 1, display: 'flex', alignItems: 'center', gap: 7,
+                fontSize: 10, color: C.devTextMuted, cursor: 'pointer', userSelect: 'none',
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={cacheOn}
+                onChange={(e) => {
+                  setCacheOn(e.target.checked);
+                  setAiCacheEnabled(e.target.checked);
+                }}
+                style={{ accentColor: C.accent, width: 12, height: 12, margin: 0, cursor: 'pointer', flex: 'none' }}
+              />
+              Cache AI responses
+            </label>
+            <button
+              type="button"
+              onClick={clearAiCache}
+              title="Drop every stored AI response"
+              style={{
+                border: `1px solid ${C.devBorder}`, background: C.devSurfaceAlt,
+                color: C.devTextDim, borderRadius: 6, padding: '3px 7px',
+                fontSize: 9, fontWeight: 700, letterSpacing: '.4px',
+                cursor: 'pointer', fontFamily: FONT_STACK, flex: 'none',
+              }}
+            >
+              CLEAR
+            </button>
           </div>
 
           {/* Samples */}

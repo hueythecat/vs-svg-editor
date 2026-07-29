@@ -84,19 +84,6 @@ export function bboxInRootSpace(svgEl: SVGSVGElement, el: SVGGraphicsElement): D
   }
 }
 
-// Return the direct <text id="..."> child of layerEl that contains the click target,
-// or null if the click didn't land inside any identified text child.
-export function findClickedSubText(layerEl: Element, clickTarget: EventTarget | null): Element | null {
-  if (!(clickTarget instanceof Element)) return null;
-  for (const child of Array.from(layerEl.children)) {
-    if (child.tagName.toLowerCase() === 'text' && child.id &&
-        (child === clickTarget || child.contains(clickTarget))) {
-      return child;
-    }
-  }
-  return null;
-}
-
 export function applyTranslateDelta(existing: string, dx: number, dy: number): string {
   const m = existing.match(/^translate\(\s*([-\d.]+)(?:[,\s]+([-\d.]+))?\s*\)/);
   if (m) {
@@ -270,6 +257,132 @@ export const withOffscreenSvg = <T,>(svgRoot: Element, fn: (mounted: SVGSVGEleme
     document.body.removeChild(holder);
   }
 };
+
+// ─── AI text rows → editable text layers ─────────────────────────────────────
+
+// One line of text the vision pass found, in canvas-relative fractions.
+export type TextRow = {
+  yFraction: number; xFraction: number;
+  font: string; sizeFraction: number;
+  weight: number; color: string; content: string;
+  letterSpacing: number;
+};
+
+// Letter-spacing steps the inspector's slider offers. AI estimates are snapped onto
+// them so a re-created field can still be adjusted by hand afterwards.
+const LS_OPTIONS = [-0.1, -0.05, 0, 0.05, 0.1, 0.15, 0.2, 0.3];
+const snapLetterSpacing = (v: number) =>
+  LS_OPTIONS.reduce((a, b) => (Math.abs(b - v) < Math.abs(a - v) ? b : a));
+
+// Rows whose vertical centres are within this fraction of the canvas height read as
+// one horizontal band — the only rows that can collide with each other.
+const BAND_Y_THRESHOLD = 0.03;
+// Space kept between two fields in the same band, as a fraction of the larger font size.
+const BAND_GAP_EM = 0.25;
+
+// Rendered width of each id, measured off-screen. Falls back to a glyph-count estimate
+// for anything unmeasurable (detached geometry, no live DOM under test).
+function measureTextWidths(root: Element, ids: string[]): Map<string, number> {
+  const widths = new Map<string, number>();
+  const estimate = (el: Element | null) => {
+    const len = (el?.textContent ?? '').length;
+    const fs = Number(el?.getAttribute('font-size') ?? 16);
+    return Math.max(1, len * fs * 0.55);
+  };
+  try {
+    withOffscreenSvg(root, (measureSvg) => {
+      ids.forEach((id) => {
+        const el = measureSvg.querySelector(`[id="${id}"]`) as SVGGraphicsElement | null;
+        let w = 0;
+        try { w = el?.getBBox?.().width ?? 0; } catch { /* unrenderable — estimate below */ }
+        widths.set(id, w > 0 ? w : estimate(el));
+      });
+    });
+  } catch {
+    ids.forEach((id) => widths.set(id, estimate(root.querySelector(`[id="${id}"]`))));
+  }
+  return widths;
+}
+
+// Appends one top-level <text> element per detected row and returns the matching layer
+// entries, in document order. Deliberately flat: every row is its own layer, so the
+// element list has no sub-rows and each field is selected, moved and styled on its own.
+//
+// Rows sharing a horizontal band are then de-overlapped: the model estimates each
+// field's centre independently, so two words on one line routinely come back with
+// centres closer together than their rendered widths allow. When a band collides, its
+// fields are re-laid out left to right around the band's own centre, preserving reading
+// order, and clamped inside the viewBox.
+export function appendTextRowLayers(
+  doc: Document,
+  rows: TextRow[],
+  vb: { x: number; y: number; w: number; h: number },
+  idPrefix = `_text_${Date.now()}`,
+): SvgLayer[] {
+  if (rows.length === 0) return [];
+  const root = doc.documentElement;
+  const sorted = [...rows].sort((a, b) => a.yFraction - b.yFraction || a.xFraction - b.xFraction);
+
+  const placed = sorted.map((row, i) => {
+    const id = `${idPrefix}_${i}`;
+    const label = row.content.trim() || 'Text';
+    const fontSize = Math.max(8, Math.round(row.sizeFraction * vb.h));
+    const el = doc.createElementNS('http://www.w3.org/2000/svg', 'text');
+    el.id = id;
+    el.setAttribute('x', String(vb.x + row.xFraction * vb.w));
+    el.setAttribute('y', String(vb.y + row.yFraction * vb.h));
+    el.setAttribute('text-anchor', 'middle');
+    el.setAttribute('dominant-baseline', 'middle');
+    el.setAttribute('font-family', row.font || 'Arial');
+    el.setAttribute('font-size', String(fontSize));
+    el.setAttribute('font-weight', String(row.weight || 400));
+    el.setAttribute('fill', row.color || '#000000');
+    const ls = snapLetterSpacing(row.letterSpacing ?? 0);
+    if (ls !== 0) el.setAttribute('letter-spacing', `${ls}em`);
+    el.textContent = label;
+    root.appendChild(el);
+    return { id, label, row, fontSize, el, cx: vb.x + row.xFraction * vb.w };
+  });
+
+  // Bands of rows sharing a y position, each already in left-to-right order.
+  const bands: (typeof placed)[] = [];
+  for (const item of placed) {
+    const last = bands[bands.length - 1];
+    if (last && Math.abs(item.row.yFraction - last[0].row.yFraction) <= BAND_Y_THRESHOLD) last.push(item);
+    else bands.push([item]);
+  }
+
+  const widths = measureTextWidths(root, placed.map((p) => p.id));
+  for (const band of bands) {
+    if (band.length < 2) continue;
+    const gap = BAND_GAP_EM * Math.max(...band.map((b) => b.fontSize));
+    const w = (id: string) => widths.get(id) ?? 0;
+
+    const collides = band.some((item, i) => {
+      const next = band[i + 1];
+      return !!next && item.cx + w(item.id) / 2 + gap > next.cx - w(next.id) / 2;
+    });
+    if (!collides) continue;
+
+    const total = band.reduce((sum, b) => sum + w(b.id), 0) + gap * (band.length - 1);
+    const bandLeft  = Math.min(...band.map((b) => b.cx - w(b.id) / 2));
+    const bandRight = Math.max(...band.map((b) => b.cx + w(b.id) / 2));
+    let cursor = (bandLeft + bandRight) / 2 - total / 2;
+    // Keep the run on canvas when it fits; centre the overflow when it doesn't.
+    cursor = total <= vb.w
+      ? Math.max(vb.x, Math.min(cursor, vb.x + vb.w - total))
+      : vb.x + (vb.w - total) / 2;
+
+    for (const item of band) {
+      const width = w(item.id);
+      item.cx = cursor + width / 2;
+      item.el.setAttribute('x', String(item.cx));
+      cursor += width + gap;
+    }
+  }
+
+  return placed.map(({ id, label }) => ({ id, label }));
+}
 
 // Drops removeIds whose element covers ≥ BACKGROUND_AREA_LIMIT of the canvas — a
 // background or decoration the vision model mislabeled as text. Shared by the

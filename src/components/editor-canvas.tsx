@@ -44,19 +44,17 @@ const handleBase: React.CSSProperties = {
 };
 
 export const CanvasStage = React.memo(function CanvasStage({
-  svgCanvasRef, overlayRef, subOverlayRef, sizeBadgeRef,
+  svgCanvasRef, overlayRef, sizeBadgeRef,
   onCanvasClick,
   aiLoading, aiStatusMsg,
   isLoading, activeSvg,
   hiddenLayers, backgroundLayerId,
-  showSelectionOverlay, selectionIsEmptyText, selectionIsTextLayer,
-  selectedLayersSize,
+  showSelectionOverlay, selectionIsEmptyText,
   onEmptyTextClick,
   onDragHandleMouseDown, onRotateHandleMouseDown, onScaleHandleMouseDown,
 }: {
   svgCanvasRef: React.RefObject<HTMLDivElement | null>;
   overlayRef: React.RefObject<HTMLDivElement | null>;
-  subOverlayRef: React.RefObject<HTMLDivElement | null>;
   sizeBadgeRef: React.RefObject<HTMLSpanElement | null>;
   onCanvasClick: (e: React.MouseEvent<HTMLDivElement>) => void;
   aiLoading: boolean;
@@ -67,14 +65,11 @@ export const CanvasStage = React.memo(function CanvasStage({
   backgroundLayerId: string | null;
   showSelectionOverlay: boolean;
   selectionIsEmptyText: boolean;
-  selectionIsTextLayer: boolean;
-  selectedLayersSize: number;
   onEmptyTextClick: () => void;
   onDragHandleMouseDown: (e: React.MouseEvent<HTMLDivElement>) => void;
   onRotateHandleMouseDown: (e: React.MouseEvent<HTMLDivElement>) => void;
   onScaleHandleMouseDown: (e: React.MouseEvent<HTMLDivElement>) => void;
 }) {
-  const single = selectedLayersSize === 1;
   const aspect = useMemo(() => documentAspect(activeSvg?.content), [activeSvg?.content]);
   // No full-canvas background layer — or it's hidden — means the artwork exports with
   // transparency, so the board shows a checkerboard rather than implying a white fill.
@@ -84,6 +79,18 @@ export const CanvasStage = React.memo(function CanvasStage({
     <div
       ref={svgCanvasRef}
       onClick={onCanvasClick}
+      // Shift+click is the browser's "extend the text selection to here" gesture, and
+      // SVG <text> is selectable like any other text — so shift-clicking a text layer
+      // used to highlight everything between the last anchor and the click, and then
+      // drag that whole selection around as a native drag. Cancelling the default on
+      // mousedown stops the selection ever forming; the click event still fires, so
+      // shift-select on the canvas is unaffected. Any selection made before the canvas
+      // was touched is collapsed here too, so nothing is left highlighted.
+      onMouseDown={(e) => {
+        if (!e.shiftKey) return;
+        e.preventDefault();
+        window.getSelection()?.removeAllRanges();
+      }}
       style={{
         position: 'absolute',
         inset: 0,
@@ -92,6 +99,10 @@ export const CanvasStage = React.memo(function CanvasStage({
         justifyContent: 'center',
         // Deliberate: keeps scrollbars away when artwork is dragged past the edge.
         overflow: 'hidden',
+        // The artwork is something you select as layers, never as text — so plain
+        // click-drags across it can't start a text selection either.
+        userSelect: 'none',
+        WebkitUserSelect: 'none',
       }}
     >
       {/* Beta badge — sits below the dev rail so the two don't collide */}
@@ -183,78 +194,59 @@ export const CanvasStage = React.memo(function CanvasStage({
                 zIndex: 5,
               }}
             >
-              {/* Sub-layer highlight — display toggled by the layout effect */}
-              <div
-                ref={subOverlayRef}
+              {/* Rotate stem + handle */}
+              <span
                 style={{
-                  position: 'absolute',
-                  outline: `1.5px dashed ${C.star}`,
-                  boxSizing: 'border-box',
-                  pointerEvents: 'none',
+                  position: 'absolute', left: '50%', top: -30,
+                  width: 1.5, height: 22, marginLeft: -0.75,
+                  background: C.accent, pointerEvents: 'none',
                 }}
               />
-
-              {/* Rotate stem + handle — single-layer selection only */}
-              {single && (
-                <>
-                  <span
-                    style={{
-                      position: 'absolute', left: '50%', top: -30,
-                      width: 1.5, height: 22, marginLeft: -0.75,
-                      background: C.accent, pointerEvents: 'none',
-                    }}
-                  />
-                  <div
-                    onMouseDown={onRotateHandleMouseDown}
-                    onClick={(e) => e.stopPropagation()}
-                    title="Drag to rotate (hold Shift to snap to 15°)"
-                    style={{
-                      ...handleBase,
-                      left: '50%', top: -42, marginLeft: -10,
-                      width: 20, height: 20, borderRadius: '50%',
-                      background: C.surface, border: `1.5px solid ${C.accent}`,
-                      color: C.accent, cursor: 'grab',
-                    }}
-                  >
-                    <RotateIcon size={10} />
-                  </div>
-                </>
-              )}
+              <div
+                onMouseDown={onRotateHandleMouseDown}
+                onClick={(e) => e.stopPropagation()}
+                title="Drag to rotate (hold Shift to snap to 15°)"
+                style={{
+                  ...handleBase,
+                  left: '50%', top: -42, marginLeft: -10,
+                  width: 20, height: 20, borderRadius: '50%',
+                  background: C.surface, border: `1.5px solid ${C.accent}`,
+                  color: C.accent, cursor: 'grab',
+                }}
+              >
+                <RotateIcon size={10} />
+              </div>
 
               {/* Move handle */}
-              {single && (
-                <div
-                  onMouseDown={onDragHandleMouseDown}
-                  onClick={(e) => e.stopPropagation()}
-                  title="Drag to move"
-                  style={{
-                    ...handleBase,
-                    top: -11, right: -11,
-                    width: 22, height: 22, borderRadius: 6,
-                    background: C.accent, color: '#fff', cursor: 'move',
-                  }}
-                >
-                  <MoveIcon size={11} />
-                </div>
-              )}
+              <div
+                onMouseDown={onDragHandleMouseDown}
+                onClick={(e) => e.stopPropagation()}
+                title="Drag to move"
+                style={{
+                  ...handleBase,
+                  top: -11, right: -11,
+                  width: 22, height: 22, borderRadius: 6,
+                  background: C.accent, color: '#fff', cursor: 'move',
+                }}
+              >
+                <MoveIcon size={11} />
+              </div>
 
-              {/* Resize handle — non-text layers only (text scales via its font size) */}
-              {single && !selectionIsTextLayer && (
-                <div
-                  onMouseDown={onScaleHandleMouseDown}
-                  onClick={(e) => e.stopPropagation()}
-                  title="Drag to resize"
-                  style={{
-                    ...handleBase,
-                    bottom: -11, right: -11,
-                    width: 22, height: 22, borderRadius: 6,
-                    background: C.surface, border: `1.5px solid ${C.accent}`,
-                    color: C.accent, cursor: 'nwse-resize',
-                  }}
-                >
-                  <ResizeIcon size={11} />
-                </div>
-              )}
+              {/* Resize handle */}
+              <div
+                onMouseDown={onScaleHandleMouseDown}
+                onClick={(e) => e.stopPropagation()}
+                title="Drag to resize"
+                style={{
+                  ...handleBase,
+                  bottom: -11, right: -11,
+                  width: 22, height: 22, borderRadius: 6,
+                  background: C.surface, border: `1.5px solid ${C.accent}`,
+                  color: C.accent, cursor: 'nwse-resize',
+                }}
+              >
+                <ResizeIcon size={11} />
+              </div>
 
               {/* Size badge — text written by the parent's positioning pass */}
               <span

@@ -55,15 +55,17 @@ const spinner = (
 
 // The pill runs the customise pass itself — it is the action, not a menu. The caret on
 // its right edge is the way into the AI tools panel (model, per-layer actions,
-// taxonomy), which would otherwise have no trigger.
+// taxonomy), which would otherwise have no trigger. That panel is dev-only, so with
+// showTools false the caret and its divider go and the pill is simply a button.
 export const AiPill = React.memo(function AiPill({
-  onCustomise, onOpenTools, loading, done, toolsOpen,
+  onCustomise, onOpenTools, loading, done, toolsOpen, showTools,
 }: {
   onCustomise: () => void;
   onOpenTools: () => void;
   loading: boolean;
   done: boolean;
   toolsOpen: boolean;
+  showTools: boolean;
 }) {
   const label = loading ? 'Customising…' : done ? 'Customised' : 'Customise';
   return (
@@ -86,7 +88,8 @@ export const AiPill = React.memo(function AiPill({
         style={{
           display: 'flex', alignItems: 'center', gap: 8,
           background: 'transparent', border: 'none',
-          padding: '11px 13px 11px 15px',
+          // Tighter on the right when the caret follows it, even padding when it doesn't.
+          padding: showTools ? '11px 13px 11px 15px' : '11px 15px',
           cursor: loading || done ? 'default' : 'pointer',
           fontFamily: FONT_STACK,
         }}
@@ -114,20 +117,24 @@ export const AiPill = React.memo(function AiPill({
         </span>
       </button>
 
-      <span style={{ width: 1, height: 18, background: 'rgba(255,255,255,.3)', flex: 'none' }} />
+      {showTools && (
+        <>
+          <span style={{ width: 1, height: 18, background: 'rgba(255,255,255,.3)', flex: 'none' }} />
 
-      <button
-        type="button"
-        onClick={onOpenTools}
-        title="AI tools"
-        style={{
-          display: 'flex', alignItems: 'center',
-          background: 'transparent', border: 'none',
-          padding: '11px 12px', cursor: 'pointer', color: '#fff',
-        }}
-      >
-        <ChevronIcon size={12} direction={toolsOpen ? 'down' : 'up'} />
-      </button>
+          <button
+            type="button"
+            onClick={onOpenTools}
+            title="AI tools"
+            style={{
+              display: 'flex', alignItems: 'center',
+              background: 'transparent', border: 'none',
+              padding: '11px 12px', cursor: 'pointer', color: '#fff',
+            }}
+          >
+            <ChevronIcon size={12} direction={toolsOpen ? 'down' : 'up'} />
+          </button>
+        </>
+      )}
     </div>
   );
 });
