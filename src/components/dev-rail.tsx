@@ -43,6 +43,7 @@ export function DevRail<S extends Sample>({
   samples, activeSample, isLoading, open, onSetOpen, onOpenSample, onOpenFetched,
 }: DevRailProps<S>) {
   const [selectedDownload, setSelectedDownload] = useState<string>('');
+  const [reviewId, setReviewId] = useState('');
   const [fetchStatus, setFetchStatus] = useState<string | null>(null);
   const [fetching, setFetching] = useState(false);
   const [fetchedSamples, setFetchedSamples] = useState<Sample[]>([]);
@@ -51,7 +52,12 @@ export function DevRail<S extends Sample>({
   // state: reading storage during SSR would throw, and this only ever renders client-side.
   const [cacheOn, setCacheOn] = useState(() => isAiCacheEnabled());
 
-  const fetchDownload = async (id: string, title: string, edit: 0 | 1) => {
+  // Shared by the curated dropdown (/api/download, local zips) and the id box
+  // (/api/review, the remote review endpoint) — both answer with { svg } | { svg: null }
+  // | { error }, so everything from here down is identical.
+  // Returns whether an asset actually landed, so callers can reset their input only on
+  // a real success.
+  const fetchFrom = async (url: string, id: string, title: string, edit: 0 | 1) => {
     setFetchStatus(null);
     setFetching(true);
     try {
@@ -59,7 +65,7 @@ export function DevRail<S extends Sample>({
       // the request reads as a deliberate step rather than an instant flash. Runs the
       // real fetch and the delay together, so the overlay lasts max(1s, fetch time).
       const [res] = await Promise.all([
-        fetch(`/api/download?id=${encodeURIComponent(id)}`),
+        fetch(url),
         new Promise((r) => setTimeout(r, 1000)),
       ]);
       const data = (await res.json()) as { svg?: string | null; error?: { message?: string } };
@@ -67,7 +73,7 @@ export function DevRail<S extends Sample>({
 
       if (!data.svg) {
         setFetchStatus('No SVG');
-        return;
+        return false;
       }
       // Inline the extracted SVG as a data: URI so it both previews in an <img> and
       // reloads via fetch().text() when opened, exactly like a static sample src.
@@ -81,14 +87,38 @@ export function DevRail<S extends Sample>({
       // Picking from the select opens the asset straight away — the preview card is
       // there to come back to, not a second step before you can see it.
       onOpenFetched?.(sample);
+      return true;
     } catch (err) {
       setFetchStatus(err instanceof Error ? err.message : 'Fetch failed');
+      return false;
     } finally {
       setFetching(false);
     }
   };
 
-  const renderCard = (sample: Sample, onOpen: () => void) => {
+  const fetchDownload = (id: string, title: string, edit: 0 | 1) =>
+    fetchFrom(`/api/download?id=${encodeURIComponent(id)}`, id, title, edit);
+
+  // Ids typed into the box are editable by default — there's no catalogue entry to carry
+  // an edit flag, and the review endpoint is for work-in-progress art.
+  const fetchReview = async () => {
+    const id = reviewId.trim();
+    if (!id) return;
+    if (!/^\d+$/.test(id)) {
+      setFetchStatus('Numbers only');
+      return;
+    }
+    const ok = await fetchFrom(`/api/review/${id}`, id, `Review ${id}`, 1);
+    // Clear only on success — a failed id stays put to be corrected, rather than the
+    // next id typed being appended to it.
+    if (ok) setReviewId('');
+  };
+
+  // There's an id to send and nothing already in flight — drives the FETCH button's
+  // active styling, and matches its disabled condition so the two can't disagree.
+  const armed = !fetching && reviewId.trim().length > 0;
+
+  const renderCard =(sample: Sample, onOpen: () => void) => {
     const isActive = activeSample === sample.name;
     return (
       <button
@@ -116,7 +146,9 @@ export function DevRail<S extends Sample>({
       >
         <span
           style={{
-            height: 48, borderRadius: 5, overflow: 'hidden',
+            // Square frame (rather than a short fixed height) so contain-fitted art
+            // scales up to the full card width instead of being pinned to a 48px height.
+            width: '100%', aspectRatio: '1 / 1', borderRadius: 5, overflow: 'hidden',
             background: 'repeating-linear-gradient(45deg, #2b3038 0 4px, #22262e 4px 8px)',
             display: 'block',
           }}
@@ -127,7 +159,7 @@ export function DevRail<S extends Sample>({
             // Suppress the native image drag so only the button's drag fires (carrying
             // our custom payload rather than the image URL).
             draggable={false}
-            style={{ width: '100%', height: '100%', objectFit: 'contain', padding: 4, boxSizing: 'border-box' }}
+            style={{ width: '100%', height: '100%', objectFit: 'contain', padding: 2, boxSizing: 'border-box' }}
           />
         </span>
         <span
@@ -213,6 +245,52 @@ export function DevRail<S extends Sample>({
                 <option key={d.id} value={d.id}>{d.id} — {d.name}</option>
               ))}
             </select>
+            {/* Review id — anything on dev.vectorstock.com, not just the bundled zips.
+                Enter submits so an id can be pasted and fired without reaching for the
+                button. */}
+            <div style={{ display: 'flex', gap: 5, marginTop: 6 }}>
+              <input
+                type="text"
+                inputMode="numeric"
+                pattern="[0-9]*"
+                value={reviewId}
+                placeholder="Review id…"
+                disabled={fetching}
+                onChange={(e) => setReviewId(e.target.value.replace(/\D/g, ''))}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') fetchReview();
+                }}
+                style={{
+                  flex: 1, minWidth: 0, boxSizing: 'border-box',
+                  background: C.devSurfaceAlt, color: C.devText,
+                  border: `1px solid ${C.devBorder}`, borderRadius: 7,
+                  fontSize: 11, padding: '6px 7px', outline: 'none',
+                  fontFamily: FONT_STACK,
+                }}
+              />
+              {/* Lights up as soon as there's an id to send — the accent fill is the
+                  cue that Enter/click will now do something, versus the flat dim state
+                  when the box is empty or a fetch is already running. */}
+              <button
+                type="button"
+                onClick={fetchReview}
+                disabled={!armed}
+                title="Fetch this id from the review endpoint"
+                style={{
+                  border: `1px solid ${armed ? C.accent : C.devBorder}`,
+                  background: armed ? C.accent : C.devSurfaceAlt,
+                  color: armed ? '#fff' : C.devTextDim,
+                  borderRadius: 7, padding: '3px 8px',
+                  fontSize: 9, fontWeight: 700, letterSpacing: '.4px',
+                  cursor: armed ? 'pointer' : 'default',
+                  opacity: armed ? 1 : 0.45,
+                  fontFamily: FONT_STACK, flex: 'none',
+                  transition: 'background .12s, border-color .12s, color .12s, opacity .12s',
+                }}
+              >
+                FETCH
+              </button>
+            </div>
             {fetchStatus && (
               <span style={{ display: 'block', marginTop: 5, fontSize: 10, color: C.devTextMuted, lineHeight: 1.3 }}>
                 {fetchStatus}
@@ -263,7 +341,7 @@ export function DevRail<S extends Sample>({
           <div
             className="ed-scroll"
             style={{
-              maxHeight: 150, overflowY: 'auto', overflowX: 'hidden',
+              maxHeight: 360, overflowY: 'auto', overflowX: 'hidden',
               padding: '6px 12px 12px',
               display: 'flex', flexDirection: 'column', gap: 6,
             }}

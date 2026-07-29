@@ -43,6 +43,38 @@ export const LayerList = React.memo(function LayerList({
   const panelDropPositionRef = useRef<{ targetId: string; before: boolean } | null>(null);
   const panelReorderDoneRef  = useRef(false);
 
+  // Range-select anchor: the last row picked *without* shift. Shift-click selects
+  // everything between it and the clicked row, and the anchor deliberately stays put so
+  // a second shift-click grows or shrinks the same range rather than starting a new one.
+  const anchorIdRef = useRef<string | null>(null);
+
+  // Every id from the anchor to the clicked row inclusive. Indices are taken in document
+  // order; the list renders reversed, but a contiguous span is the same set either way.
+  const selectRange = (toId: string) => {
+    // The stored anchor is only good while it's still part of the selection — it goes
+    // stale when the layer is deleted, or when the selection was replaced from the canvas
+    // instead of this list. A lone selected row is an unambiguous anchor to fall back to.
+    const anchorId =
+      anchorIdRef.current && selectedLayers.has(anchorIdRef.current)
+        ? anchorIdRef.current
+        : selectedLayers.size === 1
+          ? [...selectedLayers][0]
+          : null;
+    const from = anchorId === null ? -1 : layers.findIndex((l) => l.id === anchorId);
+    const to = layers.findIndex((l) => l.id === toId);
+    // No usable anchor (first click of the session, or it was since deleted) — a shift
+    // click has nothing to extend from, so it behaves as a plain one.
+    if (from === -1 || to === -1) {
+      anchorIdRef.current = toId;
+      onSelectOne(toId);
+      return;
+    }
+    const [lo, hi] = from < to ? [from, to] : [to, from];
+    onSetSelectedLayers(new Set(layers.slice(lo, hi + 1).map((l) => l.id)));
+    // The clicked row is the one the inspector follows, not the anchor.
+    onSetSelectedLayer(toId);
+  };
+
   // Which row a drag is over, resolved from row geometry rather than
   // document.elementFromPoint. Hit testing only reported a target when the pointer was
   // exactly over a row, so a release in the 2px gap between rows, on the panel padding,
@@ -167,14 +199,20 @@ export const LayerList = React.memo(function LayerList({
               onPointerDown={(e) => {
                 if (e.button !== 0) return;
                 if (e.shiftKey) {
+                  selectRange(layer.id);
+                } else if (e.metaKey || e.ctrlKey) {
+                  // Toggle a single row in or out — what shift used to do, moved to the
+                  // usual modifier now that shift extends a range.
                   onSetSelectedLayers((prev) => {
                     const next = new Set(prev);
                     if (next.has(layer.id)) next.delete(layer.id); else next.add(layer.id);
                     return next;
                   });
                   onSetSelectedLayer(layer.id);
+                  anchorIdRef.current = layer.id;
                 } else {
                   onSelectOne(layer.id);
+                  anchorIdRef.current = layer.id;
                 }
               }}
               onClick={() => {
@@ -205,6 +243,7 @@ export const LayerList = React.memo(function LayerList({
                   if (e.button !== 0) return;
                   e.stopPropagation();
                   onSelectOne(layer.id);
+                  anchorIdRef.current = layer.id;
                   layerListRef.current?.setPointerCapture(e.pointerId);
                   panelDragIdRef.current = layer.id;
                   panelDropPositionRef.current = null;
