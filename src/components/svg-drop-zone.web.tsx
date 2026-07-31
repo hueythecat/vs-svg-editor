@@ -34,7 +34,7 @@ import { LayersPanel } from './editor-layers-panel';
 import { EditorInspector } from './editor-inspector';
 import { AiPanel, AiPill } from './editor-ai-panel';
 import { DevRail, SAMPLE_DRAG_MIME } from './dev-rail';
-import { UpsellModal, RatingModal, AbortReasonModal, ConfirmModal } from './editor-modals';
+import { UpsellModal, CooldownModal, RatingModal, AbortReasonModal, ConfirmModal } from './editor-modals';
 import { EditorToolbar } from './editor-toolbar';
 import { CanvasStage } from './editor-canvas';
 import { FontSuggestions } from './editor-font-suggestions';
@@ -146,9 +146,44 @@ TASK 2 — Text element identification: Most SVG elements in the source have a d
 const stripJsonFence = (raw: string) =>
   raw.replace(/^```(?:json)?\s*/im, '').replace(/```\s*$/m, '').trim();
 
+// ─── Customise cooldown ──────────────────────────────────────────────────────
+
+// review/check answers with customise_next — when the asset may be customised again —
+// for anything already carrying has_customised. The upstream hasn't pinned a format
+// down, so accept the three plausible ones: an ISO date string, a seconds epoch, or a
+// milliseconds epoch. Returns that moment in ms, or null when it can't be read.
+const parseCustomiseNext = (value: unknown): number | null => {
+  const fromNumber = (n: number) => (n < 1e11 ? n * 1000 : n); // seconds vs ms epoch
+  if (typeof value === 'number' && Number.isFinite(value)) return fromNumber(value);
+  if (typeof value === 'string' && value.trim()) {
+    const n = Number(value);
+    if (Number.isFinite(n)) return fromNumber(n);
+    const parsed = Date.parse(value);
+    return Number.isNaN(parsed) ? null : parsed;
+  }
+  return null;
+};
+
+// Inside the cooldown when that moment is still ahead of us and no further away than
+// API_COOLDOWN hours — the lockout the upstream started when the asset was customised.
+// Returns the milliseconds left, or null when the asset is free to customise.
+const cooldownRemaining = (nextMs: number | null, cooldownHours: number): number | null => {
+  if (nextMs === null) return null;
+  const ms = nextMs - Date.now();
+  if (ms <= 0) return null;
+  return ms <= cooldownHours * 3_600_000 ? ms : null;
+};
+
+const formatRemaining = (ms: number): string => {
+  const mins = Math.ceil(ms / 60_000);
+  if (mins < 60) return `in ${mins} minute${mins === 1 ? '' : 's'}`;
+  const hours = Math.round(mins / 60);
+  return `in ${hours} hour${hours === 1 ? '' : 's'}`;
+};
+
 // ─── Component ───────────────────────────────────────────────────────────────
 
-export function SvgDropZone() {
+export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   const [activeSvg, setActiveSvg]       = useState<ActiveSvg | null>(null);
   // string (not SampleName) because openSample now also loads fetched downloads,
   // whose names aren't in the static SAMPLES union.
@@ -272,6 +307,14 @@ export function SvgDropZone() {
   const sizeBadgeRef    = useRef<HTMLSpanElement>(null);
   // Shown when an AI action is invoked on a gated asset (edit === 0).
   const [showUpsell, setShowUpsell] = useState(false);
+  // Shown once a /<uuid> asset has loaded and turns out to be inside the customise
+  // cooldown. `cooldownUntil` is the formatted "again in …" string for the copy.
+  // `cooldownActive` outlives the modal — dismissing the message doesn't lift the
+  // lockout, so it, not showCooldown, is what diverts a later Customise click back to
+  // the message rather than the API call.
+  const [showCooldown, setShowCooldown] = useState(false);
+  const [cooldownActive, setCooldownActive] = useState(false);
+  const [cooldownUntil, setCooldownUntil] = useState<string | undefined>(undefined);
 
   // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -329,6 +372,10 @@ export function SvgDropZone() {
       setSelectedLayers(new Set());
       setIsLoading(false);
       setCustomiseDone(false);
+      // A cooldown belongs to the artwork that was open, not to the editor. The review
+      // flow re-raises it after this runs, so clearing here can't stomp the new asset's.
+      setCooldownActive(false);
+      setShowCooldown(false);
       undoStackRef.current = [];
       redoStackRef.current = [];
       setUndoCount(0);
@@ -363,6 +410,100 @@ export function SvgDropZone() {
     },
     [applyParsed]
   );
+
+  // ── Open review asset (/<uuid> deep link) ──────────────────────────────────
+
+  // A uuid in the path identifies a review asset. The check endpoint says what it
+  // resolves to — { message: 'success', id, can_edit } — and on a successful answer
+  // the numeric id goes through /api/review/<id>, the same download the dev rail's
+  // id box uses, and opens like any other sample.
+  // can_edit only decides whether the AI/customise pass is allowed: it becomes the
+  // asset's `edit` gate, so can_edit: 0 still opens the artwork on the canvas and
+  // sends the customise click to the upsell instead.
+  // Both responses are logged under [review…] so a deep link can be traced without
+  // reaching for the network tab.
+  const reviewLoadedRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    // The ref makes this once-per-uuid: an effect re-run (StrictMode's double mount,
+    // a re-render changing openSample) must not fire the pair of requests again.
+    if (!reviewUuid || reviewLoadedRef.current === reviewUuid) return;
+    reviewLoadedRef.current = reviewUuid;
+
+    let live = true;
+    // Hold the loading state across both requests so the drop zone doesn't flash up
+    // in between — a deep link should look like it's opening artwork from the start.
+    setIsLoading(true);
+
+    (async () => {
+      try {
+        const res = await fetch(`/api/review/check/${reviewUuid}`, { method: 'POST' });
+        const check = (await res.json()) as {
+          message?: string; id?: number; can_edit?: number;
+          has_customised?: number; customise_next?: string | number;
+          cooldown_hours?: number;
+          error?: { message?: string };
+        };
+        if (!live) return;
+        console.log(`[review/check] ${reviewUuid} -> ${res.status}`, check);
+
+        if (!res.ok || check.message !== 'success' || !check.id) {
+          console.log('[review] check unsuccessful — nothing to load');
+          setIsLoading(false);
+          return;
+        }
+        const dl = await fetch(`/api/review/${check.id}`);
+        const data = (await dl.json()) as { svg?: string | null; error?: { message?: string } };
+        if (!live) return;
+        console.log(
+          `[review/download] ${check.id} -> ${dl.status}`,
+          data.svg ? `${data.svg.length} chars of SVG` : data,
+        );
+
+        if (!dl.ok || !data.svg) {
+          setIsLoading(false);
+          return;
+        }
+
+        // Same hand-off as the dev rail: inline the SVG as a data: URI so openSample
+        // can re-read it with fetch().text(), exactly like a static sample src.
+        // Anything other than can_edit: 1 gates the AI features behind the upsell.
+        const edit = check.can_edit === 1 ? 1 : 0;
+        console.log(`[review] ${check.id} opening with edit=${edit} (can_edit=${check.can_edit})`);
+        await openSample({
+          label: `Review ${check.id}`,
+          name: `vectorstock_${check.id}.svg`,
+          src: `data:image/svg+xml,${encodeURIComponent(data.svg)}`,
+          edit,
+        });
+        if (!live) return;
+
+        // Raised only now, with the artwork on the canvas: the modal is about what you
+        // can do to what you're looking at, so it must not land over an empty editor.
+        if (check.has_customised === 1) {
+          const left = cooldownRemaining(
+            parseCustomiseNext(check.customise_next),
+            check.cooldown_hours ?? 24,
+          );
+          console.log(
+            `[review] ${check.id} has_customised=1 customise_next=${check.customise_next} ->`,
+            left === null ? 'cooldown expired' : `${Math.round(left / 60_000)} min left`,
+          );
+          if (left !== null) {
+            setCooldownUntil(formatRemaining(left));
+            setShowCooldown(true);
+            setCooldownActive(true);
+          }
+        }
+      } catch (err) {
+        if (!live) return;
+        console.log(`[review] ${reviewUuid} failed:`, err);
+        setIsLoading(false);
+      }
+    })();
+
+    return () => { live = false; };
+  }, [reviewUuid, openSample]);
 
   // ── Open dropped / browsed file ────────────────────────────────────────────
 
@@ -597,8 +738,9 @@ export function SvgDropZone() {
       const cur = pt.matrixTransform(svgEl.getScreenCTM()!.inverse());
       const dist = Math.hypot(cur.x - canvasScale.cx, cur.y - canvasScale.cy);
       const s = Math.max(dist / canvasScale.startDist, 0.05);   // uniform, guarded away from 0
-      // Scale about the SHARED centre, then apply each layer's original transform: the
-      // selection grows as one block, so the gaps between layers scale with them.
+      // Scale about the SHARED anchor (the selection's top-left), then apply each layer's
+      // original transform: the selection grows as one block, so the gaps between layers
+      // scale with them.
       canvasScale.layerIds.forEach((id) => {
         const layerEl = svgEl.querySelector(`#${CSS.escape(id)}`);
         if (layerEl) {
@@ -913,6 +1055,7 @@ export function SvgDropZone() {
   // Stable close/open handlers so the memoised modal components don't re-render on
   // unrelated state changes.
   const closeUpsell = useCallback(() => setShowUpsell(false), []);
+  const closeCooldown = useCallback(() => setShowCooldown(false), []);
   const openAbortReason = useCallback(() => setAbortReasonOpen(true), []);
   const closeAbortReason = useCallback(() => setAbortReasonOpen(false), []);
   const openRating = useCallback(() => { setRating(0); setRatingHover(0); setRatingOpen(true); }, []);
@@ -996,8 +1139,11 @@ export function SvgDropZone() {
     });
   }, [activeSvg, selectionIds, captureBaseTransforms, snapshotForUndo]);
 
-  // mousedown on scale handle: uniformly scale every selected non-background layer
-  // about the selection's shared centre
+  // mousedown on scale handle: uniformly scale every selected non-background layer,
+  // anchored at the selection's top-left corner so it grows down and to the right —
+  // the corner opposite the handle stays put, the way a drag on a bottom-right grip
+  // reads. (Scaling about the centre instead made the artwork creep up and left as it
+  // grew.)
   const handleScaleHandleMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     e.stopPropagation();
     if (!selectionIds.length || !activeSvg?.layers.length) return;
@@ -1006,8 +1152,8 @@ export function SvgDropZone() {
 
     const box = unionBoxInRootSpace(svgEl, selectionIds);
     if (!box) return;
-    const cx = box.x + box.width / 2;
-    const cy = box.y + box.height / 2;
+    const cx = box.x;
+    const cy = box.y;
 
     const pt = svgEl.createSVGPoint();
     pt.x = e.clientX; pt.y = e.clientY;
@@ -1180,6 +1326,24 @@ export function SvgDropZone() {
       else textEl.textContent = attrs.content;
     }
     if (attrs.font   !== undefined) textEl.setAttribute('font-family', attrs.font);
+    // A font pick applies to the whole selection, not just the row the inspector is
+    // pointed at — with several text layers selected the dropdown reads as acting on all
+    // of them. Only the font fans out; size/weight/colour/content stay single-layer.
+    // Non-text layers in the selection are skipped so a shape never picks up font-family.
+    if (attrs.font !== undefined && selectedLayers.size > 1) {
+      for (const id of selectedLayers) {
+        if (id === selectedLayer || !textLayerIds.has(id)) continue;
+        const otherEl = doc.getElementById(id);
+        if (!otherEl) continue;
+        // Same resolution as the primary layer above, so both behave identically: the
+        // inner <text> for a text group, otherwise the element itself (font-family
+        // inherits to any text inside it).
+        const otherText = otherEl.getAttribute('data-text-layer') === '1'
+          ? otherEl.querySelector('text')
+          : otherEl;
+        if (otherText) otherText.setAttribute('font-family', attrs.font);
+      }
+    }
     if (attrs.size   !== undefined) textEl.setAttribute('font-size', String(attrs.size));
     if (attrs.weight !== undefined) textEl.setAttribute('font-weight', String(attrs.weight));
     if (attrs.color  !== undefined) textEl.setAttribute('fill', attrs.color);
@@ -1195,7 +1359,7 @@ export function SvgDropZone() {
         : prev.layers;
       return { ...prev, content, layers };
     });
-  }, [selectedLayer, activeSvg, snapshotForUndo]);
+  }, [selectedLayer, selectedLayers, textLayerIds, activeSvg, snapshotForUndo]);
 
   // Toggle a suggested font: deselect if already selected, else apply it to the
   // selected text layer (or the pending text-form default when nothing is selected).
@@ -1484,10 +1648,32 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
 
   // ── Customise (strip all text + font suggestions) ─────────────────────────
 
+  // Tell the review host the asset has been customised, once the pass has actually
+  // succeeded. Only meaningful for a /<uuid> deep link — a dropped file or a sample has
+  // no uuid to report against. Fire-and-forget and self-contained: the artwork on the
+  // canvas is already correct, so a failed notification must not surface as a failed
+  // customise. Logged under [review/customised] like the other review calls.
+  const notifyCustomised = useCallback(async () => {
+    if (!reviewUuid) return;
+    try {
+      const res = await fetch(`/api/review/customised/${reviewUuid}`, { method: 'POST' });
+      const data = (await res.json()) as { message?: string; error?: { message?: string } };
+      console.log(`[review/customised] ${reviewUuid} -> ${res.status}`, data);
+      if (!res.ok || data.message !== 'success') {
+        console.log('[review/customised] upstream did not report success');
+      }
+    } catch (err) {
+      console.log(`[review/customised] ${reviewUuid} failed:`, err);
+    }
+  }, [reviewUuid]);
+
   const runCustomise = useCallback(async () => {
     if (!activeSvg) return;
     // Gated assets (edit === 0) can't use the AI features — show the upsell instead.
     if (activeSvg.edit === 0) { setShowUpsell(true); return; }
+    // Customised too recently for the host to accept another pass — re-raise the
+    // message instead of making the call, the same way a gated asset gets the upsell.
+    if (cooldownActive) { setShowCooldown(true); return; }
     setCustomiseLoading(true);
     setAiLoading(true);
     setAiError(null);
@@ -1671,6 +1857,9 @@ Return ONLY valid JSON, no markdown:
       dropSelectionOutside(kept, newTextLayers);
       if (newTextLayers.length > 0) setSelectedLayer(newTextLayers[0].id);
 
+      // Reached only when the pass ran through — the catch below owns every failure.
+      void notifyCustomised();
+
     } catch (err) {
       setAiError(err instanceof Error ? err.message : 'Customise failed');
     } finally {
@@ -1679,7 +1868,7 @@ Return ONLY valid JSON, no markdown:
       setAiLoading(false);
       setAiStatusMsg('Thinking…');
     }
-  }, [activeSvg, addGoogleFont, loadGoogleFontLink, snapshotForUndo]);
+  }, [activeSvg, addGoogleFont, loadGoogleFontLink, snapshotForUndo, notifyCustomised, cooldownActive]);
 
   const applyFontGlobally = useCallback((fontName: string) => {
     if (!activeSvg) return;
@@ -2347,6 +2536,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
 
       {/* Modal overlays (memoised) — see editor-modals.tsx */}
       <UpsellModal open={showUpsell} onClose={closeUpsell} />
+      <CooldownModal open={showCooldown} available={cooldownUntil} onClose={closeCooldown} />
       <RatingModal
         open={ratingOpen}
         rating={rating}
@@ -2502,6 +2692,13 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                 done={customiseDone}
                 toolsOpen={aiPanelOpen}
                 showTools={SHOW_DEV_UI}
+                // can_edit: 0 — the pill stays enabled so the click reaches the upsell.
+                gated={activeSvg.edit === 0}
+                // Nothing to customise until the artwork is parsed and on the canvas.
+                ready={!!activeSvg.content && !isLoading}
+                // Customised too recently — the pill stays live and re-opens the
+                // cooldown message instead of running the pass.
+                cooldown={cooldownActive}
               />
             </>
           )}

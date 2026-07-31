@@ -112,6 +112,63 @@ export const UpsellModal = React.memo(function UpsellModal({
   );
 });
 
+// ── Customise cooldown ───────────────────────────────────────────────────────
+// Shown once a /<uuid> asset has resolved and turns out to have been customised
+// inside the cooldown window (has_customised + customise_next vs API_COOLDOWN). The
+// copy is a placeholder — the shape is here so the wording can be dropped in without
+// touching the plumbing. `available` is the pre-formatted "when it unlocks" string, or
+// undefined when the upstream gave no usable customise_next.
+export const CooldownModal = React.memo(function CooldownModal({
+  open, available, onClose,
+}: {
+  open: boolean;
+  available?: string;
+  onClose: () => void;
+}) {
+  if (!open) return null;
+  return (
+    <div onClick={onClose} style={backdrop(80, C.backdropAi)}>
+      <div onClick={(e) => e.stopPropagation()} style={{ ...card(376), overflow: 'hidden' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '18px 20px 0' }}>
+          <span
+            style={{
+              width: 26, height: 26, borderRadius: 8, flex: 'none',
+              background: C.accentGradDiag, color: '#fff',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}
+          >
+            <SparklesIcon size={14} />
+          </span>
+          <h2 style={{ ...titleStyle, flex: 1 }}>Already customised</h2>
+          <button
+            type="button"
+            className="ed-ghost"
+            onClick={onClose}
+            title="Close"
+            style={{ border: 'none', background: 'transparent', color: C.textFaint, padding: 2, borderRadius: 6, cursor: 'pointer', display: 'flex' }}
+          >
+            <CloseIcon size={14} />
+          </button>
+        </div>
+
+        <div style={{ padding: '0 20px 18px' }}>
+          {/* PLACEHOLDER COPY — swap for the final wording. */}
+          <p style={{ ...subCopyStyle, margin: '10px 0 0' }}>
+            This artwork has been customised recently, so the AI pass is on cooldown.
+            {available ? ` You can customise it again ${available}.` : ''}
+          </p>
+
+          <div style={{ ...footerStyle, marginTop: 16 }}>
+            <button type="button" onClick={onClose} style={{ ...primaryButtonStyle, background: C.accentGrad }}>
+              Got it
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+});
+
 // ── Confirmation ─────────────────────────────────────────────────────────────
 // In-app confirm, styled like the overlays above. Not window.confirm(): a native
 // dialog blocks the page, can't be styled, and reads as a browser error rather than

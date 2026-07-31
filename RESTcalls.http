@@ -1,0 +1,14 @@
+### list svg samples
+GET https://dev.vectorstock.com/review/svg/list
+Content-Type: application/json
+
+### request sample svg
+
+POST https://dev.vectorstock.com/review/svg/check/5abb4887-09cf-4d6a-9b88-b0c38eddd3c0
+Content-Type: application/json
+
+
+###customised 5abb4887-09cf-4d6a-9b88-b0c38eddd3c0
+
+POST https://dev.vectorstock.com/review/svg/customised/5abb4887-09cf-4d6a-9b88-b0c38eddd3c0
+Content-Type: application/json

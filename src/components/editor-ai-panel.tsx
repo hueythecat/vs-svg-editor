@@ -59,6 +59,7 @@ const spinner = (
 // showTools false the caret and its divider go and the pill is simply a button.
 export const AiPill = React.memo(function AiPill({
   onCustomise, onOpenTools, loading, done, toolsOpen, showTools,
+  gated = false, ready = true, cooldown = false,
 }: {
   onCustomise: () => void;
   onOpenTools: () => void;
@@ -66,35 +67,58 @@ export const AiPill = React.memo(function AiPill({
   done: boolean;
   toolsOpen: boolean;
   showTools: boolean;
+  gated?: boolean;
+  ready?: boolean;
+  cooldown?: boolean;
 }) {
-  const label = loading ? 'Customising…' : done ? 'Customised' : 'Customise';
+  // Two states divert the click to a modal rather than the pass: `gated` (edit === 0 —
+  // the upsell) and `cooldown` (customised too recently — the cooldown message). Both
+  // must stay live-looking and clickable no matter what the loading/done flags say.
+  // Disabling either would swallow the click and leave the user with no explanation.
+  //
+  // `ready` is the one thing that overrides them: until the SVG is on the canvas there
+  // is nothing to customise and nothing to explain, so the pill starts inert.
+  const diverted = gated || cooldown;
+  const spent = done && !diverted;
+  const busy = loading && !diverted;
+  const inert = !ready || busy || spent;
+  const label = busy ? 'Customising…' : spent ? 'Customised' : 'Customise';
   return (
     <div
       style={{
         position: 'absolute', right: 16, bottom: 16, zIndex: 15,
         display: 'flex', alignItems: 'center',
-        background: C.accentGrad,
+        // Once the pass has run, the pill is spent for this artwork — drop the accent
+        // gradient for flat grey and lose the lift, so it reads as disabled rather than
+        // as a button that's simply been relabelled.
+        background: inert && !busy ? C.disabled : C.accentGrad,
         borderRadius: 11,
-        boxShadow: SHADOW.aiPill,
+        boxShadow: inert && !busy ? 'none' : SHADOW.aiPill,
         fontFamily: FONT_STACK,
-        opacity: loading ? 0.85 : 1,
+        opacity: busy ? 0.85 : inert ? 0.75 : 1,
       }}
     >
       <button
         type="button"
         onClick={onCustomise}
-        disabled={loading || done}
-        title={done ? 'This image has already been customised' : 'Run the AI customise pass'}
+        disabled={inert}
+        title={
+          !ready ? 'Waiting for the artwork to load'
+            : gated ? 'Unlock AI editing'
+            : cooldown ? 'This artwork was customised recently — try again later'
+            : spent ? 'This image has already been customised'
+            : 'Run the AI customise pass'
+        }
         style={{
           display: 'flex', alignItems: 'center', gap: 8,
           background: 'transparent', border: 'none',
           // Tighter on the right when the caret follows it, even padding when it doesn't.
           padding: showTools ? '11px 13px 11px 15px' : '11px 15px',
-          cursor: loading || done ? 'default' : 'pointer',
+          cursor: inert ? 'default' : 'pointer',
           fontFamily: FONT_STACK,
         }}
       >
-        {loading ? (
+        {busy ? (
           <span
             style={{
               width: 13, height: 13, borderRadius: '50%', flex: 'none',
@@ -106,15 +130,6 @@ export const AiPill = React.memo(function AiPill({
           <span style={{ color: '#fff', display: 'flex' }}><SparklesIcon size={13} /></span>
         )}
         <span style={{ color: '#fff', fontSize: 12.5, fontWeight: 700 }}>{label}</span>
-        <span
-          style={{
-            fontSize: 9, fontWeight: 700, color: '#fff',
-            background: 'rgba(255,255,255,.28)',
-            padding: '2px 6px', borderRadius: 5,
-          }}
-        >
-          PRO
-        </span>
       </button>
 
       {showTools && (

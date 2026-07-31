@@ -245,7 +245,7 @@ export function DevRail<S extends Sample>({
                 <option key={d.id} value={d.id}>{d.id} — {d.name}</option>
               ))}
             </select>
-            {/* Review id — anything on dev.vectorstock.com, not just the bundled zips.
+            {/* Review id — anything on the review host (API_HOST), not just the bundled zips.
                 Enter submits so an id can be pasted and fired without reaching for the
                 button. */}
             <div style={{ display: 'flex', gap: 5, marginTop: 6 }}>

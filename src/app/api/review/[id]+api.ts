@@ -2,20 +2,30 @@
 // the upstream review endpoint (also path-style — /review/svg/<id>) for the asset, reads
 // the `url` node off the JSON, downloads that SVG and returns it — same { svg } /
 // { svg: null } / { error } contract as download+api.ts, so the rail can treat both
-// sources identically.
+// sources identically. It's also step 2 of the /<uuid> deep link, after
+// review/check/[uuid] has turned the uuid into this numeric id.
 //
-// This runs server-side rather than in the rail because dev.vectorstock.com sends no
+// This runs server-side rather than in the rail because the review host sends no
 // CORS headers: a browser fetch would be blocked before the response was readable.
+// The host comes from API_HOST — no EXPO_PUBLIC_ prefix, so it's server-only, and one
+// place to repoint both this and review/check/[uuid].
 
 // Only digits — the id is interpolated into the upstream URL.
 const ID_RE = /^\d+$/;
-
-const REVIEW_BASE = 'https://dev.vectorstock.com/review/svg';
 
 export async function GET(
   request: Request,
   params?: Record<string, string | string[] | undefined>,
 ): Promise<Response> {
+  const host = process.env.API_HOST;
+  if (!host) {
+    return Response.json(
+      { error: { message: 'API_HOST is not set on the server' } },
+      { status: 500 },
+    );
+  }
+  const reviewBase = `${host.replace(/\/+$/, '')}/review/svg`;
+
   // Prefer the routed [id] param; fall back to the last path segment so the handler
   // doesn't depend on how the router hands params over.
   const routed = params?.id;
@@ -29,7 +39,7 @@ export async function GET(
   }
 
   try {
-    const lookup = await fetch(`${REVIEW_BASE}/${id}`, {
+    const lookup = await fetch(`${reviewBase}/${id}`, {
       headers: { accept: 'application/json' },
     });
     if (!lookup.ok) {

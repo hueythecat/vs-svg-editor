@@ -105,10 +105,10 @@ export const CanvasStage = React.memo(function CanvasStage({
         WebkitUserSelect: 'none',
       }}
     >
-      {/* Beta badge — sits below the dev rail so the two don't collide */}
+      {/* Beta badge — top-right, clear of the dev rail and the toolbar */}
       <span
         style={{
-          position: 'absolute', top: 58, left: 16, zIndex: 20,
+          position: 'absolute', top: 16, right: 16, zIndex: 20,
           pointerEvents: 'none',
           padding: '2px 8px', borderRadius: 6,
           fontSize: 10, fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase',
@@ -224,7 +224,7 @@ export const CanvasStage = React.memo(function CanvasStage({
                 title="Drag to move"
                 style={{
                   ...handleBase,
-                  top: -11, right: -11,
+                  top: -11, left: -11,
                   width: 22, height: 22, borderRadius: 6,
                   background: C.accent, color: '#fff', cursor: 'move',
                 }}
