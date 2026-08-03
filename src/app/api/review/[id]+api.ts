@@ -38,8 +38,15 @@ export async function GET(
     return Response.json({ error: { message: 'Invalid or missing id' } }, { status: 400 });
   }
 
+  // ?fresh=1 — the caller knows this asset has been customised, so the copy upstream
+  // has been rewritten and any cached one is the wrong artwork. Bypass the cache on
+  // both hops: the lookup (whose `url` may itself have changed) and the asset download.
+  const fresh = new URL(request.url).searchParams.get('fresh') === '1';
+  const noStore: RequestInit = fresh ? { cache: 'no-store' } : {};
+
   try {
     const lookup = await fetch(`${reviewBase}/${id}`, {
+      ...noStore,
       headers: { accept: 'application/json' },
     });
     if (!lookup.ok) {
@@ -77,7 +84,7 @@ export async function GET(
       );
     }
 
-    const asset = await fetch(assetUrl);
+    const asset = await fetch(assetUrl, noStore);
     if (!asset.ok) {
       return Response.json(
         { error: { message: `Asset download failed (${asset.status})` } },
@@ -89,7 +96,9 @@ export async function GET(
     // Guard against an HTML error page arriving with a 200.
     if (!svg.includes('<svg')) return Response.json({ svg: null });
 
-    return Response.json({ svg });
+    // Tell the browser not to keep a fresh response either — the next selection of a
+    // customised asset must reach the server again rather than replay this body.
+    return Response.json({ svg }, fresh ? { headers: { 'cache-control': 'no-store' } } : {});
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Review fetch failed';
     return Response.json({ error: { message } }, { status: 500 });

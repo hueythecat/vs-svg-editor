@@ -28,12 +28,14 @@ import {
 import { C, EDITOR_CSS, FONT_STACK, SHADOW } from '@/lib/design-tokens';
 import { SHOW_DEV_UI } from '@/lib/env';
 import { readAiCache, writeAiCache } from '@/lib/ai-cache';
+import { isIgnoreCooldownPrompt, isIgnoreHasCustomised } from '@/lib/dev-flags';
 import type { AiActionType, LlmProvider } from './editor-types';
 import { LLM_OPTIONS } from './editor-types';
 import { LayersPanel } from './editor-layers-panel';
 import { EditorInspector } from './editor-inspector';
 import { AiPanel, AiPill } from './editor-ai-panel';
 import { DevRail, SAMPLE_DRAG_MIME } from './dev-rail';
+import type { OpenedSample } from './dev-rail';
 import { UpsellModal, CooldownModal, RatingModal, AbortReasonModal, ConfirmModal } from './editor-modals';
 import { EditorToolbar } from './editor-toolbar';
 import { CanvasStage } from './editor-canvas';
@@ -172,6 +174,18 @@ const cooldownRemaining = (nextMs: number | null, cooldownHours: number): number
   const ms = nextMs - Date.now();
   if (ms <= 0) return null;
   return ms <= cooldownHours * 3_600_000 ? ms : null;
+};
+
+// What /api/review/check/<uuid> answers with — the fields this file reads, plus the
+// cooldown_hours the proxy derives from API_COOLDOWN.
+type ReviewCheck = {
+  message?: string;
+  id?: number;
+  can_edit?: number;
+  has_customised?: number;
+  customise_next?: string | number;
+  cooldown_hours?: number;
+  error?: { message?: string };
 };
 
 const formatRemaining = (ms: number): string => {
@@ -376,6 +390,11 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       // flow re-raises it after this runs, so clearing here can't stomp the new asset's.
       setCooldownActive(false);
       setShowCooldown(false);
+      // Same reasoning for which review asset is open: every load funnels through here,
+      // so a file drop or a bundled sample clears it, and openReviewUuid sets it again
+      // straight after. Without this a later customise would be reported against
+      // whichever review asset happened to be open before.
+      openReviewUuidRef.current = null;
       undoStackRef.current = [];
       redoStackRef.current = [];
       setUndoCount(0);
@@ -413,97 +432,147 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
 
   // ── Open review asset (/<uuid> deep link) ──────────────────────────────────
 
-  // A uuid in the path identifies a review asset. The check endpoint says what it
-  // resolves to — { message: 'success', id, can_edit } — and on a successful answer
-  // the numeric id goes through /api/review/<id>, the same download the dev rail's
-  // id box uses, and opens like any other sample.
+  // A uuid identifies a review asset. The check endpoint says what it resolves to —
+  // { message: 'success', id, can_edit } — and on a successful answer the numeric id
+  // goes through /api/review/<id>, the same download the dev rail's id box uses, and
+  // opens like any other sample.
   // can_edit only decides whether the AI/customise pass is allowed: it becomes the
   // asset's `edit` gate, so can_edit: 0 still opens the artwork on the canvas and
   // sends the customise click to the upsell instead.
-  // Both responses are logged under [review…] so a deep link can be traced without
-  // reaching for the network tab.
+  // Both responses are logged under [review…] so a load can be traced without reaching
+  // for the network tab.
+  //
+  // A callback rather than effect-only code because two things open a uuid: the
+  // /<uuid> path (the effect below) and the dev rail's list dropdown. Both must take
+  // this exact route, cooldown and edit gate included — a second implementation would
+  // be a second set of rules to keep in sync.
+  //
+  // Returns the sample it opened so the dev rail can add a preview card for it, the
+  // same way its own fetches do — or null when nothing was opened, so a failed
+  // selection doesn't leave a card pointing at artwork that never loaded.
+  //
+  // Reopening a uuid this session replays what was already resolved instead of asking
+  // again — the same artwork the preview card shows, so the two can't disagree. The
+  // check response is kept rather than the conclusions drawn from it, so the cooldown
+  // is re-derived on each replay and the dev toggles still apply. A successful
+  // customise drops the entry: the host rewrites the SVG, so the copy held here stops
+  // being the artwork.
+  const reviewCacheRef = useRef(new Map<string, { sample: OpenedSample; check: ReviewCheck }>());
+
+  // Which review asset is on the canvas, if any. Not derivable from `reviewUuid`, which
+  // only knows about the /<uuid> path — an asset opened from the dev rail's dropdown
+  // has no uuid in the URL at all.
+  const openReviewUuidRef = useRef<string | null>(null);
+
+  // Applied on both paths (fresh check and cache replay), so an asset's cooldown reads
+  // the same however it was opened.
+  const applyCooldown = useCallback((check: ReviewCheck) => {
+    if (check.has_customised !== 1) return;
+    // Asked at call time, not captured in a dep: flipping the toggle applies to the
+    // next asset opened without this callback having to be rebuilt.
+    if (isIgnoreHasCustomised()) {
+      console.log(`[review] ${check.id} has_customised=1 — ignored (dev toggle)`);
+      return;
+    }
+    const left = cooldownRemaining(
+      parseCustomiseNext(check.customise_next),
+      check.cooldown_hours ?? 24,
+    );
+    console.log(
+      `[review] ${check.id} has_customised=1 customise_next=${check.customise_next} ->`,
+      left === null ? 'cooldown expired' : `${Math.round(left / 60_000)} min left`,
+    );
+    if (left !== null) {
+      setCooldownUntil(formatRemaining(left));
+      setCooldownActive(true);
+    }
+  }, []);
+
+  const openReviewUuid = useCallback(async (uuid: string): Promise<OpenedSample | null> => {
+    // Already resolved this session — reopen from what's held rather than repeating the
+    // check and download. applyParsed clears the cooldown as part of loading, so the
+    // cooldown is re-applied after, exactly as the fresh path does.
+    const cached = reviewCacheRef.current.get(uuid);
+    if (cached) {
+      console.log(`[review] ${uuid} — reopening from cache, no requests made`);
+      setIsLoading(true);
+      await openSample(cached.sample);
+      openReviewUuidRef.current = uuid;
+      applyCooldown(cached.check);
+      return cached.sample;
+    }
+
+    // Hold the loading state across both requests so the drop zone doesn't flash up
+    // in between — opening an asset should look like it's opening artwork from the start.
+    setIsLoading(true);
+    try {
+      const res = await fetch(`/api/review/check/${uuid}`, { method: 'POST' });
+      const check = (await res.json()) as ReviewCheck;
+      console.log(`[review/check] ${uuid} -> ${res.status}`, check);
+
+      if (!res.ok || check.message !== 'success' || !check.id) {
+        console.log('[review] check unsuccessful — nothing to load');
+        setIsLoading(false);
+        return null;
+      }
+      // An asset that has been customised has had its SVG rewritten upstream, so a
+      // cached copy is the wrong artwork rather than merely a stale one. `fresh=1`
+      // makes the proxy bypass its caches, and cache: 'reload' does the same for this
+      // request, so re-selecting a customised asset always shows what's there now.
+      // The dev toggle only suppresses the cooldown, never this: whatever the host
+      // holds is still the artwork to open.
+      const customised = check.has_customised === 1;
+      const dl = await fetch(
+        `/api/review/${check.id}${customised ? '?fresh=1' : ''}`,
+        customised ? { cache: 'reload' } : undefined,
+      );
+      const data = (await dl.json()) as { svg?: string | null; error?: { message?: string } };
+      console.log(
+        `[review/download] ${check.id}${customised ? ' (fresh)' : ''} -> ${dl.status}`,
+        data.svg ? `${data.svg.length} chars of SVG` : data,
+      );
+
+      if (!dl.ok || !data.svg) {
+        setIsLoading(false);
+        return null;
+      }
+
+      // Same hand-off as the dev rail: inline the SVG as a data: URI so openSample
+      // can re-read it with fetch().text(), exactly like a static sample src.
+      // Anything other than can_edit: 1 gates the AI features behind the upsell.
+      const edit = check.can_edit === 1 ? 1 : 0;
+      console.log(`[review] ${check.id} opening with edit=${edit} (can_edit=${check.can_edit})`);
+      const sample: OpenedSample = {
+        label: `Review ${check.id}`,
+        name: `vectorstock_${check.id}.svg`,
+        src: `data:image/svg+xml,${encodeURIComponent(data.svg)}`,
+        edit,
+      };
+      await openSample(sample);
+      openReviewUuidRef.current = uuid;
+      reviewCacheRef.current.set(uuid, { sample, check });
+
+      // Record the cooldown, don't announce it. Opening an asset isn't the moment to
+      // interrupt with a restriction on an action nobody has asked for yet — the
+      // message belongs to the Customise click, which is where runCustomise raises it.
+      applyCooldown(check);
+      return sample;
+    } catch (err) {
+      console.log(`[review] ${uuid} failed:`, err);
+      setIsLoading(false);
+      return null;
+    }
+  }, [openSample, applyCooldown]);
+
   const reviewLoadedRef = useRef<string | null>(null);
 
   useEffect(() => {
     // The ref makes this once-per-uuid: an effect re-run (StrictMode's double mount,
-    // a re-render changing openSample) must not fire the pair of requests again.
+    // a re-render changing openReviewUuid) must not fire the requests again.
     if (!reviewUuid || reviewLoadedRef.current === reviewUuid) return;
     reviewLoadedRef.current = reviewUuid;
-
-    let live = true;
-    // Hold the loading state across both requests so the drop zone doesn't flash up
-    // in between — a deep link should look like it's opening artwork from the start.
-    setIsLoading(true);
-
-    (async () => {
-      try {
-        const res = await fetch(`/api/review/check/${reviewUuid}`, { method: 'POST' });
-        const check = (await res.json()) as {
-          message?: string; id?: number; can_edit?: number;
-          has_customised?: number; customise_next?: string | number;
-          cooldown_hours?: number;
-          error?: { message?: string };
-        };
-        if (!live) return;
-        console.log(`[review/check] ${reviewUuid} -> ${res.status}`, check);
-
-        if (!res.ok || check.message !== 'success' || !check.id) {
-          console.log('[review] check unsuccessful — nothing to load');
-          setIsLoading(false);
-          return;
-        }
-        const dl = await fetch(`/api/review/${check.id}`);
-        const data = (await dl.json()) as { svg?: string | null; error?: { message?: string } };
-        if (!live) return;
-        console.log(
-          `[review/download] ${check.id} -> ${dl.status}`,
-          data.svg ? `${data.svg.length} chars of SVG` : data,
-        );
-
-        if (!dl.ok || !data.svg) {
-          setIsLoading(false);
-          return;
-        }
-
-        // Same hand-off as the dev rail: inline the SVG as a data: URI so openSample
-        // can re-read it with fetch().text(), exactly like a static sample src.
-        // Anything other than can_edit: 1 gates the AI features behind the upsell.
-        const edit = check.can_edit === 1 ? 1 : 0;
-        console.log(`[review] ${check.id} opening with edit=${edit} (can_edit=${check.can_edit})`);
-        await openSample({
-          label: `Review ${check.id}`,
-          name: `vectorstock_${check.id}.svg`,
-          src: `data:image/svg+xml,${encodeURIComponent(data.svg)}`,
-          edit,
-        });
-        if (!live) return;
-
-        // Raised only now, with the artwork on the canvas: the modal is about what you
-        // can do to what you're looking at, so it must not land over an empty editor.
-        if (check.has_customised === 1) {
-          const left = cooldownRemaining(
-            parseCustomiseNext(check.customise_next),
-            check.cooldown_hours ?? 24,
-          );
-          console.log(
-            `[review] ${check.id} has_customised=1 customise_next=${check.customise_next} ->`,
-            left === null ? 'cooldown expired' : `${Math.round(left / 60_000)} min left`,
-          );
-          if (left !== null) {
-            setCooldownUntil(formatRemaining(left));
-            setShowCooldown(true);
-            setCooldownActive(true);
-          }
-        }
-      } catch (err) {
-        if (!live) return;
-        console.log(`[review] ${reviewUuid} failed:`, err);
-        setIsLoading(false);
-      }
-    })();
-
-    return () => { live = false; };
-  }, [reviewUuid, openSample]);
+    void openReviewUuid(reviewUuid);
+  }, [reviewUuid, openReviewUuid]);
 
   // ── Open dropped / browsed file ────────────────────────────────────────────
 
@@ -1654,18 +1723,25 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
   // canvas is already correct, so a failed notification must not surface as a failed
   // customise. Logged under [review/customised] like the other review calls.
   const notifyCustomised = useCallback(async () => {
-    if (!reviewUuid) return;
+    // The uuid of whatever is on the canvas, not the one in the URL: an asset opened
+    // from the dev rail's dropdown has no uuid in the path, and keying off `reviewUuid`
+    // meant those runs silently notified nothing.
+    const uuid = openReviewUuidRef.current;
+    if (!uuid) return;
+    // The host rewrites the SVG for a customised asset, so the copy held for this uuid
+    // is no longer the artwork — drop it and let the next open fetch it fresh.
+    reviewCacheRef.current.delete(uuid);
     try {
-      const res = await fetch(`/api/review/customised/${reviewUuid}`, { method: 'POST' });
+      const res = await fetch(`/api/review/customised/${uuid}`, { method: 'POST' });
       const data = (await res.json()) as { message?: string; error?: { message?: string } };
-      console.log(`[review/customised] ${reviewUuid} -> ${res.status}`, data);
+      console.log(`[review/customised] ${uuid} -> ${res.status}`, data);
       if (!res.ok || data.message !== 'success') {
         console.log('[review/customised] upstream did not report success');
       }
     } catch (err) {
-      console.log(`[review/customised] ${reviewUuid} failed:`, err);
+      console.log(`[review/customised] ${uuid} failed:`, err);
     }
-  }, [reviewUuid]);
+  }, []);
 
   const runCustomise = useCallback(async () => {
     if (!activeSvg) return;
@@ -1673,7 +1749,16 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
     if (activeSvg.edit === 0) { setShowUpsell(true); return; }
     // Customised too recently for the host to accept another pass — re-raise the
     // message instead of making the call, the same way a gated asset gets the upsell.
-    if (cooldownActive) { setShowCooldown(true); return; }
+    // The dev toggle runs the pass anyway; asked at call time so flipping it takes
+    // effect on the next click without reopening the asset.
+    if (cooldownActive) {
+      if (isIgnoreCooldownPrompt()) {
+        console.log('[customise] cooldown active — running anyway (dev toggle)');
+      } else {
+        setShowCooldown(true);
+        return;
+      }
+    }
     setCustomiseLoading(true);
     setAiLoading(true);
     setAiError(null);
@@ -1808,7 +1893,24 @@ Return ONLY valid JSON, no markdown:
       console.log('[customise] LLM returned:', { hasText: parsed.hasText, removeIds: parsed.removeIds, rows: parsed.rows.length });
 
       setAiStatusMsg('Applying changes…');
-      const removeIds = filterOutBackgroundIds(doc.documentElement, parsed.removeIds, vw, vh, 'customise');
+
+      // The two tasks read different inputs — TASK 1 the raster, TASK 2 the SVG source —
+      // so they can disagree. hasText: false with a non-empty removeIds is that
+      // disagreement: the source analysis found lettering the image analysis couldn't
+      // read (white artwork rastered without its background is one way to get there).
+      // Deleting on that answer strips the wordmark and re-adds nothing, which is worse
+      // than doing nothing at all. Removal is only ever as trustworthy as the
+      // replacement that comes with it, so the whole edit is abandoned.
+      const contradictory = !parsed.hasText && parsed.removeIds.length > 0;
+      if (contradictory) {
+        console.log(
+          `[customise] hasText=false but ${parsed.removeIds.length} removeIds — contradictory answer, removing nothing`,
+        );
+      }
+
+      const removeIds = contradictory
+        ? []
+        : filterOutBackgroundIds(doc.documentElement, parsed.removeIds, vw, vh, 'customise');
       console.log(`[customise] removing ${removeIds.length}/${parsed.removeIds.length} element(s) after guard`);
       for (const sid of removeIds) {
         const el = aiIdMap.get(sid);
@@ -1857,14 +1959,25 @@ Return ONLY valid JSON, no markdown:
       dropSelectionOutside(kept, newTextLayers);
       if (newTextLayers.length > 0) setSelectedLayer(newTextLayers[0].id);
 
-      // Reached only when the pass ran through — the catch below owns every failure.
-      void notifyCustomised();
+      // Nothing removed and nothing added means the artwork is untouched — the font
+      // suggestions above are the only thing this run produced. Telling the host it was
+      // customised would start a 24h lockout for an edit that never happened, and the
+      // pill would grey out as spent, so an abandoned run stays repeatable instead.
+      const changed = removeIds.length > 0 || newTextLayers.length > 0;
+      if (changed) {
+        setCustomiseDone(true);
+        // Reached only when the pass ran through — the catch below owns every failure.
+        void notifyCustomised();
+      } else {
+        console.log('[customise] artwork unchanged — not marking customised');
+        setAiError('No text was detected in this artwork — nothing was changed.');
+      }
 
     } catch (err) {
       setAiError(err instanceof Error ? err.message : 'Customise failed');
+      setCustomiseDone(true);
     } finally {
       setCustomiseLoading(false);
-      setCustomiseDone(true);
       setAiLoading(false);
       setAiStatusMsg('Thinking…');
     }
@@ -2764,6 +2877,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
           onSetOpen={setDevRailOpen}
           onOpenSample={openSample}
           onOpenFetched={openSample}
+          onOpenReviewUuid={openReviewUuid}
         />
       )}
     </div>

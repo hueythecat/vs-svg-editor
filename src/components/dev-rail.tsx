@@ -1,27 +1,58 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 
 import { C, FONT_STACK, SHADOW } from '@/lib/design-tokens';
 import { clearAiCache, isAiCacheEnabled, setAiCacheEnabled } from '@/lib/ai-cache';
+import {
+  isIgnoreCooldownPrompt, isIgnoreHasCustomised,
+  setIgnoreCooldownPrompt, setIgnoreHasCustomised,
+} from '@/lib/dev-flags';
 import { ChevronIcon, SettingsIcon } from './svg-icons';
 
 type Sample = { label: string; name: string; src: string; edit?: 0 | 1 };
+
+// What a review-uuid open hands back, so the rail can add a preview card for artwork
+// the parent resolved. Exported because the parent builds it — same shape as Sample,
+// named for what it is at that end.
+export type OpenedSample = Sample;
 
 // Custom drag MIME so a preview dragged onto the canvas can be told apart from an OS
 // file drop. The drop handler in svg-drop-zone reads this same key.
 export const SAMPLE_DRAG_MIME = 'application/x-svg-sample';
 
-// Dev-only: the zip bundles sitting in assets/downloads. Each is a vectorstock asset
-// (the number is the id in vectorstock_<id>.zip); names are the titles from
-// vectorstock.com. Selecting one calls /api/download, which extracts the SVG from the
-// archive and hands it back for preview.
-// edit: 1 = editable, 0 = not — flag per item (defaults to 1 here; flip individually).
-const DOWNLOADS: ReadonlyArray<{ id: string; name: string; edit: 0 | 1 }> = [
-  { id: '10383776', name: 'Circular Monogram Logo Emblem',      edit: 1 },
-  { id: '16303184', name: 'Abstract Logo with Circles & Letters', edit: 1 },
-  { id: '21513865', name: 'Skyscraper Logo & Real Estate Symbol', edit: 1 },
-  { id: '26162964', name: 'Colorful Deer Emblem Logo',           edit: 1 },
-  { id: '4505328',  name: 'Elegant Restaurant Logo Pattern',     edit: 0 },
-];
+// One row of /api/review/list — the review host's own asset list. Only the fields the
+// dropdown needs are typed; the upstream sends more (user_id, cancelled, timestamps…).
+type ReviewListItem = {
+  id?: number;
+  name?: string;
+  art_id?: number;
+  edit_uuid?: string;
+  can_customise?: number;
+  has_customised?: number;
+};
+
+// One option per artwork. The host currently refuses a second entry for an art id it
+// already holds — that's the message: "failed" the id box tolerates — but the dropdown
+// shouldn't depend on it: two rows for one art_id would list the same artwork twice
+// under different uuids, and picking either would be a coin toss on which is current.
+// The newest row wins, decided by the row id rather than array position so it doesn't
+// rest on the order the host happens to send. Rows sharing a uuid collapse too — those
+// are the same entry outright, and would collide as React keys.
+const dedupeReviewList = (rows: ReviewListItem[]): ReviewListItem[] => {
+  const newest = new Map<string, ReviewListItem>();
+  for (const row of rows) {
+    // art_id is the identity; fall back to the uuid so a row missing one still stands
+    // on its own rather than every such row folding into a single entry.
+    const key = row.art_id != null ? `art:${row.art_id}` : `uuid:${row.edit_uuid}`;
+    const held = newest.get(key);
+    if (!held || (row.id ?? 0) > (held.id ?? 0)) newest.set(key, row);
+  }
+  const seenUuid = new Set<string>();
+  return [...newest.values()].filter((r) => {
+    if (seenUuid.has(r.edit_uuid!)) return false;
+    seenUuid.add(r.edit_uuid!);
+    return true;
+  });
+};
 
 // The internal/dev affordance from the handoff §1.4 — deliberately dark so it never
 // reads as user UI, collapsing to a small pill at the top-left of the canvas.
@@ -37,12 +68,19 @@ interface DevRailProps<S extends Sample> {
   onOpenSample: (sample: S) => void;
   // Opens a download that was fetched and extracted at runtime (src is a data: URI).
   onOpenFetched?: (sample: Sample) => void;
+  // Opens a review asset by uuid — the same path the /<uuid> deep link takes, check
+  // call and cooldown included. The dropdown's selection action. Resolves with the
+  // sample it opened (null if nothing loaded) so the rail can preview it.
+  onOpenReviewUuid?: (uuid: string) => Promise<OpenedSample | null>;
 }
 
 export function DevRail<S extends Sample>({
   samples, activeSample, isLoading, open, onSetOpen, onOpenSample, onOpenFetched,
+  onOpenReviewUuid,
 }: DevRailProps<S>) {
   const [selectedDownload, setSelectedDownload] = useState<string>('');
+  const [reviewList, setReviewList] = useState<ReviewListItem[]>([]);
+  const [listStatus, setListStatus] = useState<string | null>('Loading…');
   const [reviewId, setReviewId] = useState('');
   const [fetchStatus, setFetchStatus] = useState<string | null>(null);
   const [fetching, setFetching] = useState(false);
@@ -51,56 +89,68 @@ export function DevRail<S extends Sample>({
   // the cache module directly at call time — so it stays local to the rail. Lazy initial
   // state: reading storage during SSR would throw, and this only ever renders client-side.
   const [cacheOn, setCacheOn] = useState(() => isAiCacheEnabled());
+  // Same arrangement for the has_customised override: local mirror of the persisted
+  // preference, which the review load path reads directly at call time.
+  const [ignoreCustomised, setIgnoreCustomised] = useState(() => isIgnoreHasCustomised());
+  const [ignoreCooldown, setIgnoreCooldown] = useState(() => isIgnoreCooldownPrompt());
 
-  // Shared by the curated dropdown (/api/download, local zips) and the id box
-  // (/api/review, the remote review endpoint) — both answer with { svg } | { svg: null }
-  // | { error }, so everything from here down is identical.
-  // Returns whether an asset actually landed, so callers can reset their input only on
-  // a real success.
-  const fetchFrom = async (url: string, id: string, title: string, edit: 0 | 1) => {
-    setFetchStatus(null);
-    setFetching(true);
+  // The dropdown's contents come from the review host, not a hardcoded list, so it
+  // always reflects what's actually there to open. Fetched once the rail is expanded —
+  // no point calling while it's a collapsed pill — and once only, since a re-open
+  // shouldn't re-request.
+  // Returns the rows as well as storing them: the id box needs to search the refreshed
+  // list straight away, and the state set here isn't readable until the next render.
+  const loadList = useCallback(async (): Promise<ReviewListItem[]> => {
     try {
-      // Placeholder API pacing: hold the "Fetching asset" overlay for at least 1s so
-      // the request reads as a deliberate step rather than an instant flash. Runs the
-      // real fetch and the delay together, so the overlay lasts max(1s, fetch time).
-      const [res] = await Promise.all([
-        fetch(url),
-        new Promise((r) => setTimeout(r, 1000)),
-      ]);
-      const data = (await res.json()) as { svg?: string | null; error?: { message?: string } };
-      if (!res.ok) throw new Error(data.error?.message ?? `Request failed (${res.status})`);
-
-      if (!data.svg) {
-        setFetchStatus('No SVG');
-        return false;
+      const res = await fetch('/api/review/list');
+      const data = (await res.json()) as {
+        message?: string; uuids?: ReviewListItem[]; error?: { message?: string };
+      };
+      console.log(`[review/list] -> ${res.status}`, data);
+      if (!res.ok || data.message !== 'success' || !Array.isArray(data.uuids)) {
+        setListStatus(data.error?.message ?? `List failed (${res.status})`);
+        return [];
       }
-      // Inline the extracted SVG as a data: URI so it both previews in an <img> and
-      // reloads via fetch().text() when opened, exactly like a static sample src.
-      const src = `data:image/svg+xml,${encodeURIComponent(data.svg)}`;
-      const name = `vectorstock_${id}.svg`;
-      const sample: Sample = { label: title, name, src, edit };
-      // Prepend so the newest extraction sits at the top of the previews. De-dupe by
-      // name so re-selecting the same id refreshes rather than stacking duplicates.
-      setFetchedSamples((prev) => [sample, ...prev.filter((s) => s.name !== name)]);
-      setFetchStatus(null);
-      // Picking from the select opens the asset straight away — the preview card is
-      // there to come back to, not a second step before you can see it.
-      onOpenFetched?.(sample);
-      return true;
+      // Only rows carrying a uuid are selectable — the uuid is the whole point.
+      const items = dedupeReviewList(data.uuids.filter((u) => !!u.edit_uuid));
+      if (items.length !== data.uuids.length) {
+        console.log(`[review/list] ${data.uuids.length} row(s) -> ${items.length} option(s) after de-dupe`);
+      }
+      setReviewList(items);
+      setListStatus(items.length ? null : 'No review assets');
+      return items;
     } catch (err) {
-      setFetchStatus(err instanceof Error ? err.message : 'Fetch failed');
-      return false;
-    } finally {
-      setFetching(false);
+      setListStatus(err instanceof Error ? err.message : 'List failed');
+      return [];
     }
-  };
+  }, []);
 
-  const fetchDownload = (id: string, title: string, edit: 0 | 1) =>
-    fetchFrom(`/api/download?id=${encodeURIComponent(id)}`, id, title, edit);
+  const listLoadedRef = React.useRef(false);
+  useEffect(() => {
+    if (!open || listLoadedRef.current) return;
+    listLoadedRef.current = true;
+    void loadList();
+  }, [open, loadList]);
 
-  // Ids typed into the box are editable by default — there's no catalogue entry to carry
-  // an edit flag, and the review endpoint is for work-in-progress art.
+  // Picking from the list dropdown. The parent owns the open — it runs the same check /
+  // download / cooldown path as a /<uuid> deep link — and hands back what it opened, so
+  // the asset also lands in the previews below, exactly like an id-box fetch. De-duped
+  // by name so re-selecting refreshes its card rather than stacking duplicates.
+  const openFromList = useCallback(async (uuid: string) => {
+    const sample = await onOpenReviewUuid?.(uuid);
+    if (!sample) return;
+    setFetchedSamples((prev) => [sample, ...prev.filter((s) => s.name !== sample.name)]);
+  }, [onOpenReviewUuid]);
+
+  // The id box registers a vectorstock art id for review rather than pulling artwork
+  // straight down: /api/review/test/<id> makes the host create an entry for it, which
+  // gives it an edit_uuid and puts it in the list. So the list is refreshed and the new
+  // row opened through the normal uuid path — the id box ends up somewhere identical to
+  // picking from the dropdown, instead of a parallel way to get artwork on the canvas.
+  //
+  // An id the host already knows answers message: "failed". That isn't an error worth
+  // reporting: its row is in the list either way, so the refreshed list — not the
+  // message — decides whether there's something to open.
   const fetchReview = async () => {
     const id = reviewId.trim();
     if (!id) return;
@@ -108,15 +158,54 @@ export function DevRail<S extends Sample>({
       setFetchStatus('Numbers only');
       return;
     }
-    const ok = await fetchFrom(`/api/review/${id}`, id, `Review ${id}`, 1);
-    // Clear only on success — a failed id stays put to be corrected, rather than the
-    // next id typed being appended to it.
-    if (ok) setReviewId('');
+
+    setFetchStatus(null);
+    setFetching(true);
+    try {
+      // Same placeholder pacing as before: hold the overlay for at least 1s so the
+      // request reads as a deliberate step rather than an instant flash.
+      const [res] = await Promise.all([
+        fetch(`/api/review/test/${id}`),
+        new Promise((r) => setTimeout(r, 1000)),
+      ]);
+      const data = (await res.json()) as { message?: string; error?: { message?: string } };
+      console.log(`[review/test] ${id} -> ${res.status}`, data);
+      if (!res.ok) {
+        setFetchStatus(data.error?.message ?? `Request failed (${res.status})`);
+        return;
+      }
+
+      const items = await loadList();
+      const match = items.find((u) => String(u.art_id) === id);
+      if (!match?.edit_uuid) {
+        setFetchStatus(data.message === 'success' ? 'Registered, but not in the list' : 'Unknown id');
+        return;
+      }
+
+      setSelectedDownload(match.edit_uuid);
+      // Clear only once there's something to open — a failed id stays put to be
+      // corrected, rather than the next id typed being appended to it.
+      setReviewId('');
+      await openFromList(match.edit_uuid);
+    } catch (err) {
+      setFetchStatus(err instanceof Error ? err.message : 'Fetch failed');
+    } finally {
+      setFetching(false);
+    }
   };
 
   // There's an id to send and nothing already in flight — drives the FETCH button's
   // active styling, and matches its disabled condition so the two can't disagree.
   const armed = !fetching && reviewId.trim().length > 0;
+
+  // The previews are two lists sharing one strip: assets fetched this session on top,
+  // the bundled samples under them. A bundled sample whose file name matches a fetched
+  // one is the same artwork — several bundled ids are registered on the review host —
+  // so it would sit there as a second card for the same thing, both lit as active.
+  // The fetched copy wins: it's the live asset, carrying its own edit flag and whatever
+  // the host holds now, where the bundled file is a fixed snapshot.
+  const fetchedNames = new Set(fetchedSamples.map((s) => s.name));
+  const staticSamples = samples.filter((s) => !fetchedNames.has(s.name));
 
   const renderCard =(sample: Sample, onOpen: () => void) => {
     const isActive = activeSample === sample.name;
@@ -222,15 +311,17 @@ export function DevRail<S extends Sample>({
             </button>
           </div>
 
-          {/* Downloads select */}
+          {/* Review assets select — populated from /api/review/list. Picking one runs
+              the same path as opening the app at /<uuid>, so what the dropdown does and
+              what a deep link does can't drift apart. */}
           <div style={{ padding: '0 12px 10px' }}>
             <select
               value={selectedDownload}
+              disabled={isLoading || reviewList.length === 0}
               onChange={(e) => {
-                const id = e.target.value;
-                setSelectedDownload(id);
-                const picked = DOWNLOADS.find((d) => d.id === id);
-                if (picked) fetchDownload(picked.id, picked.name, picked.edit);
+                const uuid = e.target.value;
+                setSelectedDownload(uuid);
+                if (uuid) void openFromList(uuid);
               }}
               style={{
                 width: '100%', boxSizing: 'border-box',
@@ -240,9 +331,11 @@ export function DevRail<S extends Sample>({
                 fontFamily: FONT_STACK,
               }}
             >
-              <option value="">Select a vector…</option>
-              {DOWNLOADS.map((d) => (
-                <option key={d.id} value={d.id}>{d.id} — {d.name}</option>
+              <option value="">{listStatus ?? 'Select a vector…'}</option>
+              {reviewList.map((item) => (
+                <option key={item.edit_uuid} value={item.edit_uuid}>
+                  {item.art_id} — {item.name}
+                </option>
               ))}
             </select>
             {/* Review id — anything on the review host (API_HOST), not just the bundled zips.
@@ -334,6 +427,48 @@ export function DevRail<S extends Sample>({
             </button>
           </div>
 
+          {/* has_customised override — the real cooldown is a 24h lockout, so one live
+              customise run would otherwise retire an asset for the day. */}
+          <div style={{ padding: '0 12px 10px' }}>
+            <label
+              title="Treat every asset as never customised — no cooldown is recorded on load"
+              style={{
+                display: 'flex', alignItems: 'center', gap: 7,
+                fontSize: 10, color: C.devTextMuted, cursor: 'pointer', userSelect: 'none',
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={ignoreCustomised}
+                onChange={(e) => {
+                  setIgnoreCustomised(e.target.checked);
+                  setIgnoreHasCustomised(e.target.checked);
+                }}
+                style={{ accentColor: C.accent, width: 12, height: 12, margin: 0, cursor: 'pointer', flex: 'none' }}
+              />
+              Ignore has_customised
+            </label>
+
+            <label
+              title="Run the customise pass even when the asset is inside its cooldown"
+              style={{
+                display: 'flex', alignItems: 'center', gap: 7, marginTop: 7,
+                fontSize: 10, color: C.devTextMuted, cursor: 'pointer', userSelect: 'none',
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={ignoreCooldown}
+                onChange={(e) => {
+                  setIgnoreCooldown(e.target.checked);
+                  setIgnoreCooldownPrompt(e.target.checked);
+                }}
+                style={{ accentColor: C.accent, width: 12, height: 12, margin: 0, cursor: 'pointer', flex: 'none' }}
+              />
+              Ignore cooldown prompt
+            </label>
+          </div>
+
           {/* Samples */}
           <div style={{ padding: '0 12px 4px' }}>
             <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: '.6px', color: C.devTextDim }}>SAMPLES</span>
@@ -347,7 +482,7 @@ export function DevRail<S extends Sample>({
             }}
           >
             {fetchedSamples.map((sample) => renderCard(sample, () => onOpenFetched?.(sample)))}
-            {samples.map((sample) => renderCard(sample, () => onOpenSample(sample)))}
+            {staticSamples.map((sample) => renderCard(sample, () => onOpenSample(sample)))}
           </div>
         </div>
       ) : (
