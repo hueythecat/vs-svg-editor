@@ -70,3 +70,29 @@ export const setIgnoreCooldownPrompt = (on: boolean): void => {
     storage()?.setItem(IGNORE_COOLDOWN_KEY, on ? '1' : '0');
   } catch { /* preference is best-effort */ }
 };
+
+// Ignore the host's entitlement flag — can_customise in the asset list, can_edit in the
+// check response — and open every asset as editable, so the AI features are reachable
+// on artwork that would otherwise send the Customise click to the upsell.
+//
+// Defaults OFF. Unlike the 24h cooldown, this gate doesn't get in the way over time:
+// it's a fixed property of the asset, and it's a real product behaviour worth seeing by
+// default. Turn it on to exercise the AI passes against a gated asset.
+const IGNORE_CAN_CUSTOMISE_KEY = 'svg-editor:ignore-can-customise';
+
+let ignoreCanCustomise: boolean | null = null;
+
+export const isIgnoreCanCustomise = (): boolean => {
+  if (IS_PRODUCTION_UI) return false;
+  if (ignoreCanCustomise === null) {
+    ignoreCanCustomise = storage()?.getItem(IGNORE_CAN_CUSTOMISE_KEY) === '1';   // absent ⇒ off
+  }
+  return ignoreCanCustomise;
+};
+
+export const setIgnoreCanCustomise = (on: boolean): void => {
+  ignoreCanCustomise = on;
+  try {
+    storage()?.setItem(IGNORE_CAN_CUSTOMISE_KEY, on ? '1' : '0');
+  } catch { /* preference is best-effort */ }
+};

@@ -1,4 +1,4 @@
-import React, { RefObject, useRef } from 'react';
+import React, { RefObject } from 'react';
 
 import type { SelectedTextProps } from '@/lib/svg-utils';
 import { C, TEXT_PALETTE, inputStyle, labelStyle } from '@/lib/design-tokens';
@@ -27,16 +27,13 @@ const fieldRow: React.CSSProperties = { display: 'flex', gap: 10, marginBottom: 
 
 export const TextControls = React.memo(function TextControls({
   selectedTextProps, textContentRef, extraFonts,
-  onUpdateTextLayer, onCurvePointerDown, onCurvePointerUp,
+  onUpdateTextLayer,
 }: {
   selectedTextProps: SelectedTextProps;
   textContentRef: RefObject<HTMLInputElement | null>;
   extraFonts: string[];
   onUpdateTextLayer: (attrs: Partial<TextLayerAttrs>) => void;
-  onCurvePointerDown: () => number | null;
-  onCurvePointerUp: (startCenterY: number) => void;
 }) {
-  const curveStartCenterYRef = useRef<number | null>(null);
   const curve = selectedTextProps.curve ?? 0;
 
   return (
@@ -143,13 +140,6 @@ export const TextControls = React.memo(function TextControls({
             step={5}
             value={curve}
             onChange={(e) => onUpdateTextLayer({ curve: Number(e.target.value) })}
-            onPointerDown={() => { curveStartCenterYRef.current = onCurvePointerDown(); }}
-            onPointerUp={() => {
-              if (curveStartCenterYRef.current !== null) {
-                onCurvePointerUp(curveStartCenterYRef.current);
-                curveStartCenterYRef.current = null;
-              }
-            }}
             style={{ width: '100%', accentColor: C.accent, marginTop: 9 }}
           />
         </div>

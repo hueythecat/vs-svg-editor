@@ -3,7 +3,8 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { C, FONT_STACK, SHADOW } from '@/lib/design-tokens';
 import { clearAiCache, isAiCacheEnabled, setAiCacheEnabled } from '@/lib/ai-cache';
 import {
-  isIgnoreCooldownPrompt, isIgnoreHasCustomised,
+  isIgnoreCanCustomise, isIgnoreCooldownPrompt, isIgnoreHasCustomised,
+  setIgnoreCanCustomise as setIgnoreCanCustomiseFlag,
   setIgnoreCooldownPrompt, setIgnoreHasCustomised,
 } from '@/lib/dev-flags';
 import { ChevronIcon, SettingsIcon } from './svg-icons';
@@ -72,11 +73,15 @@ interface DevRailProps<S extends Sample> {
   // call and cooldown included. The dropdown's selection action. Resolves with the
   // sample it opened (null if nothing loaded) so the rail can preview it.
   onOpenReviewUuid?: (uuid: string) => Promise<OpenedSample | null>;
+  // The cooldown basis, reported whenever the list is (re)loaded: the most recent
+  // customised_at across rows that aren't cancelled. One value for every asset, since
+  // customising one puts them all on cooldown.
+  onReviewListLoaded?: (info: { lastCustomised: number | null; cooldownHours: number }) => void;
 }
 
 export function DevRail<S extends Sample>({
   samples, activeSample, isLoading, open, onSetOpen, onOpenSample, onOpenFetched,
-  onOpenReviewUuid,
+  onOpenReviewUuid, onReviewListLoaded,
 }: DevRailProps<S>) {
   const [selectedDownload, setSelectedDownload] = useState<string>('');
   const [reviewList, setReviewList] = useState<ReviewListItem[]>([]);
@@ -93,6 +98,7 @@ export function DevRail<S extends Sample>({
   // preference, which the review load path reads directly at call time.
   const [ignoreCustomised, setIgnoreCustomised] = useState(() => isIgnoreHasCustomised());
   const [ignoreCooldown, setIgnoreCooldown] = useState(() => isIgnoreCooldownPrompt());
+  const [ignoreCanCustomise, setIgnoreCanCustomise] = useState(() => isIgnoreCanCustomise());
 
   // The dropdown's contents come from the review host, not a hardcoded list, so it
   // always reflects what's actually there to open. Fetched once the rail is expanded —
@@ -104,13 +110,22 @@ export function DevRail<S extends Sample>({
     try {
       const res = await fetch('/api/review/list');
       const data = (await res.json()) as {
-        message?: string; uuids?: ReviewListItem[]; error?: { message?: string };
+        message?: string; uuids?: ReviewListItem[];
+        last_customised?: number | null; cooldown_hours?: number;
+        error?: { message?: string };
       };
       console.log(`[review/list] -> ${res.status}`, data);
       if (!res.ok || data.message !== 'success' || !Array.isArray(data.uuids)) {
         setListStatus(data.error?.message ?? `List failed (${res.status})`);
         return [];
       }
+
+      // Hand the cooldown basis up before anything is opened, so the first selection
+      // out of a freshly loaded list is already measured against it.
+      onReviewListLoaded?.({
+        lastCustomised: data.last_customised ?? null,
+        cooldownHours: data.cooldown_hours ?? 24,
+      });
       // Only rows carrying a uuid are selectable — the uuid is the whole point.
       const items = dedupeReviewList(data.uuids.filter((u) => !!u.edit_uuid));
       if (items.length !== data.uuids.length) {
@@ -123,7 +138,7 @@ export function DevRail<S extends Sample>({
       setListStatus(err instanceof Error ? err.message : 'List failed');
       return [];
     }
-  }, []);
+  }, [onReviewListLoaded]);
 
   const listLoadedRef = React.useRef(false);
   useEffect(() => {
@@ -466,6 +481,25 @@ export function DevRail<S extends Sample>({
                 style={{ accentColor: C.accent, width: 12, height: 12, margin: 0, cursor: 'pointer', flex: 'none' }}
               />
               Ignore cooldown prompt
+            </label>
+
+            <label
+              title="Open every asset as editable, whatever the host's can_customise says"
+              style={{
+                display: 'flex', alignItems: 'center', gap: 7, marginTop: 7,
+                fontSize: 10, color: C.devTextMuted, cursor: 'pointer', userSelect: 'none',
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={ignoreCanCustomise}
+                onChange={(e) => {
+                  setIgnoreCanCustomise(e.target.checked);
+                  setIgnoreCanCustomiseFlag(e.target.checked);
+                }}
+                style={{ accentColor: C.accent, width: 12, height: 12, margin: 0, cursor: 'pointer', flex: 'none' }}
+              />
+              Ignore can_customise
             </label>
           </div>
 

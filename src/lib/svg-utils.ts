@@ -30,6 +30,61 @@ export const SKIP_TAGS = new Set([
   'clippath', 'mask', 'filter', 'marker',
 ]);
 
+// Visual children of an element, in document order.
+export const layerChildren = (el: Element): Element[] =>
+  Array.from(el.children).filter((c) => !SKIP_TAGS.has(c.tagName.toLowerCase()));
+
+// Whether a layer can usefully be opened into sublayers: it has to hold more than one
+// visual child, or "expanding" would just swap one row for another identical one.
+export const canExpandLayer = (el: Element | null): boolean =>
+  !!el && layerChildren(el).length > 1;
+
+// The group a layer sits inside and could be folded back into — the way out of a group
+// that was drilled into. Null at the top of the document, and null when the parent is
+// itself a layer, since that parent is already its own row and folding into it would
+// produce two rows for the same element.
+export function collapsibleParent(el: Element | null, layerIds: Set<string>): Element | null {
+  const parent = el?.parentElement ?? null;
+  if (!parent || parent.tagName.toLowerCase() === 'svg') return null;
+  if (parent.id && layerIds.has(parent.id)) return null;
+  return parent;
+}
+
+// Some files wrap the whole drawing in a single <g>, occasionally several deep. Taking
+// only the SVG's direct children then yields ONE layer, which spans the canvas by
+// definition, so it is classified as the background and nothing in the artwork can be
+// selected, moved or recoloured — the elements panel just reads "Canvas".
+//
+// So when the top level is that degenerate, keep opening the group that holds the most
+// content until the list stops being useless. Opening a single-child wrapper costs
+// nothing (the count is unchanged, so the loop simply continues inward); opening a real
+// group ends it. The threshold is on the RESULTING count rather than on a group's own
+// child count — a wrapper chain of 2-child groups would otherwise unwrap forever.
+//
+// Nothing is restructured: this only chooses which existing elements the layer list
+// points at, so wrapper classes, transforms and inherited styles keep applying exactly
+// as before.
+const EXPAND_WHILE_AT_MOST = 4;
+
+function expandWrappedLayers(roots: Element[]): Element[] {
+  let level = roots;
+  for (let guard = 0; guard < 16 && level.length <= EXPAND_WHILE_AT_MOST; guard++) {
+    let biggest: Element | null = null;
+    let biggestSize = 0;
+    for (const el of level) {
+      if (el.tagName.toLowerCase().replace(/.*:/, '') !== 'g') continue;
+      if (layerChildren(el).length === 0) continue;
+      const size = el.getElementsByTagName('*').length;
+      if (size > biggestSize) { biggest = el; biggestSize = size; }
+    }
+    if (!biggest) break;
+    const opened = biggest;
+    const kids = layerChildren(opened);
+    level = level.flatMap((el) => (el === opened ? kids : [el]));
+  }
+  return level;
+}
+
 export function parseSvg(raw: string): { content: string; layers: SvgLayer[] } {
   try {
     const doc = new DOMParser().parseFromString(raw, 'image/svg+xml');
@@ -38,8 +93,13 @@ export function parseSvg(raw: string): { content: string; layers: SvgLayer[] } {
     const svg = doc.documentElement;
     const layers: SvgLayer[] = [];
 
-    Array.from(svg.children).forEach((child, i) => {
-      if (SKIP_TAGS.has(child.tagName.toLowerCase())) return;
+    // Only rescue the degenerate case. A file that already offers more than one layer is
+    // left exactly as it is — re-splitting artwork that currently works would be a
+    // regression, not a fix.
+    let roots = layerChildren(svg);
+    if (roots.length <= 1) roots = expandWrappedLayers(roots);
+
+    roots.forEach((child, i) => {
       if (!child.id) child.id = `_layer_${i}`;
 
       const label =
@@ -94,15 +154,42 @@ export function applyTranslateDelta(existing: string, dx: number, dy: number): s
   return `translate(${dx}, ${dy}) ${existing}`.trim();
 }
 
-// Arc path for curved text. The arc midpoint is always pinned at cy so the
-// centre character never moves as the curve slider changes.
-// Bowl (curve>0): chord at cy-h (endpoints above cy), arc bottom at cy.
-// Arch (curve<0): chord at cy+h (endpoints below cy), arc peak at cy.
-export function computeArcPath(cx: number, cy: number, halfW: number, curve: number): string {
-  const h = halfW * Math.abs(curve) / 100;
-  const r = (halfW * halfW + h * h) / (2 * h);
+// Arc path for curved text: an arc exactly as long as the text that rides it, centred
+// on cy, bending by however much the curve slider asks for.
+//
+// The arc is built from the TEXT, not from the canvas. `textLen` — the advance width of
+// the rendered string — becomes the arc's length, and `curve` sets how far that length
+// is wrapped: ±100 bends it through a half-circle, 0 leaves it straight. So the text
+// always fills its own arc, whatever its length, font or size.
+//
+//   alpha = |curve|/100 · π/2     half-angle: how much of a semicircle to wrap
+//   r     = L / 2alpha            radius that gives an arc of length L at that angle
+//   halfW = r·sin alpha           resulting chord half-width
+//   h     = r·(1 − cos alpha)     sagitta — how deep the bend is
+//
+// This replaces a fixed `halfW = 0.35·vbW`, under which the arc had the same size for
+// every string: short text barely bent while long text overflowed the path and its
+// glyphs fell off the end.
+//
+// Placing it: sweep=1 draws clockwise in SVG's y-down frame, and clockwise from the left
+// chord endpoint runs 9 → 12 → 3 o'clock — over the top. So curve>0 is the ARCH (∩,
+// bulging above its chord) and curve<0 the bowl (∪), and the chord goes on the far side
+// of cy from the bulge. Offsetting it by h/2 leaves the arc spanning [cy−h/2, cy+h/2] —
+// centred on cy, so bending the text does not move it up or down the canvas.
+//
+// `fallbackLen` stands in when the text cannot be measured (empty string, no live DOM).
+export function computeArcPath(
+  cx: number, cy: number, curve: number, textLen: number, fallbackLen: number,
+): string {
+  const L = textLen > 0 ? textLen : Math.max(1, fallbackLen);
+  const alpha = (Math.min(100, Math.abs(curve)) / 100) * (Math.PI / 2);
+  const r = L / (2 * alpha);
+  const halfW = r * Math.sin(alpha);
+  const h = r * (1 - Math.cos(alpha));
+
   const sweep = curve > 0 ? 1 : 0;
-  const chordY = curve > 0 ? cy - h : cy + h;
+  const chordY = curve > 0 ? cy + h / 2 : cy - h / 2;
+  // alpha never exceeds π/2, so the arc is never more than a semicircle: large-arc is 0.
   return `M ${cx - halfW} ${chordY} A ${r} ${r} 0 0 ${sweep} ${cx + halfW} ${chordY}`;
 }
 
@@ -154,6 +241,69 @@ export function collectLayerGradientIds(layerEl: Element, layerClasses: Set<stri
     }
   });
   return ids;
+}
+
+// Elements that actually paint something, as opposed to grouping/among defs.
+export const PAINTABLE_TAGS = new Set([
+  'path', 'rect', 'circle', 'ellipse', 'polygon', 'polyline', 'line', 'text', 'tspan', 'use',
+]);
+
+// class → declared fill, read once per document from its <style> blocks.
+const cssFillCache = new WeakMap<Document, Map<string, string>>();
+
+function cssFillByClass(doc: Document): Map<string, string> {
+  const cached = cssFillCache.get(doc);
+  if (cached) return cached;
+  const map = new Map<string, string>();
+  doc.querySelectorAll('style').forEach((styleEl) => {
+    for (const m of (styleEl.textContent ?? '').matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+      const fill = [...m[2].matchAll(/(?:^|;)\s*fill\s*:\s*([^;{}]+)/gi)].pop()?.[1]?.trim();
+      if (!fill) continue;
+      for (const sel of m[1].split(',')) {
+        const cls = sel.trim().match(/^\.([\w-]+)$/)?.[1];
+        if (cls) map.set(cls, fill);
+      }
+    }
+  });
+  cssFillCache.set(doc, map);
+  return map;
+}
+
+// The fill an element actually renders with, resolved the way the renderer does it:
+// the element's own attribute / inline style / class rule, then inherited from its
+// ancestors, and failing all of that SVG's initial value — black.
+//
+// Without this, a shape that never declares a fill reports no colour at all, so it can't
+// be listed or recoloured even though it is plainly painted on the canvas. Inheritance
+// matters more now that a layer root can sit inside wrapper groups, since the declaration
+// may live on an ancestor above the layer.
+// Whether the element sets its own fill, by attribute, inline style or class rule. False
+// means it is painting with an inherited or default colour, which is the case
+// effectiveFill exists to resolve — and the case a recolour has to write rather than
+// rewrite. Shared so detection and replacement can't drift apart.
+export function declaresOwnFill(el: Element, doc: Document): boolean {
+  if (el.getAttribute('fill')) return true;
+  if (/(?:^|;)\s*fill\s*:/i.test(el.getAttribute('style') ?? '')) return true;
+  const byClass = cssFillByClass(doc);
+  return (el.getAttribute('class')?.split(/\s+/) ?? []).some((c) => !!c && byClass.has(c));
+}
+
+export function effectiveFill(el: Element, doc: Document): string | null {
+  const byClass = cssFillByClass(doc);
+  let node: Element | null = el;
+  while (node && node.nodeType === 1) {
+    const own = node.getAttribute('fill');
+    if (own) return own;
+    const inline = node.getAttribute('style')?.match(/(?:^|;)\s*fill\s*:\s*([^;{}]+)/i)?.[1]?.trim();
+    if (inline) return inline;
+    for (const cls of node.getAttribute('class')?.split(/\s+/) ?? []) {
+      const fromCss = cls && byClass.get(cls);
+      if (fromCss) return fromCss;
+    }
+    if (node.tagName.toLowerCase() === 'svg') break;
+    node = node.parentElement;
+  }
+  return '#000000';   // SVG's initial fill
 }
 
 export function extractLayerColors(layerEl: Element, doc: Document): string[] {
@@ -208,6 +358,16 @@ export function extractLayerColors(layerEl: Element, doc: Document): string[] {
     });
   });
 
+  // Shapes that declare no fill anywhere still paint — inherited, or SVG's default black.
+  // Resolve those too, so a layer whose artwork simply never sets a fill (label text and
+  // leader lines, typically) offers its colour instead of reporting none at all.
+  [layerEl, ...Array.from(layerEl.querySelectorAll('*'))].forEach((el) => {
+    const tag = el.tagName.toLowerCase().replace(/.*:/, '');
+    if (!PAINTABLE_TAGS.has(tag) || declaresOwnFill(el, doc)) return;
+    const fill = effectiveFill(el, doc);
+    if (fill) addColor(fill);
+  });
+
   return [...seen];
 }
 
@@ -257,6 +417,38 @@ export const withOffscreenSvg = <T,>(svgRoot: Element, fn: (mounted: SVGSVGEleme
     document.body.removeChild(holder);
   }
 };
+
+// Advance width of a text layer's string — the length it occupies ALONG its arc, which
+// is what computeArcPath needs to centre the visible band.
+//
+// getComputedTextLength() is the right measure (it's the advance, not a bounding box, so
+// it's unaffected by the curve the text is already sitting on), but it only works on
+// mounted geometry — updateTextLayer edits a detached DOMParser doc — hence the offscreen
+// mount. A clone may render before webfonts load, so this is approximate either way;
+// the fallback matches the estimate measureTextWidths already uses, plus tracking.
+export function measureTextAdvance(root: Element, groupId: string): number {
+  const groupEl = root.querySelector(`[id="${groupId}"]`);
+  const textEl = groupEl?.querySelector('text') ?? null;
+
+  const estimate = () => {
+    const len = (textEl?.textContent ?? '').length;
+    if (!len) return 0;
+    const fs = Number(textEl?.getAttribute('font-size') ?? 16);
+    const ls = parseFloat(textEl?.getAttribute('letter-spacing') ?? '0') || 0;
+    return Math.max(1, len * fs * 0.55 + ls * fs * (len - 1));
+  };
+
+  try {
+    return withOffscreenSvg(root, (measureSvg) => {
+      const el = measureSvg.querySelector(`[id="${groupId}"] text`) as SVGTextContentElement | null;
+      let w = 0;
+      try { w = el?.getComputedTextLength?.() ?? 0; } catch { /* unrenderable — estimate below */ }
+      return w > 0 ? w : estimate();
+    });
+  } catch {
+    return estimate();
+  }
+}
 
 // ─── AI text rows → editable text layers ─────────────────────────────────────
 
@@ -541,7 +733,27 @@ export function isPlainWhiteLayer(content: string, layerId: string): boolean {
   return colors.every((c) => normalizeColor(c) === white);
 }
 
-export function svgToBase64Png(svgString: string, width: number, height: number): Promise<string> {
+// The colour a background layer paints, for compositing a raster against it. Returns
+// null when the layer has no single flat colour — a gradient or a photo has no one
+// colour to stand in for it, and guessing would be worse than leaving it transparent.
+export function backgroundFillColor(content: string, layerId: string | null): string | null {
+  if (!layerId) return null;
+  const doc = new DOMParser().parseFromString(content, 'image/svg+xml');
+  const el = doc.getElementById(layerId);
+  if (!el) return null;
+  const colors = extractLayerColors(el, doc);
+  return colors.length === 1 ? colors[0] : null;
+}
+
+// `background` fills the canvas before the artwork is drawn. It matters when the raster
+// is going to a vision model: a PNG with an alpha channel gets flattened onto white
+// somewhere downstream, so white artwork on a transparent canvas arrives invisible. That
+// is exactly what the customise pass produces, since it deliberately leaves the
+// background layer out of the image — pass the colour that layer was painting and the
+// artwork stays legible against it. Omit it to keep the transparent canvas.
+export function svgToBase64Png(
+  svgString: string, width: number, height: number, background?: string | null,
+): Promise<string> {
   return new Promise((resolve, reject) => {
     const blob = new Blob([svgString], { type: 'image/svg+xml' });
     const url = URL.createObjectURL(blob);
@@ -552,6 +764,10 @@ export function svgToBase64Png(svgString: string, width: number, height: number)
       canvas.height = height;
       const ctx = canvas.getContext('2d');
       if (!ctx) { URL.revokeObjectURL(url); reject(new Error('Canvas unavailable')); return; }
+      if (background) {
+        ctx.fillStyle = background;
+        ctx.fillRect(0, 0, width, height);
+      }
       ctx.drawImage(img, 0, 0, width, height);
       URL.revokeObjectURL(url);
       resolve(canvas.toDataURL('image/png').replace('data:image/png;base64,', ''));

@@ -3,6 +3,7 @@ import React, { Dispatch, SetStateAction, useRef, useState } from 'react';
 import type { SvgLayer } from '@/lib/svg-utils';
 import { C, FONT_STACK } from '@/lib/design-tokens';
 import {
+  ChevronIcon,
   DuplicateIcon, EyeIcon, EyeSlashIcon, GripIcon, ImageIcon, ShapeIcon, TrashIcon, TypeIcon,
 } from './svg-icons';
 
@@ -19,14 +20,16 @@ const ICON_FOR = {
 
 export const LayerList = React.memo(function LayerList({
   layers, hiddenLayers, selectedLayers, backgroundLayerId, textLayerIds,
+  expandableLayerIds,
   onReorderLayers, onSetSelectedLayers, onSetSelectedLayer, onSelectOne,
-  onToggleLayer, onDuplicateLayer, onDeleteLayer,
+  onToggleLayer, onDuplicateLayer, onDeleteLayer, onExpandLayer,
 }: {
   layers: SvgLayer[];
   hiddenLayers: Set<string>;
   selectedLayers: Set<string>;
   backgroundLayerId: string | null;
   textLayerIds: Set<string>;
+  expandableLayerIds: Set<string>;
   onReorderLayers: (fromId: string, toId: string, before: boolean) => void;
   onSetSelectedLayers: Dispatch<SetStateAction<Set<string>>>;
   onSetSelectedLayer: Dispatch<SetStateAction<string | null>>;
@@ -34,6 +37,7 @@ export const LayerList = React.memo(function LayerList({
   onToggleLayer: (id: string) => void;
   onDuplicateLayer: (id: string) => void;
   onDeleteLayer: (id: string) => void;
+  onExpandLayer: (id: string) => void;
 }) {
   const [dragLayerId, setDragLayerId]   = useState<string | null>(null);
   const [dropPosition, setDropPosition] = useState<{ targetId: string; before: boolean } | null>(null);
@@ -234,6 +238,27 @@ export const LayerList = React.memo(function LayerList({
               )}
               {dropAfter && (
                 <span style={{ position: 'absolute', bottom: -1, left: 4, right: 4, height: 2, borderRadius: 1, background: C.accent, pointerEvents: 'none' }} />
+              )}
+
+              {/* Open into parts. Only on rows that hold more than one, and it keeps the
+                  fixed width either way so names stay aligned down the list. */}
+              {expandableLayerIds.has(layer.id) ? (
+                <button
+                  type="button"
+                  className="ed-ghost"
+                  title="Open this layer into its parts"
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={(e) => { e.stopPropagation(); onExpandLayer(layer.id); }}
+                  style={{
+                    border: 'none', background: 'transparent', color: C.textFaint,
+                    padding: 0, cursor: 'pointer', display: 'flex', flex: 'none',
+                    width: 11, justifyContent: 'center', borderRadius: 4,
+                  }}
+                >
+                  <ChevronIcon size={10} direction="right" />
+                </button>
+              ) : (
+                <span style={{ width: 11, flex: 'none' }} />
               )}
 
               {/* Drag grip */}

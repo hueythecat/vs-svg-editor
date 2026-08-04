@@ -10,6 +10,7 @@ import {
   bboxInRootSpace,
   collectLayerGradientIds,
   computeArcPath,
+  measureTextAdvance,
   detectBackgroundLayerId,
   extractLayerColors,
   filterOutBackgroundIds,
@@ -23,12 +24,19 @@ import {
   resolveGradient,
   stripScripts,
   svgToBase64Png,
+  backgroundFillColor,
+  declaresOwnFill,
+  effectiveFill,
+  PAINTABLE_TAGS,
+  canExpandLayer,
+  collapsibleParent,
+  layerChildren,
   withOffscreenSvg
 } from '@/lib/svg-utils';
 import { C, EDITOR_CSS, FONT_STACK, SHADOW } from '@/lib/design-tokens';
 import { SHOW_DEV_UI } from '@/lib/env';
 import { readAiCache, writeAiCache } from '@/lib/ai-cache';
-import { isIgnoreCooldownPrompt, isIgnoreHasCustomised } from '@/lib/dev-flags';
+import { isIgnoreCanCustomise, isIgnoreCooldownPrompt, isIgnoreHasCustomised } from '@/lib/dev-flags';
 import type { AiActionType, LlmProvider } from './editor-types';
 import { LLM_OPTIONS } from './editor-types';
 import { LayersPanel } from './editor-layers-panel';
@@ -464,16 +472,73 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   // has no uuid in the URL at all.
   const openReviewUuidRef = useRef<string | null>(null);
 
+  // The asset's AI gate. Anything other than can_edit: 1 sends the Customise click to
+  // the upsell; the dev toggle opens it as editable instead. Derived rather than stored
+  // — asked at call time on both paths — so flipping the toggle changes the next open,
+  // including a reopen served from the cache.
+  const resolveEdit = useCallback((check: ReviewCheck): 0 | 1 => {
+    if (check.can_edit === 1) return 1;
+    if (isIgnoreCanCustomise()) {
+      console.log(`[review] ${check.id} can_edit=${check.can_edit} — ignored (dev toggle), opening editable`);
+      return 1;
+    }
+    return 0;
+  }, []);
+
+  // The cooldown basis remembered from the asset list: the most recent customised_at
+  // that wasn't cancelled. Customising one asset puts them all on cooldown, so this is
+  // a single account-level moment rather than anything per asset. Null until the list
+  // has loaded — a /<uuid> deep link may never load it, and there's no list at all in
+  // a production build, so the check response stays the fallback.
+  const [listCooldown, setListCooldown] =
+    useState<{ lastCustomised: number | null; cooldownHours: number } | null>(null);
+
+  const onReviewListLoaded = useCallback(
+    (info: { lastCustomised: number | null; cooldownHours: number }) => {
+      console.log(
+        '[review/list] cooldown basis:',
+        info.lastCustomised ? new Date(info.lastCustomised).toISOString() : 'none',
+        `(${info.cooldownHours}h)`,
+      );
+      setListCooldown(info);
+    },
+    [],
+  );
+
   // Applied on both paths (fresh check and cache replay), so an asset's cooldown reads
   // the same however it was opened.
   const applyCooldown = useCallback((check: ReviewCheck) => {
-    if (check.has_customised !== 1) return;
     // Asked at call time, not captured in a dep: flipping the toggle applies to the
     // next asset opened without this callback having to be rebuilt.
     if (isIgnoreHasCustomised()) {
-      console.log(`[review] ${check.id} has_customised=1 — ignored (dev toggle)`);
+      console.log(`[review] ${check.id} cooldown ignored (dev toggle)`);
       return;
     }
+
+    // Prefer the list's account-level moment. It's the more reliable of the two: the
+    // host's own customise_next doesn't move when an already-customised asset is
+    // customised again, so it can report a window that has long expired.
+    if (listCooldown) {
+      // cooldownRemaining measures against the moment it unlocks, so turn the moment it
+      // was customised into that: last customise + the cooldown window.
+      const { lastCustomised, cooldownHours } = listCooldown;
+      const unlocksAt =
+        lastCustomised === null ? null : lastCustomised + cooldownHours * 3_600_000;
+      const left = cooldownRemaining(unlocksAt, cooldownHours);
+      console.log(
+        `[review] ${check.id} last customise (any asset) ${
+          lastCustomised ? new Date(lastCustomised).toISOString() : 'none'
+        } ->`,
+        left === null ? 'no cooldown' : `${Math.round(left / 60_000)} min left`,
+      );
+      if (left !== null) {
+        setCooldownUntil(formatRemaining(left));
+        setCooldownActive(true);
+      }
+      return;
+    }
+
+    if (check.has_customised !== 1) return;
     const left = cooldownRemaining(
       parseCustomiseNext(check.customise_next),
       check.cooldown_hours ?? 24,
@@ -486,7 +551,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       setCooldownUntil(formatRemaining(left));
       setCooldownActive(true);
     }
-  }, []);
+  }, [listCooldown]);
 
   const openReviewUuid = useCallback(async (uuid: string): Promise<OpenedSample | null> => {
     // Already resolved this session — reopen from what's held rather than repeating the
@@ -496,10 +561,13 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     if (cached) {
       console.log(`[review] ${uuid} — reopening from cache, no requests made`);
       setIsLoading(true);
-      await openSample(cached.sample);
+      // Re-derive the gate rather than replaying the stored one, so flipping the dev
+      // toggle takes effect on a cached asset too.
+      const sample = { ...cached.sample, edit: resolveEdit(cached.check) };
+      await openSample(sample);
       openReviewUuidRef.current = uuid;
       applyCooldown(cached.check);
-      return cached.sample;
+      return sample;
     }
 
     // Hold the loading state across both requests so the drop zone doesn't flash up
@@ -539,8 +607,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
 
       // Same hand-off as the dev rail: inline the SVG as a data: URI so openSample
       // can re-read it with fetch().text(), exactly like a static sample src.
-      // Anything other than can_edit: 1 gates the AI features behind the upsell.
-      const edit = check.can_edit === 1 ? 1 : 0;
+      const edit = resolveEdit(check);
       console.log(`[review] ${check.id} opening with edit=${edit} (can_edit=${check.can_edit})`);
       const sample: OpenedSample = {
         label: `Review ${check.id}`,
@@ -562,7 +629,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       setIsLoading(false);
       return null;
     }
-  }, [openSample, applyCooldown]);
+  }, [openSample, applyCooldown, resolveEdit]);
 
   const reviewLoadedRef = useRef<string | null>(null);
 
@@ -643,6 +710,40 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     return ids;
   }, [activeSvg?.content]);
 
+  // Which layers hold more than one part, so the element list can offer to open them.
+  // Text layers are excluded: their internals are <text>/<textPath> plumbing, not parts
+  // anyone would want as separate rows, and splitting one would break the text editing.
+  const expandableLayerIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (!activeSvg) return ids;
+    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+    for (const layer of activeSvg.layers) {
+      if (textLayerIds.has(layer.id)) continue;
+      if (canExpandLayer(doc.getElementById(layer.id))) ids.add(layer.id);
+    }
+    return ids;
+  }, [activeSvg?.content, activeSvg?.layers, textLayerIds]);
+
+  // The row to back out from, or null when nothing has been drilled into. The panel
+  // offers one way out rather than a control per row, so this picks the DEEPEST group
+  // any row currently sits in — the level most recently opened. Backing out repeatedly
+  // therefore walks back up the way you came.
+  const backOutLayerId = useMemo(() => {
+    if (!activeSvg) return null;
+    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+    const layerIds = new Set(activeSvg.layers.map((l) => l.id));
+    let deepestId: string | null = null;
+    let deepest = -1;
+    for (const layer of activeSvg.layers) {
+      const parent = collapsibleParent(doc.getElementById(layer.id), layerIds);
+      if (!parent) continue;
+      let depth = 0;
+      for (let n: Element | null = parent; n; n = n.parentElement) depth++;
+      if (depth > deepest) { deepest = depth; deepestId = layer.id; }
+    }
+    return deepestId;
+  }, [activeSvg?.content, activeSvg?.layers]);
+
   // Click on canvas: walk up from the clicked element to find its layer. Shift-click
   // adds/removes it from the selection, exactly like shift-clicking its row in the
   // element list, so a multi-layer selection can be built either way. A plain click
@@ -657,7 +758,12 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     const layerIds = new Set(activeSvg.layers.map((l) => l.id));
     let el = e.target as Element | null;
     while (el && el !== (svgEl as Element)) {
-      if (el.parentElement === (svgEl as Element) && layerIds.has(el.id)) {
+      // Match on the layer list alone. Layer roots are not always direct children of
+      // <svg> — a file that wraps its drawing in one group has its layers taken from
+      // inside that wrapper, and opening a layer into parts nests them further — so
+      // requiring a top-level parent here stopped canvas clicks selecting anything.
+      // Walking up hits the nearest enclosing layer, which is the one that was clicked.
+      if (layerIds.has(el.id)) {
         const id = el.id;
         if (e.shiftKey) {
           setSelectedLayers((prev) => {
@@ -1036,8 +1142,25 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     const newFromDocIdx = newDocLayers.findIndex((l) => l.id === fromId);
     const nextDocId = newFromDocIdx < newDocLayers.length - 1 ? newDocLayers[newFromDocIdx + 1].id : null;
     const nextEl = nextDocId ? doc.getElementById(nextDocId) : null;
-    if (nextEl) svg.insertBefore(fromEl, nextEl);
-    else svg.appendChild(fromEl);
+
+    // Layers are not always direct children of <svg>: a file that wraps its drawing in
+    // one group has its layers taken from inside that wrapper. Move within the element's
+    // own parent, so reordering can't hoist it out of a wrapper whose class or transform
+    // it is being drawn under.
+    const parent = fromEl.parentNode;
+    if (!parent) return;
+    if (nextEl && nextEl.parentNode === parent) {
+      parent.insertBefore(fromEl, nextEl);
+    } else if (!nextEl && parent === svg) {
+      svg.appendChild(fromEl);
+    } else if (!nextEl) {
+      parent.appendChild(fromEl);
+    } else {
+      // Different parents — there is no single position that means "between these two",
+      // so the drop is ignored rather than moved somewhere arbitrary.
+      console.log('[layers] reorder across different parents ignored');
+      return;
+    }
 
     const content = new XMLSerializer().serializeToString(svg);
     setActiveSvg((prev) => (prev ? { ...prev, content, layers: newDocLayers } : null));
@@ -1319,7 +1442,6 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       const defsEl2 = doc.createElementNS(SVG_NS, 'defs');
       const arcEl = doc.createElementNS(SVG_NS, 'path');
       arcEl.id = arcId;
-      arcEl.setAttribute('d', computeArcPath(cx, cy, halfW, attrs.curve));
       defsEl2.appendChild(arcEl);
       g.appendChild(defsEl2);
       const newText = doc.createElementNS(SVG_NS, 'text');
@@ -1330,6 +1452,12 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       tp.textContent = el.textContent ?? '';
       newText.appendChild(tp); g.appendChild(newText);
       el.parentNode?.replaceChild(g, el);
+      // Written only now the group is in the document: measuring the string needs it
+      // mounted, and this branch returns before the re-arc step at the end of the function.
+      arcEl.setAttribute(
+        'd',
+        computeArcPath(cx, cy, attrs.curve, measureTextAdvance(doc.documentElement, gId), halfW),
+      );
       const content = new XMLSerializer().serializeToString(doc.documentElement);
       setActiveSvg((prev) => prev ? { ...prev, content } : null);
       return;
@@ -1341,7 +1469,6 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       el.setAttribute('data-curve', String(newCurve));
       const cx = Number(el.getAttribute('data-cx') ?? 0);
       const cy = Number(el.getAttribute('data-cy') ?? 0);
-      const halfW = Number(el.getAttribute('data-halfw') ?? 100);
       const SVG_NS = 'http://www.w3.org/2000/svg';
       const COPY_ATTRS = ['font-family', 'font-size', 'font-weight', 'fill', 'letter-spacing'];
 
@@ -1352,7 +1479,8 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
         const defsEl = doc.createElementNS(SVG_NS, 'defs');
         const arcEl = doc.createElementNS(SVG_NS, 'path');
         arcEl.id = arcId;
-        arcEl.setAttribute('d', computeArcPath(cx, cy, halfW, newCurve));
+        // `d` is left for the re-arc step at the end of this function, which measures the
+        // text once it is in place — the arc's size follows the string it carries.
         defsEl.appendChild(arcEl);
         el.appendChild(defsEl);
         const newText = doc.createElementNS(SVG_NS, 'text');
@@ -1383,10 +1511,9 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
         newText.textContent = content;
         el.appendChild(newText);
         textEl = newText;
-      } else if (newCurve !== 0) {
-        const arcEl = doc.getElementById(`_arc_${el.id}`) ?? el.querySelector('path');
-        if (arcEl) arcEl.setAttribute('d', computeArcPath(cx, cy, halfW, newCurve));
       }
+      // No non-zero → non-zero case here: the arc's `d` is written once at the end of
+      // this function, where the text it has to fit is in its final state.
     }
 
     if (attrs.content !== undefined) {
@@ -1420,6 +1547,29 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       if (attrs.letterSpacing === 0) textEl.removeAttribute('letter-spacing');
       else textEl.setAttribute('letter-spacing', `${attrs.letterSpacing}em`);
     }
+
+    // Re-arc. The arc's placement depends on how much room the string takes along it, so
+    // it has to be recomputed after every edit that changes that — not just the curve.
+    // It runs here, once, rather than inside the curve branch above, because that branch
+    // executes before content/font/size/letter-spacing are applied and would measure the
+    // text as it was rather than as it now is.
+    const curveNow = isGroup ? Number(el.getAttribute('data-curve') ?? 0) : 0;
+    const reArc =
+      attrs.curve !== undefined || attrs.content !== undefined || attrs.font !== undefined ||
+      attrs.size !== undefined || attrs.letterSpacing !== undefined;
+    if (isGroup && curveNow !== 0 && reArc) {
+      const arcEl = doc.getElementById(`_arc_${el.id}`) ?? el.querySelector('path');
+      if (arcEl) {
+        arcEl.setAttribute('d', computeArcPath(
+          Number(el.getAttribute('data-cx') ?? 0),
+          Number(el.getAttribute('data-cy') ?? 0),
+          curveNow,
+          measureTextAdvance(doc.documentElement, el.id),
+          Number(el.getAttribute('data-halfw') ?? 100),
+        ));
+      }
+    }
+
     const content = new XMLSerializer().serializeToString(doc.documentElement);
     setActiveSvg((prev) => {
       if (!prev) return null;
@@ -1478,7 +1628,6 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       const defsEl = doc.createElementNS('http://www.w3.org/2000/svg', 'defs');
       const arcEl = doc.createElementNS('http://www.w3.org/2000/svg', 'path');
       arcEl.id = arcId;
-      arcEl.setAttribute('d', computeArcPath(cx, cy, halfW, textForm.curve));
       defsEl.appendChild(arcEl);
       g.appendChild(defsEl);
 
@@ -1497,6 +1646,12 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       textEl.appendChild(textPathEl);
       g.appendChild(textEl);
       svg.appendChild(g);
+      // Same as the promotion branch: the string can only be measured once the group is
+      // in the document, so the arc is placed after it lands.
+      arcEl.setAttribute(
+        'd',
+        computeArcPath(cx, cy, textForm.curve, measureTextAdvance(doc.documentElement, id), halfW),
+      );
     } else {
       const halfW = vbW * 0.35;
       const g = doc.createElementNS('http://www.w3.org/2000/svg', 'g');
@@ -1815,9 +1970,17 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
       }
       let contentEls = eligibleEls;
       const bottomEl = eligibleEls[0];
+      // The colour the skipped background was painting. The layer itself stays out of the
+      // raster — including it made the model read whole artworks as one logo — but the
+      // canvas is filled with its colour, so artwork that only reads against that
+      // background (white lettering on black, say) is still visible in the image. Without
+      // it the PNG is transparent, which flattens to white and hides exactly that artwork.
+      let bgColor: string | null = null;
       if (bottomEl && isFullCanvasLayer(doc.documentElement, bottomEl.id, vw, vh)) {
         console.log('[customise] skipping full-canvas background layer:', bottomEl.id);
         contentEls = eligibleEls.slice(1);
+        bgColor = backgroundFillColor(activeSvg.content, bottomEl.id);
+        console.log(`[customise] rastering against background ${bgColor ?? 'none (not a flat colour)'}`);
       }
       // Dropping the background must never empty the payload — a blank raster makes the
       // model answer "no text" no matter what the artwork holds. Analyse everything instead.
@@ -1846,14 +2009,19 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
       const contentXml = contentEls.map((el) => new XMLSerializer().serializeToString(el)).join('');
       // Scoped raster: defs + content layers only (no background) at the full viewBox.
       const contentSvg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="${viewBox}">${defsXml}${contentXml}</svg>`;
-      const pngBase64 = await svgToBase64Png(contentSvg, Math.round(vw * scale), Math.round(vh * scale));
+      const pngBase64 = await svgToBase64Png(contentSvg, Math.round(vw * scale), Math.round(vh * scale), bgColor);
 
       // Dev-only cache. The marked source is derived deterministically from the document,
       // so reverting and running again — or reloading mid-iteration — reproduces the
       // exact key and reuses the stored answer instead of paying for the call twice. The
       // removeIds in that answer address the data-ai-idx marks in contentXml, which is
       // why the hash is taken over contentXml rather than the raw artwork.
-      const cacheKey = `customise-v1:${TEXT_PARSE_MODEL}:${hashString(contentXml)}`;
+      //
+      // The background colour is part of the key because the model sees the raster, not
+      // just the source: the same contentXml against a different backdrop is a different
+      // question. v2 also retires every answer cached from the era when the raster had no
+      // backdrop at all — those were answered on an image with the artwork missing.
+      const cacheKey = `customise-v2:${TEXT_PARSE_MODEL}:${bgColor ?? 'none'}:${hashString(contentXml)}`;
       let parsed: CustomiseResult;
       const cachedRaw = readAiCache(cacheKey);
 
@@ -2081,6 +2249,16 @@ Return ONLY valid JSON — no markdown, no explanation:
     processEl(layerEl);
     layerEl.querySelectorAll('*').forEach((el) => processEl(el));
 
+    // Shapes that never declare a fill have nothing to rewrite, yet they do paint —
+    // inherited, or black by default — and that colour is offered as a swatch. Set the
+    // fill on them so picking it actually recolours the shape instead of doing nothing.
+    [layerEl, ...Array.from(layerEl.querySelectorAll('*'))].forEach((el) => {
+      const tag = el.tagName.toLowerCase().replace(/.*:/, '');
+      if (!PAINTABLE_TAGS.has(tag) || declaresOwnFill(el, doc)) return;
+      const fill = effectiveFill(el, doc);
+      if (fill && normalizeColor(fill) === normalFrom) el.setAttribute('fill', applyTo);
+    });
+
     // For CSS class rules in <style> blocks: the rules are document-scoped, so rewriting
     // them would affect every layer sharing that class. Instead, add inline style overrides
     // on the specific elements within this layer — inline styles win specificity, leaving
@@ -2142,36 +2320,6 @@ Return ONLY valid JSON — no markdown, no explanation:
 
   // The picker closed — the next pick starts a fresh undo entry and baseline.
   const endColorEdit = useCallback(() => { colorEditRef.current = null; }, []);
-
-  const onCurvePointerDown = useCallback((): number | null => {
-    if (!selectedTextProps || !selectedLayer) return null;
-    const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
-    const el = svgEl?.getElementById(selectedLayer) as SVGGraphicsElement | null;
-    if (!el || !svgEl) return null;
-    const bbox = bboxInRootSpace(svgEl, el);
-    return bbox ? bbox.y + bbox.height / 2 : null;
-  }, [selectedTextProps, selectedLayer]);
-
-  const onCurvePointerUp = useCallback((startCenterY: number) => {
-    if (!selectedLayer || !activeSvg) return;
-    const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
-    const el = svgEl?.getElementById(selectedLayer) as SVGGraphicsElement | null;
-    if (!el || !svgEl) return;
-    const bbox = bboxInRootSpace(svgEl, el as SVGGraphicsElement);
-    if (!bbox) return;
-    const delta = startCenterY - (bbox.y + bbox.height / 2);
-    if (Math.abs(delta) < 0.5) return;
-    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
-    const groupEl = doc.getElementById(selectedLayer);
-    if (!groupEl) return;
-    const cur = groupEl.getAttribute('transform') ?? '';
-    const m = cur.match(/translate\(\s*([^,\s)]+)[\s,]+([^,\s)]+)\s*\)/);
-    const tx = m ? parseFloat(m[1]) : 0;
-    const ty = m ? parseFloat(m[2]) : 0;
-    groupEl.setAttribute('transform', `translate(${tx}, ${ty + delta})`);
-    const content = new XMLSerializer().serializeToString(doc.documentElement);
-    setActiveSvg((prev) => prev ? { ...prev, content } : null);
-  }, [selectedLayer, activeSvg]);
 
   // ── AI layer actions ───────────────────────────────────────────────────────
 
@@ -2519,6 +2667,87 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     setSelectedLayers(new Set([newId]));
   }, [activeSvg, snapshotForUndo]);
 
+  // Open a layer into its parts: the row is replaced by one row per visual child, in
+  // document order. Files often deliver a whole logo as a single group, which leaves one
+  // row standing for a dozen separable pieces; this drills into it on demand rather than
+  // guessing at load, so a layer list that already suits an asset is never disturbed.
+  //
+  // The DOM is not restructured — the children stay inside their parent, so transforms,
+  // classes and inherited paint go on applying. Only the layer list changes, which is
+  // also why this is one-way: undo puts the single row back.
+  const expandLayer = useCallback((layerId: string) => {
+    if (!activeSvg) return;
+    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+    const el = doc.getElementById(layerId);
+    if (!canExpandLayer(el)) return;
+
+    snapshotForUndo(activeSvg.content, activeSvg.layers);
+    const kids = layerChildren(el!);
+    const stamp = Date.now();
+    const newLayers: SvgLayer[] = kids.map((kid, i) => {
+      if (!kid.id) kid.id = `_sub_${stamp}_${i}`;
+      const label =
+        kid.getAttribute('data-name')?.trim() ||
+        (!kid.id.startsWith('_sub_') && !kid.id.startsWith('_layer_') ? kid.id : null) ||
+        `${kid.tagName.toLowerCase().replace(/.*:/, '')} ${i + 1}`;
+      return { id: kid.id, label };
+    });
+
+    const content = new XMLSerializer().serializeToString(doc.documentElement);
+    console.log(`[layers] expanded ${layerId} into ${newLayers.length} sublayers`);
+    setActiveSvg((prev) => {
+      if (!prev) return null;
+      const idx = prev.layers.findIndex((l) => l.id === layerId);
+      const layers = [...prev.layers];
+      layers.splice(idx < 0 ? layers.length : idx, idx < 0 ? 0 : 1, ...newLayers);
+      return { ...prev, content, layers };
+    });
+    // The expanded layer no longer exists as a row, so selecting it would dangle.
+    selectOne(null);
+  }, [activeSvg, snapshotForUndo, selectOne]);
+
+  // The way back out of a group that was drilled into: fold this row and every sibling
+  // row taken from the same group back into one row for the group itself. The inverse of
+  // expandLayer, and equally a layer-list-only change — the elements never moved, so
+  // there is nothing to put back.
+  //
+  // It steps out one level at a time, so repeatedly backing out walks up the wrappers.
+  // That can land on the single wrapper an asset started as; expanding again reopens it.
+  const collapseLayer = useCallback((layerId: string) => {
+    if (!activeSvg) return;
+    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+    const layerIds = new Set(activeSvg.layers.map((l) => l.id));
+    const parent = collapsibleParent(doc.getElementById(layerId), layerIds);
+    if (!parent) return;
+
+    // Everything currently listed that lives inside this group folds away together —
+    // leaving some of its children as rows and not others would be a half-open group.
+    const absorbed = activeSvg.layers.filter((l) => {
+      const el = doc.getElementById(l.id);
+      return !!el && parent.contains(el);
+    });
+    if (!absorbed.length) return;
+
+    snapshotForUndo(activeSvg.content, activeSvg.layers);
+    if (!parent.id) parent.id = `_grp_${Date.now()}`;
+    const label =
+      parent.getAttribute('data-name')?.trim() ||
+      (!parent.id.startsWith('_grp_') ? parent.id : null) ||
+      'Group';
+    const content = new XMLSerializer().serializeToString(doc.documentElement);
+    const absorbedIds = new Set(absorbed.map((l) => l.id));
+
+    console.log(`[layers] collapsed ${absorbed.length} row(s) into ${parent.id}`);
+    setActiveSvg((prev) => {
+      if (!prev) return null;
+      const first = prev.layers.findIndex((l) => absorbedIds.has(l.id));
+      const layers = prev.layers.filter((l) => !absorbedIds.has(l.id));
+      layers.splice(first < 0 ? layers.length : first, 0, { id: parent.id, label });
+      return { ...prev, content, layers };
+    });
+    selectOne(parent.id);
+  }, [activeSvg, snapshotForUndo, selectOne]);
+
   // Delete a layer (removes its element and its layers-list entry). Undoable.
   const deleteLayer = useCallback((layerId: string) => {
     if (!activeSvg) return;
@@ -2745,8 +2974,6 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                 extraFonts={extraFonts}
                 layerColors={layerColors}
                 onUpdateTextLayer={updateTextLayer}
-                onCurvePointerDown={onCurvePointerDown}
-                onCurvePointerUp={onCurvePointerUp}
                 onReplaceColor={replaceLayerColor}
                 onEndColorEdit={endColorEdit}
                 onClose={() => selectOne(null)}
@@ -2759,6 +2986,10 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                 selectedLayers={selectedLayers}
                 backgroundLayerId={backgroundLayerId}
                 textLayerIds={textLayerIds}
+                expandableLayerIds={expandableLayerIds}
+                onExpandLayer={expandLayer}
+                canBackOut={!!backOutLayerId}
+                onBackOut={() => backOutLayerId && collapseLayer(backOutLayerId)}
                 onAddTextLayer={addTextLayer}
                 onReorderLayers={reorderLayers}
                 onSetSelectedLayers={setSelectedLayers}
@@ -2878,6 +3109,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
           onOpenSample={openSample}
           onOpenFetched={openSample}
           onOpenReviewUuid={openReviewUuid}
+          onReviewListLoaded={onReviewListLoaded}
         />
       )}
     </div>

@@ -54,7 +54,7 @@ function InspectorTitle(selectedTextProps: SelectedTextProps | null, isBackgroun
 
 export const EditorInspector = React.memo(function EditorInspector({
   selectedLayer, isBackground, selectedTextProps, textContentRef, extraFonts, layerColors,
-  onUpdateTextLayer, onCurvePointerDown, onCurvePointerUp,
+  onUpdateTextLayer,
   onReplaceColor, onEndColorEdit, onClose,
 }: {
   selectedLayer: string | null;
@@ -64,8 +64,6 @@ export const EditorInspector = React.memo(function EditorInspector({
   extraFonts: string[];
   layerColors: string[];
   onUpdateTextLayer: (attrs: Partial<TextLayerAttrs>) => void;
-  onCurvePointerDown: () => number | null;
-  onCurvePointerUp: (startCenterY: number) => void;
   onReplaceColor: (from: string, to: string) => void;
   onEndColorEdit: () => void;
   onClose: () => void;
@@ -118,8 +116,6 @@ export const EditorInspector = React.memo(function EditorInspector({
             textContentRef={textContentRef}
             extraFonts={extraFonts}
             onUpdateTextLayer={onUpdateTextLayer}
-            onCurvePointerDown={onCurvePointerDown}
-            onCurvePointerUp={onCurvePointerUp}
           />
         ) : isBackground ? (
           /* ── Canvas colour ─────────────────────────────────────────────── */
