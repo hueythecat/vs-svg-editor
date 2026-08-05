@@ -26,11 +26,14 @@ const LETTER_SPACING = [-0.1, -0.05, 0, 0.05, 0.1, 0.15, 0.2, 0.3] as const;
 const fieldRow: React.CSSProperties = { display: 'flex', gap: 10, marginBottom: 12 };
 
 export const TextControls = React.memo(function TextControls({
-  selectedTextProps, textContentRef, extraFonts,
+  selectedTextProps, textContentRef, usedFonts, extraFonts,
   onUpdateTextLayer,
 }: {
   selectedTextProps: SelectedTextProps;
   textContentRef: RefObject<HTMLInputElement | null>;
+  // Faces this artwork's re-created text is actually set in.
+  usedFonts: string[];
+  // Faces the AI proposed for the artwork that nothing is using yet.
   extraFonts: string[];
   onUpdateTextLayer: (attrs: Partial<TextLayerAttrs>) => void;
 }) {
@@ -61,12 +64,33 @@ export const TextControls = React.memo(function TextControls({
           onChange={(e) => onUpdateTextLayer({ font: e.target.value })}
           style={{ ...inputStyle, cursor: 'pointer' }}
         >
-          {FONTS.map((f) => (
-            <option key={f} value={f} style={{ fontFamily: f }}>{f}</option>
-          ))}
-          {extraFonts.map((f) => (
-            <option key={f} value={f} style={{ fontFamily: f }}>{f} ✦</option>
-          ))}
+          {/*
+            Ordered by how much a face has earned its place, nearest first: what this
+            artwork already uses, then what the AI proposed for it, then the standard
+            stack. The built-ins were listed first for a long time, which buried the
+            match the pass had just found under eight faces that had nothing to do with
+            the design. Grouped as well as ordered, or the ordering communicates nothing —
+            a bare list gives no way to tell a font in use from one merely offered.
+          */}
+          {usedFonts.length > 0 && (
+            <optgroup label="In this design">
+              {usedFonts.map((f) => (
+                <option key={f} value={f} style={{ fontFamily: f }}>{f} ✦</option>
+              ))}
+            </optgroup>
+          )}
+          {extraFonts.length > 0 && (
+            <optgroup label="Suggested">
+              {extraFonts.map((f) => (
+                <option key={f} value={f} style={{ fontFamily: f }}>{f} ✦</option>
+              ))}
+            </optgroup>
+          )}
+          <optgroup label="Standard">
+            {FONTS.map((f) => (
+              <option key={f} value={f} style={{ fontFamily: f }}>{f}</option>
+            ))}
+          </optgroup>
         </select>
       </div>
 

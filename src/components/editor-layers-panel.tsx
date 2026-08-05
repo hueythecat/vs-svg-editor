@@ -9,6 +9,7 @@ import { ChevronIcon, PlusIcon } from './svg-icons';
 // add-text affordance, over the drag-to-reorder layer list.
 export const LayersPanel = React.memo(function LayersPanel({
   layers, hiddenLayers, selectedLayers, backgroundLayerId, textLayerIds, expandableLayerIds,
+  hiddenInsideCounts,
   canBackOut, onBackOut, onAddTextLayer, onReorderLayers, onSetSelectedLayers, onSetSelectedLayer, onSelectOne,
   onToggleLayer, onDuplicateLayer, onDeleteLayer, onExpandLayer,
 }: {
@@ -18,6 +19,7 @@ export const LayersPanel = React.memo(function LayersPanel({
   backgroundLayerId: string | null;
   textLayerIds: Set<string>;
   expandableLayerIds: Set<string>;
+  hiddenInsideCounts: Map<string, number>;
   canBackOut: boolean;
   onBackOut: () => void;
   onAddTextLayer: () => void;
@@ -90,6 +92,7 @@ export const LayersPanel = React.memo(function LayersPanel({
         backgroundLayerId={backgroundLayerId}
         textLayerIds={textLayerIds}
         expandableLayerIds={expandableLayerIds}
+        hiddenInsideCounts={hiddenInsideCounts}
         onExpandLayer={onExpandLayer}
         onReorderLayers={onReorderLayers}
         onSetSelectedLayers={onSetSelectedLayers}

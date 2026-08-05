@@ -36,7 +36,7 @@ import {
   withOffscreenSvg
 } from '@/lib/svg-utils';
 import { C, EDITOR_CSS, FONT_STACK, SHADOW } from '@/lib/design-tokens';
-import { SHOW_DEV_UI } from '@/lib/env';
+import { FONT_SUGGESTION_LIMIT, SHOW_DEV_UI } from '@/lib/env';
 import { readAiCache, writeAiCache } from '@/lib/ai-cache';
 import { isIgnoreCanCustomise, isIgnoreCooldownPrompt, isIgnoreHasCustomised } from '@/lib/dev-flags';
 import type { AiActionType, LlmProvider, RemovedRecord } from './editor-types';
@@ -322,7 +322,6 @@ const hideRemovedElements = (
   rows: TextRow[],
   anchors: Map<string, DOMRect>,
   alreadyHidden: Set<string>,
-  layerIds: Set<string>,
   logTag: string,
 ): RemovedRecord[] => {
   // Which text row, if any, claimed each element. A row naming an index is the model
@@ -339,7 +338,6 @@ const hideRemovedElements = (
   // Ids assigned first, for every element in the batch, because the parent lookup below
   // needs them all to exist — a group and its own children are routinely both in here,
   // and the child is often reached before the parent.
-  const isLayerRow = (id: string | null) => !!id && layerIds.has(id);
   const taken: { sid: string; el: Element }[] = [];
   removeIds.forEach((sid, i) => {
     const el = idMap.get(sid);
@@ -357,12 +355,8 @@ const hideRemovedElements = (
     // invisible regardless of its own rule, so this is what the panel groups on and what
     // preview has to walk.
     let parentId: string | null = null;
-    // The layer row this element lives under, so its own row can be filed beside it
-    // rather than landing at the end of a list that is otherwise in document order.
-    let containerLayerId: string | null = null;
-    for (let p = el.parentElement; p && !(parentId && containerLayerId); p = p.parentElement) {
-      if (!parentId && p.id && hiddenNow.has(p.id)) parentId = p.id;
-      if (!containerLayerId && isLayerRow(p.id)) containerLayerId = p.id;
+    for (let p = el.parentElement; p && !parentId; p = p.parentElement) {
+      if (p.id && hiddenNow.has(p.id)) parentId = p.id;
     }
     const b = anchors.get(sid);
     return {
@@ -371,7 +365,6 @@ const hideRemovedElements = (
       claimedBy: claimant.get(sid) ?? null,
       box: b ? { x: b.x, y: b.y, w: b.width, h: b.height } : null,
       parentId,
-      containerLayerId,
     };
   });
 
@@ -485,6 +478,13 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   // delete, so each of these is still in the document with its id in `hiddenLayers`, and
   // the dev panel offers it back. Not persisted: it describes this editing session, and
   // a reload starts from the stored artwork anyway.
+  // How many groups deep the element list has been drilled. Tracked rather than inferred:
+  // whether a row's element sits inside a <g> says nothing about whether YOU opened it.
+  // parseSvg unwraps degenerate wrappers at load, so on a file whose drawing is wrapped in
+  // a group — most of them — every top-level row already has a group for a parent, and
+  // back-out was offered before anything had been opened. Taking it folded the list the
+  // file opened with into a single row.
+  const [expandDepth, setExpandDepth] = useState(0);
   const [removedRecords, setRemovedRecords] = useState<RemovedRecord[]>([]);
   // Same ids as `removedRecords`, readable synchronously — see dropSelectionOutside.
   const removedIdsRef = useRef<Set<string>>(new Set());
@@ -528,6 +528,11 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   const [aiStatusMsg, setAiStatusMsg]     = useState<string>('Thinking…');
   const [fontSuggestion, setFontSuggestion]   = useState<string | null>(null);
   const [suggestedFontName, setSuggestedFontName] = useState<string | null>(null);
+  // Fonts the AI offered, split by how much they've earned their place. `usedFonts` are
+  // the faces actually applied to text this session re-created — the ones you are most
+  // likely to want again — while `extraFonts` are image-level suggestions nothing has
+  // used yet. The Font dropdown lists them in that order, ahead of the built-in stack.
+  const [usedFonts, setUsedFonts]             = useState<string[]>([]);
   const [extraFonts, setExtraFonts]           = useState<string[]>([]);
   const [imageFonts, setImageFonts]           = useState<Array<{ font: string; reason: string }> | null>(null);
   const [imageFontsLoading, setImageFontsLoading] = useState(false);
@@ -602,6 +607,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     layers: SvgLayer[];
     hidden: Set<string>;
     removed: RemovedRecord[];
+    depth: number;
   };
   const undoStackRef             = useRef<HistoryEntry[]>([]);
   const redoStackRef             = useRef<HistoryEntry[]>([]);
@@ -637,9 +643,11 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   // last render settled on are exactly the ones to record.
   const hiddenLayersRef   = useRef(hiddenLayers);
   const removedRecordsRef = useRef(removedRecords);
+  const expandDepthRef    = useRef(expandDepth);
   useEffect(() => {
     hiddenLayersRef.current = hiddenLayers;
     removedRecordsRef.current = removedRecords;
+    expandDepthRef.current = expandDepth;
   });
 
   const restoreHistory = useCallback((entry: HistoryEntry) => {
@@ -647,6 +655,9 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     setHiddenLayers(new Set(entry.hidden));
     setRemovedRecords(entry.removed);
     removedIdsRef.current = new Set(entry.removed.map((r) => r.id));
+    // Undoing an expand puts the rows back; the depth has to come back with them or
+    // back-out stays offered at a level that no longer exists.
+    setExpandDepth(entry.depth);
     setPreviewRemovedId(null);
   }, []);
 
@@ -656,6 +667,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       content, layers,
       hidden: new Set(hiddenLayersRef.current),
       removed: removedRecordsRef.current,
+      depth: expandDepthRef.current,
     };
     undoStackRef.current = [...undoStackRef.current.slice(-9), entry];
     redoStackRef.current = [];
@@ -668,6 +680,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     layers: activeSvg!.layers,
     hidden: new Set(hiddenLayersRef.current),
     removed: removedRecordsRef.current,
+    depth: expandDepthRef.current,
   }), [activeSvg]);
 
   const undo = useCallback(() => {
@@ -713,6 +726,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       // What a previous document's passes hid says nothing about this one.
       setRemovedRecords([]);
       removedIdsRef.current = new Set();
+      setExpandDepth(0);
       setPreviewRemovedId(null);
       setIsLoading(false);
       setCustomiseDone(false);
@@ -995,6 +1009,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     setSelectedLayers(new Set());
     setRemovedRecords([]);
     removedIdsRef.current = new Set();
+    setExpandDepth(0);
     setPreviewRemovedId(null);
   }, [revokePrev]);
 
@@ -1059,6 +1074,12 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   // Since the AI passes hide nested elements too, `hiddenLayers.size` is no longer the
   // number of rows switched off and would make the label read "Export (3/21)" for a
   // document with every row still showing.
+  // Suggestions minus anything already in use. The customise pass proposes fonts AND
+  // applies some of them, so the two lists overlap by nature — subtracting here rather
+  // than trying to keep the states disjoint means it cannot depend on which setter ran
+  // first, and a font never appears twice in one dropdown.
+  const suggestedFonts = extraFonts.filter((f) => !usedFonts.includes(f));
+
   const hiddenRowCount = (activeSvg?.layers ?? []).filter((l) => hiddenLayers.has(l.id)).length;
 
   // Records what a pass took, in both the ref the pruning above consults and the state
@@ -1069,33 +1090,6 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     removedIdsRef.current = new Set([...removedIdsRef.current, ...ids]);
     setRemovedRecords((prev) => [...prev, ...records]);
     setHiddenLayers((prev) => new Set([...prev, ...ids]));
-
-    // Each outermost hidden element also becomes a LAYER ROW, switched off.
-    //
-    // Otherwise what a pass took is invisible to the elements panel: the things it hides
-    // are nested inside a layer rather than being layers, so no row carries their state,
-    // and the containing row goes on looking like a normal visible layer while drawing
-    // nothing. Promoting them means the artwork the AI removed reads the same way as
-    // anything else you switched off — eye closed, click to bring it back — instead of
-    // needing a bespoke panel to find at all.
-    //
-    // Only the roots: their descendants are hidden too, but each one is inside a root
-    // and would be a row for the same piece of artwork.
-    setActiveSvg((prev) => {
-      if (!prev) return null;
-      const existing = new Set(prev.layers.map((l) => l.id));
-      const layers = [...prev.layers];
-      for (const r of records) {
-        if (r.parentId || existing.has(r.id)) continue;
-        const label = r.claimedBy ? `${r.claimedBy} (original)` : `${r.tag} (hidden)`;
-        // Filed directly after the layer it came out of, so the list stays in roughly
-        // document order rather than collecting new rows at one end.
-        const at = r.containerLayerId ? layers.findIndex((l) => l.id === r.containerLayerId) : -1;
-        if (at === -1) layers.push({ id: r.id, label });
-        else layers.splice(at + 1, 0, { id: r.id, label });
-      }
-      return layers.length === prev.layers.length ? prev : { ...prev, layers };
-    });
   }, []);
 
   // Which layers render as text — drives the element list's type icon (§1.7).
@@ -1110,6 +1104,35 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     }
     return ids;
   }, [activeSvg?.content]);
+
+  // Per layer: how many outermost pieces of artwork an AI pass hid inside it.
+  //
+  // What a pass takes is usually nested — a group of letter paths inside a layer, not a
+  // layer itself — so it gets no row of its own and the containing row goes on looking
+  // like an ordinary visible layer while part of what it draws is switched off. This is
+  // the only signal that something is in there. Counting ROOTS, not records: their
+  // descendants are hidden too, but each sits inside a root and opening the layer
+  // surfaces one row per root, not per element.
+  const hiddenInsideCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    if (!activeSvg || removedRecords.length === 0) return counts;
+    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+    const layerIds = new Set(activeSvg.layers.map((l) => l.id));
+    for (const r of removedRecords) {
+      if (r.parentId) continue;
+      const el = doc.getElementById(r.id);
+      if (!el) continue;
+      // The nearest ancestor that is a row. Starting at parentElement so an element that
+      // IS a row counts against the layer holding it rather than against itself.
+      for (let p = el.parentElement; p; p = p.parentElement) {
+        if (p.id && layerIds.has(p.id)) {
+          counts.set(p.id, (counts.get(p.id) ?? 0) + 1);
+          break;
+        }
+      }
+    }
+    return counts;
+  }, [activeSvg, removedRecords]);
 
   // Which layers hold more than one part, so the element list can offer to open them.
   // Text layers are excluded: their internals are <text>/<textPath> plumbing, not parts
@@ -1130,7 +1153,9 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   // any row currently sits in — the level most recently opened. Backing out repeatedly
   // therefore walks back up the way you came.
   const backOutLayerId = useMemo(() => {
-    if (!activeSvg) return null;
+    // Nothing has been opened, so there is nowhere to go back to — whatever the document
+    // happens to be wrapped in.
+    if (!activeSvg || expandDepth === 0) return null;
     const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
     const layerIds = new Set(activeSvg.layers.map((l) => l.id));
     let deepestId: string | null = null;
@@ -1143,7 +1168,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       if (depth > deepest) { deepest = depth; deepestId = layer.id; }
     }
     return deepestId;
-  }, [activeSvg?.content, activeSvg?.layers]);
+  }, [activeSvg?.content, activeSvg?.layers, expandDepth]);
 
   // Click on canvas: walk up from the clicked element to find its layer. Shift-click
   // adds/removes it from the selection, exactly like shift-clicking its row in the
@@ -2245,8 +2270,17 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     }
   }, []);
 
+  // A suggestion: offered, not yet applied to anything.
   const addGoogleFont = useCallback((fontName: string, weight?: number) => {
     setExtraFonts((prev) => prev.includes(fontName) ? prev : [...prev, fontName]);
+    loadGoogleFontLink(fontName, weight);
+  }, [loadGoogleFontLink]);
+
+  // A face a re-created text row is actually set in. Kept out of the suggestion list so
+  // one can be listed ahead of the other, and so a font in use never reads as a proposal.
+  const addUsedFont = useCallback((fontName: string, weight?: number) => {
+    if (!fontName) return;
+    setUsedFonts((prev) => prev.includes(fontName) ? prev : [...prev, fontName]);
     loadGoogleFontLink(fontName, weight);
   }, [loadGoogleFontLink]);
 
@@ -2265,11 +2299,12 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
 
       const raw = await callLlmVision({
         model: 'claude-sonnet-5', maxTokens: 1000, pngBase64, tag: 'suggest-fonts',
-        prompt: `Look at this design image. Suggest 5 Google Fonts that would complement its visual style, mood, colour palette, and aesthetic. Consider the overall feel of the design.
+        prompt: `Look at this design image. Suggest ${FONT_SUGGESTION_LIMIT} Google Fonts that would complement its visual style, mood, colour palette, and aesthetic. Consider the overall feel of the design.
 Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"brief reason"}]}`,
       });
       const parsed = JSON.parse(raw) as { suggestions: Array<{ font: string; reason: string }> };
-      const suggestions = parsed.suggestions ?? [];
+      // Capped as well as asked for: the model is not bound by the number in the prompt.
+      const suggestions = (parsed.suggestions ?? []).slice(0, FONT_SUGGESTION_LIMIT);
       suggestions.forEach(({ font }) => loadGoogleFontLink(font));
       setImageFonts(suggestions);
     } catch (err) {
@@ -2443,7 +2478,10 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
       // retires v3 alongside strip-text v8, for the duplicated-rows prompt bug. v5 retires
       // v4: those answers predate the per-row font instruction and tend to name one family
       // for the whole image, which renders a script tagline as whatever the wordmark used.
-      const cacheKey = `customise-v5:${TEXT_PARSE_MODEL}:${bgColor ?? 'none'}:${hashString(contentXml)}`;
+      // The suggestion limit is part of the key rather than a version bump: raising it
+      // asks a different question, and a cached answer would otherwise keep returning
+      // the old count and make the setting look like it does nothing.
+      const cacheKey = `customise-v5:${TEXT_PARSE_MODEL}:f${FONT_SUGGESTION_LIMIT}:${bgColor ?? 'none'}:${hashString(contentXml)}`;
       let parsed: CustomiseResult;
       const cachedRaw = readAiCache(cacheKey);
 
@@ -2458,7 +2496,7 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
 
 ${TEXT_PARSING_PROMPT}
 
-TASK 4 — Font suggestions: Suggest 2–4 Google Font names that suit the style, mood, and colour palette of this design. Return names only.
+TASK 4 — Font suggestions: Suggest ${FONT_SUGGESTION_LIMIT} Google Font names that suit the style, mood, and colour palette of this design. Return names only.
 
 SVG source:
 ${contentXml}
@@ -2508,8 +2546,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
       // Measured before anything is hidden. The boxes are what the replacement text is
       // placed from, and they also give the dev panel something to show per entry.
       const anchors = measureRemovedTextBoxes(doc.documentElement, removeIds);
-      const layerIdSet = new Set(activeSvg.layers.map((l) => l.id));
-      const hidden = hideRemovedElements(aiIdMap, removeIds, parsed.rows, anchors, hiddenLayers, layerIdSet, 'customise');
+      const hidden = hideRemovedElements(aiIdMap, removeIds, parsed.rows, anchors, hiddenLayers, 'customise');
       for (const [, el] of aiIdMap) el.removeAttribute('data-ai-idx');
 
       const allRows = parsed.hasText ? parsed.rows : [];
@@ -2518,7 +2555,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
       // Re-add editable text layers — one per detected row (same placement logic as strip-text)
       // Each row's own family AND weight, so the face the model matched is the face that
       // renders — and the face that gets measured a few lines below.
-      allRows.forEach(({ font, weight }) => addGoogleFont(font, weight));
+      allRows.forEach(({ font, weight }) => addUsedFont(font, weight));
       await ensureRowFontsReady(allRows);
       console.log(`[customise] anchored ${countAnchoredRows(allRows, anchors)}/${allRows.length} row(s) to measured geometry`);
       const newTextLayers = appendTextRowLayers(doc, allRows, { x: vbX, y: vbY, w: vw, h: vh }, undefined, anchors);
@@ -2526,7 +2563,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
       // Suggested fonts, deduped across all layers. Registered with addGoogleFont rather
       // than just link-loaded, so they show up in the inspector's Font list and can be
       // applied to any layer by hand.
-      const validFonts = Array.from(new Set(allFonts.filter(Boolean))).slice(0, 6);
+      const validFonts = Array.from(new Set(allFonts.filter(Boolean))).slice(0, FONT_SUGGESTION_LIMIT);
       validFonts.forEach((f) => addGoogleFont(f));
       setCustomiseFonts(validFonts);
 
@@ -2873,11 +2910,10 @@ Respond with ONLY a valid JSON object — no markdown, no code fences:
         // the text but the model chose the elements, and it can choose wrongly. Recorded
         // under the query, so the dev panel groups these as "what removing X took".
         const rstAnchors = measureRemovedTextBoxes(doc.documentElement, removeIds);
-        const layerIdSet = new Set(activeSvg.layers.map((l) => l.id));
         const rstHidden = hideRemovedElements(
           rstIdMap, removeIds,
           [{ content: query, removeIds } as TextRow],
-          rstAnchors, hiddenLayers, layerIdSet, 'remove-specific-text',
+          rstAnchors, hiddenLayers, 'remove-specific-text',
         );
         for (const [, el] of rstIdMap) el.removeAttribute('data-ai-idx');
         const contentRST = new XMLSerializer().serializeToString(doc.documentElement);
@@ -2968,9 +3004,8 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
       // Ground truth for placement: the boxes are read off the live geometry, and the
       // elements stay in the document, so this is measuring rather than salvaging.
       const stripAnchors = measureRemovedTextBoxes(doc.documentElement, stripRemoveIds);
-      const layerIdSet = new Set(activeSvg.layers.map((l) => l.id));
       const stripHidden = hideRemovedElements(
-        aiIdMap, stripRemoveIds, parsed.rows ?? [], stripAnchors, hiddenLayers, layerIdSet, 'strip-text',
+        aiIdMap, stripRemoveIds, parsed.rows ?? [], stripAnchors, hiddenLayers, 'strip-text',
       );
       console.log(`[strip-text] took ${stripHidden.length}/${stripRequested.length} element(s)`);
       // Clean up temporary index attributes from remaining elements
@@ -2980,7 +3015,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
 
       // One editable text layer per detected row — no grouping, no sub-layers.
       const detectedRows = parsed.hasText ? parsed.rows ?? [] : [];
-      detectedRows.forEach(({ font, weight }) => addGoogleFont(font, weight));
+      detectedRows.forEach(({ font, weight }) => addUsedFont(font, weight));
       await ensureRowFontsReady(detectedRows);
       console.log(`[strip-text] anchored ${countAnchoredRows(detectedRows, stripAnchors)}/${detectedRows.length} row(s) to measured geometry`);
       const newTextLayers = appendTextRowLayers(doc, detectedRows, { x: vbX, y: vbY, w: vw, h: vh }, undefined, stripAnchors);
@@ -3048,6 +3083,12 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     setShowImageFonts(false);
     setSelectedImageFont(null);
     setCustomiseFonts([]);
+    // Fonts offered for the last artwork say nothing about this one, and left in place
+    // they accumulate: the dropdown grew every AI font from every image opened since the
+    // tab loaded. The <link> tags stay — a loaded webface costs nothing and may be needed
+    // again — but nothing is listed until this artwork's own pass proposes it.
+    setUsedFonts([]);
+    setExtraFonts([]);
     setTaxonomy(null);
     setTaxonomyLoading(false);
     setTaxonomyOpen(false);
@@ -3146,10 +3187,17 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     // that actually has alternatives rather than on another identical row.
     const kids = expansionTarget(el);
     const stamp = Date.now();
+    // What an AI pass took, keyed by element, so opening the layer it came out of names
+    // it rather than falling through to "g 8". These rows are the way hidden artwork is
+    // switched back on, and a positional label gives no way to tell which is which — on
+    // a diagram of eight stacked labels, eight rows reading "g 1".."g 8" are unusable.
+    const removedByEl = new Map(removedRecordsRef.current.map((r) => [r.id, r]));
     const newLayers: SvgLayer[] = kids.map((kid, i) => {
       if (!kid.id) kid.id = `_sub_${stamp}_${i}`;
+      const claimedBy = removedByEl.get(kid.id)?.claimedBy;
       const label =
         kid.getAttribute('data-name')?.trim() ||
+        (claimedBy ? `${claimedBy} (original)` : null) ||
         (!isSyntheticLayerId(kid.id) ? kid.id : null) ||
         `${kid.tagName.toLowerCase().replace(/.*:/, '')} ${i + 1}`;
       return { id: kid.id, label };
@@ -3157,6 +3205,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
 
     const content = new XMLSerializer().serializeToString(doc.documentElement);
     console.log(`[layers] expanded ${layerId} into ${newLayers.length} sublayers`);
+    setExpandDepth((d) => d + 1);
     setActiveSvg((prev) => {
       if (!prev) return null;
       const idx = prev.layers.findIndex((l) => l.id === layerId);
@@ -3208,6 +3257,10 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     const absorbedIds = new Set(absorbed.map((l) => l.id));
 
     console.log(`[layers] collapsed ${absorbed.length} row(s) into ${parent.id}`);
+    // Back up one level. Floored at zero so a collapse reached some other way — a row
+    // deleted out from under the list, say — cannot drive it negative and re-offer
+    // back-out at the root.
+    setExpandDepth((d) => Math.max(0, d - 1));
     setActiveSvg((prev) => {
       if (!prev) return null;
       const first = prev.layers.findIndex((l) => absorbedIds.has(l.id));
@@ -3443,7 +3496,8 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                 isBackground={selectionIsBackground}
                 selectedTextProps={selectedTextProps}
                 textContentRef={textContentRef}
-                extraFonts={extraFonts}
+                usedFonts={usedFonts}
+                extraFonts={suggestedFonts}
                 layerColors={layerColors}
                 onUpdateTextLayer={updateTextLayer}
                 onReplaceColor={replaceLayerColor}
@@ -3459,6 +3513,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                 backgroundLayerId={backgroundLayerId}
                 textLayerIds={textLayerIds}
                 expandableLayerIds={expandableLayerIds}
+                hiddenInsideCounts={hiddenInsideCounts}
                 onExpandLayer={expandLayer}
                 canBackOut={!!backOutLayerId}
                 onBackOut={() => backOutLayerId && collapseLayer(backOutLayerId)}

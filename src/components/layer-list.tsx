@@ -1,7 +1,7 @@
 import React, { Dispatch, SetStateAction, useRef, useState } from 'react';
 
 import type { SvgLayer } from '@/lib/svg-utils';
-import { C, FONT_STACK } from '@/lib/design-tokens';
+import { C, FONT_STACK, MONO_STACK } from '@/lib/design-tokens';
 import {
   ChevronIcon,
   DuplicateIcon, EyeIcon, EyeSlashIcon, GripIcon, ImageIcon, ShapeIcon, TrashIcon, TypeIcon,
@@ -20,7 +20,7 @@ const ICON_FOR = {
 
 export const LayerList = React.memo(function LayerList({
   layers, hiddenLayers, selectedLayers, backgroundLayerId, textLayerIds,
-  expandableLayerIds,
+  expandableLayerIds, hiddenInsideCounts,
   onReorderLayers, onSetSelectedLayers, onSetSelectedLayer, onSelectOne,
   onToggleLayer, onDuplicateLayer, onDeleteLayer, onExpandLayer,
 }: {
@@ -30,6 +30,9 @@ export const LayerList = React.memo(function LayerList({
   backgroundLayerId: string | null;
   textLayerIds: Set<string>;
   expandableLayerIds: Set<string>;
+  // Per layer: how many outermost pieces of artwork an AI pass hid INSIDE it. Nested
+  // hidden elements are not rows of their own, so without this the row gives no sign.
+  hiddenInsideCounts: Map<string, number>;
   onReorderLayers: (fromId: string, toId: string, before: boolean) => void;
   onSetSelectedLayers: Dispatch<SetStateAction<Set<string>>>;
   onSetSelectedLayer: Dispatch<SetStateAction<string | null>>;
@@ -217,6 +220,7 @@ export const LayerList = React.memo(function LayerList({
       ) : (
         [...layers].reverse().map((layer) => {
           const hidden     = hiddenLayers.has(layer.id);
+          const hiddenInsideCount = hiddenInsideCounts.get(layer.id) ?? 0;
           const isSelected = selectedLayers.has(layer.id);
           const isDragged  = dragLayerId === layer.id;
           const isCanvas   = layer.id === backgroundLayerId;
@@ -331,6 +335,28 @@ export const LayerList = React.memo(function LayerList({
               >
                 {isCanvas ? 'Canvas' : layer.label}
               </span>
+
+              {/*
+                Artwork an AI pass took is hidden where it sits rather than deleted, and
+                what it takes is usually nested inside a layer rather than being one. So
+                without this the row looks like any other while part of what it draws is
+                switched off, and the only way to find out is to open it. The count is of
+                the outermost hidden pieces — open the layer and each becomes a row of its
+                own, switched off, ready to switch back on.
+              */}
+              {hiddenInsideCount > 0 && (
+                <span
+                  title={`${hiddenInsideCount} hidden by an AI pass — open this layer to bring ${hiddenInsideCount === 1 ? 'it' : 'them'} back`}
+                  style={{
+                    flex: 'none', padding: '1px 5px', borderRadius: 999,
+                    fontSize: 10, fontWeight: 600, lineHeight: 1.5,
+                    color: C.textFaint, background: C.borderInput,
+                    fontFamily: MONO_STACK,
+                  }}
+                >
+                  {hiddenInsideCount}
+                </span>
+              )}
 
               {/* Actions */}
               <span style={{ display: 'flex', alignItems: 'center', gap: 7, flex: 'none' }}>

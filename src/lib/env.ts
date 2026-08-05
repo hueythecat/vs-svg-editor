@@ -18,3 +18,23 @@ export const IS_PRODUCTION_UI = APP_ENV ? APP_ENV === 'production' : !__DEV__;
 
 // Convenience inverse — most call sites read better as "show the dev thing".
 export const SHOW_DEV_UI = !IS_PRODUCTION_UI;
+
+// How many font suggestions an AI pass asks for, and how many it keeps.
+//
+// One number for both, because they used to disagree: the customise pass asked for "2–4"
+// and then capped the result at 6, so the cap could never bind, while the standalone
+// suggestion asked for 5 and capped nothing at all. Tuning that meant editing three
+// literals in two prompts and hoping they stayed in step.
+//
+// EXPO_PUBLIC_ prefixed because this is read in the browser — the prompts are built
+// client-side. An unprefixed FONT_SUGGESTION_LIMIT is server-only in Expo and would read
+// undefined here, silently falling back to the default. As with APP_ENV above, the name
+// has to appear as a literal `process.env.EXPO_PUBLIC_…` expression to be inlined.
+const RAW_FONT_LIMIT = process.env.EXPO_PUBLIC_FONT_SUGGESTION_LIMIT;
+
+export const FONT_SUGGESTION_LIMIT = (() => {
+  const n = Number(RAW_FONT_LIMIT);
+  // A non-numeric, zero or negative value is a misconfiguration, not an instruction to
+  // ask for no fonts — fall back rather than quietly disabling the feature.
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 5;
+})();

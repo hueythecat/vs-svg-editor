@@ -26,6 +26,7 @@ export type AiActionType = 'strip-text' | 'suggest-font' | 'remove-specific-text
 // is one nothing asserted was text, and those are exactly the ones a bad answer produces
 // in bulk. Grouping on it puts the suspect elements together instead of scattering them
 // among the legitimate ones.
+//
 // `parentId` is what makes the list usable and the preview work at all. A pass routinely
 // takes a <g> AND its children — the marking walk indexes both, and the model names both —
 // so on one sample 46 of 49 entries were nested inside another entry. That matters twice
@@ -38,7 +39,6 @@ export type RemovedRecord = {
   claimedBy: string | null;  // the text row's content, or null when no row claimed it
   box: { x: number; y: number; w: number; h: number } | null; // root-space ink, for the list
   parentId: string | null;   // nearest ancestor that is also hidden; null makes this a root
-  containerLayerId: string | null; // the layer row it sits under, so its own row files beside it
 };
 
 // Which LLM backs every AI action. Labels are what the model dropdown shows; the

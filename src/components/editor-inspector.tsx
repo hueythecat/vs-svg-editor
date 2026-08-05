@@ -53,7 +53,7 @@ function InspectorTitle(selectedTextProps: SelectedTextProps | null, isBackgroun
 }
 
 export const EditorInspector = React.memo(function EditorInspector({
-  selectedLayer, isBackground, selectedTextProps, textContentRef, extraFonts, layerColors,
+  selectedLayer, isBackground, selectedTextProps, textContentRef, usedFonts, extraFonts, layerColors,
   onUpdateTextLayer,
   onReplaceColor, onEndColorEdit, onClose,
 }: {
@@ -61,6 +61,7 @@ export const EditorInspector = React.memo(function EditorInspector({
   isBackground: boolean;
   selectedTextProps: SelectedTextProps | null;
   textContentRef: RefObject<HTMLInputElement | null>;
+  usedFonts: string[];
   extraFonts: string[];
   layerColors: string[];
   onUpdateTextLayer: (attrs: Partial<TextLayerAttrs>) => void;
@@ -114,6 +115,7 @@ export const EditorInspector = React.memo(function EditorInspector({
           <TextControls
             selectedTextProps={selectedTextProps}
             textContentRef={textContentRef}
+            usedFonts={usedFonts}
             extraFonts={extraFonts}
             onUpdateTextLayer={onUpdateTextLayer}
           />
