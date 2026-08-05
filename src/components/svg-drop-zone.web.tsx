@@ -17,6 +17,7 @@ import {
   hashString,
   isFullCanvasLayer,
   isPlainWhiteLayer,
+  measureRemovedTextBoxes,
   normalizeColor,
   parseSvg,
   parseViewBox,
@@ -37,12 +38,13 @@ import { C, EDITOR_CSS, FONT_STACK, SHADOW } from '@/lib/design-tokens';
 import { SHOW_DEV_UI } from '@/lib/env';
 import { readAiCache, writeAiCache } from '@/lib/ai-cache';
 import { isIgnoreCanCustomise, isIgnoreCooldownPrompt, isIgnoreHasCustomised } from '@/lib/dev-flags';
-import type { AiActionType, LlmProvider } from './editor-types';
+import type { AiActionType, LlmProvider, RemovedRecord } from './editor-types';
 import { LLM_OPTIONS } from './editor-types';
 import { LayersPanel } from './editor-layers-panel';
 import { EditorInspector } from './editor-inspector';
 import { AiPanel, AiPill } from './editor-ai-panel';
 import { DevRail, SAMPLE_DRAG_MIME } from './dev-rail';
+import { DevRemovedPanel } from './dev-removed-panel';
 import type { OpenedSample } from './dev-rail';
 import { UpsellModal, CooldownModal, RatingModal, AbortReasonModal, ConfirmModal } from './editor-modals';
 import { EditorToolbar } from './editor-toolbar';
@@ -138,7 +140,7 @@ const TEXT_PARSE_MODEL = 'claude-sonnet-4-6';
 const TEXT_PARSING_PROMPT = `TASK 1 — Text detection: Examine the image carefully. Detect ALL text present, including text rendered as outlined or filled path shapes (not just SVG <text> elements). For each distinct line or row of text, estimate:
 - yFraction: vertical center as a fraction of image height (0.0 = top edge, 1.0 = bottom edge)
 - xFraction: horizontal center as a fraction of image width (0.0 = left, 1.0 = right)
-- font: name of the closest matching Google Font
+- font: the Google Font that most closely matches THIS row's own lettering. Judge each row separately — one design routinely mixes families, and picking a single family for the whole image is a wrong answer for every row that does not use it. Match the letterforms actually visible in this row: script or handwritten lettering needs a script face (Dancing Script, Great Vibes, Pacifico, Sacramento), a serif needs a serif (Playfair Display, Cormorant Garamond, Cinzel), condensed lettering needs a condensed face (Barlow Condensed, Oswald), geometric sans needs a geometric sans (Montserrat, Poppins). Only give two rows the same family when their letterforms really are the same
 - sizeFraction: font cap-height as a fraction of image height (e.g. 0.08 if text height ≈ 8% of image)
 - weight: CSS font-weight integer (100, 200, 300, 400, 500, 600, 700, 800, or 900)
 - color: dominant text fill color as CSS hex (e.g. "#ffffff")
@@ -147,14 +149,271 @@ const TEXT_PARSING_PROMPT = `TASK 1 — Text detection: Examine the image carefu
 
 IMPORTANT: If a single horizontal line contains multiple words in different colors, fonts, sizes, or styles, return a SEPARATE row for each such word — same yFraction, but its own xFraction, color and font. Do NOT merge differently-styled words on one line into a single row.
 
-TASK 2 — Text element identification: Most SVG elements in the source have a data-ai-idx attribute. Identify which elements visually render as text — including <text>/<tspan> elements AND <path>/<g> elements whose shapes form letter or word outlines. IMPORTANT: if a <g> group contains child paths that together form a word, return the group's data-ai-idx (not the individual letter path indices). Return every text element's data-ai-idx in "removeIds". NOTE: already-editable text fields have deliberately NOT been given a data-ai-idx — never invent indices for them; only return indices that actually appear in the source below.`;
+TASK 2 — Text element identification: Most SVG elements in the source have a data-ai-idx attribute. Identify which elements visually render as text — including <text>/<tspan> elements AND <path>/<g> elements whose shapes form letter or word outlines. IMPORTANT: if a <g> group contains child paths that together form a word, return the group's data-ai-idx (not the individual letter path indices). Return every text element's data-ai-idx in "removeIds". NOTE: already-editable text fields have deliberately NOT been given a data-ai-idx — never invent indices for them; only return indices that actually appear in the source below.
 
-// Every AI prompt below demands bare JSON, and both providers ignore that often
-// enough to matter: Claude in particular likes to wrap the object in a ```json
-// fence, which makes JSON.parse throw. Strip it before parsing — always, not just
-// where a fence has been observed, since which model answers is a runtime choice.
-const stripJsonFence = (raw: string) =>
-  raw.replace(/^```(?:json)?\s*/im, '').replace(/```\s*$/m, '').trim();
+TASK 3 — Row ↔ element linking: Each row from TASK 1 also carries its own "removeIds" array: the TASK 2 indices whose shapes draw THAT row's text. This linking is what lets the replacement field be positioned from the original's real geometry instead of your estimate, so it matters more than the fraction estimates do — leave a row's array empty only when you genuinely cannot tell which elements draw it.
+
+CRITICAL: the rows are exactly the distinct lines of text you saw in TASK 1, and linking NEVER adds a row. Many indices can point at one row; a row is never split to give an index a home. Artwork often draws one word several times over — a shadow copy, an outline copy and a fill copy stacked on the same spot — and every one of those indices belongs to the SINGLE row for that word. If you are about to emit two rows with the same content in the same place, emit one row listing both indices instead.`;
+
+// Every AI prompt below demands bare JSON, and both providers ignore that often enough to
+// matter: a ```json fence around the object, or — seen once the text prompt grew a third
+// task — a paragraph of reasoning before it ("Looking at the image, I can identify two
+// lines of text: ..."). Either one makes JSON.parse throw on a reply whose JSON was
+// perfectly good, and the failure surfaces to the user as "AI returned an unreadable
+// response" with the whole answer discarded.
+//
+// So don't demand that the reply BE json — find the json in it. The first balanced
+// {...} is the object every one of these prompts asks for. Braces inside strings are not
+// structure (a `d="M0 0h4z"` payload is full of them, and one stray brace in a path or a
+// font name would otherwise end the scan early), and a backslash-escaped quote does not
+// close a string.
+const extractJson = (raw: string): string => {
+  const unfenced = raw.replace(/^```(?:json)?\s*/im, '').replace(/```\s*$/m, '').trim();
+  if (unfenced.startsWith('{')) return unfenced;
+  const start = unfenced.indexOf('{');
+  if (start === -1) return unfenced; // no object at all — let the caller's parse report it
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < unfenced.length; i++) {
+    const c = unfenced[i];
+    if (escaped) { escaped = false; continue; }
+    if (c === '\\') { escaped = true; continue; }
+    if (c === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (c === '{') depth++;
+    else if (c === '}' && --depth === 0) return unfenced.slice(start, i + 1);
+  }
+  return unfenced; // unbalanced — truncated mid-answer, and logUnreadable will say so
+};
+
+// The distinct faces a set of detected rows needs — one per (family, weight) pair.
+//
+// Keyed on the pair, not the family, because the weight is part of what the model matched:
+// a wordmark answered as Montserrat 800 is not rendered by Montserrat 400, and a field
+// sized against the wrong weight is measured too narrow and comes out too large.
+const rowFontFaces = (rows: TextRow[]): { family: string; weight: number }[] => {
+  const faces = new Map<string, { family: string; weight: number }>();
+  for (const row of rows) {
+    const family = (row.font ?? '').trim();
+    if (!family) continue;
+    const weight = Number(row.weight) || 400;
+    faces.set(`${family}@${weight}`, { family, weight });
+  }
+  return [...faces.values()];
+};
+
+// Waits until each row's own face is actually usable, so the widths appendTextRowLayers
+// measures are the real face's and not a fallback's — the two can differ by a fifth, and
+// that error goes straight into the font size it derives from them.
+//
+// document.fonts.ready is NOT enough on its own, which is what this used to await. It
+// settles the loads already PENDING, and a <link> injected moments earlier has only
+// declared @font-face rules — the files are not fetched until something lays out text in
+// them. It therefore resolves happily while every face is still absent. document.fonts.load
+// is the primitive that actually requests a face and resolves when it can be used.
+//
+// Bounded and individually caught: a font that never arrives must not strand the edit, and
+// a family that has no such weight must not stop the others loading.
+const FONT_SETTLE_TIMEOUT_MS = 4000;
+const ensureRowFontsReady = async (rows: TextRow[]): Promise<void> => {
+  if (typeof document === 'undefined' || !document.fonts) return;
+  const faces = rowFontFaces(rows);
+  if (faces.length === 0) return;
+  try {
+    await Promise.race([
+      Promise.all(faces.map((f) =>
+        document.fonts.load(`${f.weight} 16px "${f.family}"`).catch(() => undefined),
+      )),
+      new Promise((resolve) => setTimeout(resolve, FONT_SETTLE_TIMEOUT_MS)),
+    ]);
+    const missing = faces.filter((f) => !document.fonts.check(`${f.weight} 16px "${f.family}"`));
+    if (missing.length) {
+      console.log(
+        `[text-rows] ${missing.length}/${faces.length} face(s) unavailable, falling back for: ` +
+        missing.map((f) => `${f.family} ${f.weight}`).join(', '),
+      );
+    }
+  } catch { /* font loading is best-effort — measure with whatever is available */ }
+};
+
+// Coerces a row's removeIds to the string array the anchoring expects. The model is asked
+// for strings and mostly obliges, but a JSON number index would silently miss every
+// data-ai-idx lookup, and an absent array is legitimate — it means "couldn't tell".
+const normaliseRowRemoveIds = (row: TextRow): void => {
+  row.removeIds = Array.isArray(row.removeIds) ? row.removeIds.map(String) : [];
+};
+
+// An unparseable answer reaches the user as "AI returned an unreadable response" and
+// nothing else — the payload is dropped on the floor, which makes the one failure that
+// most needs evidence the only one that leaves none. Log enough to tell the two causes
+// apart: a truncated answer (hit the token ceiling — ends mid-token, no closing brace)
+// versus a malformed one (prose, an apology, a stray fence).
+const logUnreadable = (tag: string, raw: string, err: unknown): void => {
+  const text = raw ?? '';
+  const closed = text.trimEnd().endsWith('}');
+  console.log(
+    `[${tag}] unreadable response: ${text.length} chars, ${closed ? 'ends with "}" (malformed, not truncated)' : 'does NOT end with "}" — looks TRUNCATED'}`,
+    `\n  parse error: ${err instanceof Error ? err.message : String(err)}`,
+    `\n  head: ${text.slice(0, 200)}`,
+    `\n  tail: ${text.slice(-200)}`,
+  );
+};
+
+// Every index the answer names anywhere, top-level or inside a row.
+//
+// The model is asked for a document-wide removeIds AND a per-row linking, and it does not
+// reliably keep the two in step — an index named only by a row is otherwise never
+// deleted, which leaves the original artwork sitting underneath the field that replaced
+// it. The union is always safe: a row naming an index is the model asserting that element
+// draws that row's text, which is the same claim the top-level list makes.
+// Coerced to strings, not merely collected. The model is asked for string indices and
+// returns them for most artwork, but on some it answers with JSON numbers — [184, 202]
+// rather than ["184", "202"] — and the two are not interchangeable downstream. The
+// removal looks elements up in a Map keyed by string, so map.get(184) misses and the
+// element is never deleted; the measuring path interpolates into `[data-ai-idx="${sid}"]`,
+// where a number stringifies and works fine. The result is the worst possible split: the
+// replacement text is measured and placed perfectly, on top of artwork that was never
+// removed. Normalising here covers both passes, since both route through this.
+const allRemoveIds = (parsed: { removeIds: unknown[]; rows?: TextRow[] }): string[] =>
+  [...new Set([
+    ...parsed.removeIds.map(String),
+    ...(parsed.rows ?? []).flatMap((r) => (r.removeIds ?? []).map(String)),
+  ])];
+
+// The same SVG with hidden elements dropped — what the artwork actually looks like now.
+//
+// Every AI pass rasterises the document to see it, and hidden elements are still in that
+// document. Without this a second run sees the lettering the first run took, detects it
+// again, and hides a duplicate set behind the text fields already standing there. Mirrors
+// what `exportSvg` does for the same reason: hidden means gone from every rendering of
+// the artwork, and only the editor knows otherwise.
+const svgWithoutHidden = (svg: string, hidden: Set<string>): string => {
+  if (hidden.size === 0) return svg;
+  try {
+    const doc = new DOMParser().parseFromString(svg, 'image/svg+xml');
+    if (doc.querySelector('parsererror')) return svg;
+    hidden.forEach((id) => doc.getElementById(id)?.parentNode?.removeChild(doc.getElementById(id)!));
+    return new XMLSerializer().serializeToString(doc.documentElement);
+  } catch {
+    return svg; // never let the raster fail over this — a stale view beats no view
+  }
+};
+
+// Takes the elements an AI pass identified as text OUT OF THE ARTWORK without deleting
+// them: each gets a stable id, and the caller hides that id. Returns the record of what
+// was taken so it can be offered back.
+//
+// Hiding rather than deleting because the classification is not reliable enough to be
+// destructive. On an ornate calligraphic logo the model named the decorative frame and
+// every flourish as text — they are the same colour and the same hand as the lettering —
+// and deleting on that answer destroyed the design with no way back short of reverting
+// the whole document. Hidden elements are excluded from the export (see `exportSvg`), so
+// the deliverable is identical either way; the only thing that changes is that a wrong
+// call is now recoverable.
+//
+// The id is synthesized only when the element has none, following the same convention as
+// parseSvg's `_layer_N` and expandLayer's `_sub_N`. An element that already has an id
+// keeps it — overwriting could break a `url(#…)` reference elsewhere in the document.
+const hideRemovedElements = (
+  idMap: Map<string, Element>,
+  removeIds: string[],
+  rows: TextRow[],
+  anchors: Map<string, DOMRect>,
+  alreadyHidden: Set<string>,
+  logTag: string,
+): RemovedRecord[] => {
+  // Which text row, if any, claimed each element. A row naming an index is the model
+  // asserting that element draws that row's text; an index no row names was called text
+  // by the bulk pass and then vouched for by nothing.
+  const claimant = new Map<string, string>();
+  for (const row of rows) {
+    for (const sid of row.removeIds ?? []) {
+      if (!claimant.has(sid)) claimant.set(sid, (row.content ?? '').trim());
+    }
+  }
+
+  const stamp = Date.now();
+  // Ids assigned first, for every element in the batch, because the parent lookup below
+  // needs them all to exist — a group and its own children are routinely both in here,
+  // and the child is often reached before the parent.
+  const taken: { sid: string; el: Element }[] = [];
+  removeIds.forEach((sid, i) => {
+    const el = idMap.get(sid);
+    if (!el) {
+      console.log(`[${logTag}] removeId has no matching element: ${sid}`);
+      return;
+    }
+    if (!el.id) el.id = `_hidden_${stamp}_${i}`;
+    taken.push({ sid, el });
+  });
+
+  const hiddenNow = new Set([...alreadyHidden, ...taken.map((t) => t.el.id)]);
+  const records: RemovedRecord[] = taken.map(({ sid, el }) => {
+    // Nearest ancestor that is also hidden. Everything below such an ancestor is
+    // invisible regardless of its own rule, so this is what the panel groups on and what
+    // preview has to walk.
+    let parentId: string | null = null;
+    for (let p = el.parentElement; p && !parentId; p = p.parentElement) {
+      if (p.id && hiddenNow.has(p.id)) parentId = p.id;
+    }
+    const b = anchors.get(sid);
+    return {
+      id: el.id,
+      tag: el.tagName.toLowerCase().replace(/.*:/, ''),
+      claimedBy: claimant.get(sid) ?? null,
+      box: b ? { x: b.x, y: b.y, w: b.width, h: b.height } : null,
+      parentId,
+    };
+  });
+
+  // Logged every run, including when it's healthy, because the unclaimed share is the
+  // signal that predicts a bad answer and it is otherwise invisible. Across the review
+  // corpus 91% of removal ids are claimed by a row; the calligraphic logo that fails runs
+  // at 6%. Nothing gates on it — nothing is destroyed, so there is nothing to veto — but
+  // a run that reports mostly-unclaimed is one to look at in the dev panel.
+  const unclaimed = records.filter((r) => r.claimedBy === null).length;
+  if (records.length) {
+    console.log(
+      `[${logTag}] hid ${records.length} element(s); ${unclaimed} claimed by no row ` +
+      `(${Math.round((unclaimed / records.length) * 100)}%)`,
+    );
+  }
+  return records;
+};
+
+// Stable identity, so passing "no preview" to the memoised canvas isn't a new object
+// on every render.
+const EMPTY_PREVIEW: Set<string> = new Set();
+
+// A record and everything hidden beneath it.
+//
+// Showing or restoring one entry always means the whole subtree. A hidden <g> draws
+// nothing itself — all its ink is in children that carry their own hide rules — so
+// un-hiding just the group shows an empty box, and un-hiding just a child shows nothing
+// at all while the group above it is still display:none.
+const removedSubtree = (records: RemovedRecord[], rootId: string): Set<string> => {
+  const childrenOf = new Map<string, string[]>();
+  for (const r of records) {
+    if (!r.parentId) continue;
+    const list = childrenOf.get(r.parentId);
+    if (list) list.push(r.id); else childrenOf.set(r.parentId, [r.id]);
+  }
+  const out = new Set<string>();
+  const walk = (id: string) => {
+    if (out.has(id)) return;
+    out.add(id);
+    (childrenOf.get(id) ?? []).forEach(walk);
+  };
+  walk(rootId);
+  return out;
+};
+
+// How many rows will be placed from measured geometry rather than the model's estimate.
+// Logged per pass: a low count is the signal that the row↔element linking has regressed,
+// which is otherwise invisible — placement silently falls back and merely looks worse.
+const countAnchoredRows = (rows: TextRow[], anchors: Map<string, DOMRect>): number =>
+  rows.filter((r) => (r.removeIds ?? []).some((sid) => anchors.has(sid))).length;
 
 // ─── Customise cooldown ──────────────────────────────────────────────────────
 
@@ -214,6 +473,16 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   // What `hiddenLayers` starts as for this document (the canvas layer) — the baseline
   // the dirty check and Revert compare against.
   const [defaultHiddenLayers, setDefaultHiddenLayers] = useState<Set<string>>(new Set());
+  // What the AI passes took out of the artwork this session. They hide rather than
+  // delete, so each of these is still in the document with its id in `hiddenLayers`, and
+  // the dev panel offers it back. Not persisted: it describes this editing session, and
+  // a reload starts from the stored artwork anyway.
+  const [removedRecords, setRemovedRecords] = useState<RemovedRecord[]>([]);
+  // Same ids as `removedRecords`, readable synchronously — see dropSelectionOutside.
+  const removedIdsRef = useRef<Set<string>>(new Set());
+  // The record the dev panel is hovering. Excluded from the canvas hide rule so the
+  // element reappears where it always was, without committing anything.
+  const [previewRemovedId, setPreviewRemovedId] = useState<string | null>(null);
   const [selectedLayer, setSelectedLayer]   = useState<string | null>(null);
   const [selectedLayers, setSelectedLayers] = useState<Set<string>>(new Set());
   const [isLoading, setIsLoading]       = useState(false);
@@ -268,6 +537,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   const [aiPanelOpen, setAiPanelOpen]         = useState(false);   // opened by the AI pill
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false); // "Revert changes?" overlay
   const [devRailOpen, setDevRailOpen]           = useState(false); // dev rail expanded
+  const [removedPanelOpen, setRemovedPanelOpen] = useState(false); // dev hidden-by-AI ledger
   // Which LLM every AI action calls. Picking 'kimi' diverts each request to
   // /api/kimi, which re-shapes the same Anthropic-style body for Moonshot. Mirrored
   // into a ref so the AI callbacks below read the live choice, never a stale closure.
@@ -309,15 +579,24 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       throw new Error(e.error?.message ?? `API error ${res.status}`);
     }
     const data = await res.json() as { content?: Array<{ text?: string }> };
-    return stripJsonFence(data.content?.[0]?.text ?? '');
+    return extractJson(data.content?.[0]?.text ?? '');
   };
   const dragMovedRef            = useRef(false);
   // An open colour-picker session: the colour being replaced and the document as it
   // was when the picker opened. Live dragging replays from that baseline, so the whole
   // pick is one undo entry rather than one per intermediate colour.
   const colorEditRef            = useRef<{ from: string; baseline: string } | null>(null);
-  const undoStackRef             = useRef<Array<{ content: string; layers: SvgLayer[] }>>([]);
-  const redoStackRef             = useRef<Array<{ content: string; layers: SvgLayer[] }>>([]);
+  // Visibility is part of a history entry, not just the document. An AI pass now takes
+  // artwork out by hiding it, so a snapshot of content and layers alone would record a
+  // run as having changed nothing and undo would have nothing to give back.
+  type HistoryEntry = {
+    content: string;
+    layers: SvgLayer[];
+    hidden: Set<string>;
+    removed: RemovedRecord[];
+  };
+  const undoStackRef             = useRef<HistoryEntry[]>([]);
+  const redoStackRef             = useRef<HistoryEntry[]>([]);
   const layerClipboardRef        = useRef<string | null>(null);
   const [undoCount, setUndoCount] = useState(0);
   const [redoCount, setRedoCount] = useState(0);
@@ -344,33 +623,64 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     if (svg?.objectUrl) URL.revokeObjectURL(svg.objectUrl);
   }, []);
 
+  // Visibility and the removed-record list as they stand right now, readable from the
+  // history callbacks without making every one of snapshotForUndo's ~20 call sites pass
+  // them. Snapshots are always taken BEFORE the change they guard, so the values the
+  // last render settled on are exactly the ones to record.
+  const hiddenLayersRef   = useRef(hiddenLayers);
+  const removedRecordsRef = useRef(removedRecords);
+  useEffect(() => {
+    hiddenLayersRef.current = hiddenLayers;
+    removedRecordsRef.current = removedRecords;
+  });
+
+  const restoreHistory = useCallback((entry: HistoryEntry) => {
+    setActiveSvg((p) => p ? { ...p, content: entry.content, layers: entry.layers } : null);
+    setHiddenLayers(new Set(entry.hidden));
+    setRemovedRecords(entry.removed);
+    removedIdsRef.current = new Set(entry.removed.map((r) => r.id));
+    setPreviewRemovedId(null);
+  }, []);
+
   // Any committing action pushes the current document and clears the redo stack.
   const snapshotForUndo = useCallback((content: string, layers: SvgLayer[]) => {
-    undoStackRef.current = [...undoStackRef.current.slice(-9), { content, layers }];
+    const entry: HistoryEntry = {
+      content, layers,
+      hidden: new Set(hiddenLayersRef.current),
+      removed: removedRecordsRef.current,
+    };
+    undoStackRef.current = [...undoStackRef.current.slice(-9), entry];
     redoStackRef.current = [];
     setUndoCount(undoStackRef.current.length);
     setRedoCount(0);
   }, []);
 
+  const currentHistoryEntry = useCallback((): HistoryEntry => ({
+    content: activeSvg!.content,
+    layers: activeSvg!.layers,
+    hidden: new Set(hiddenLayersRef.current),
+    removed: removedRecordsRef.current,
+  }), [activeSvg]);
+
   const undo = useCallback(() => {
     if (!activeSvg) return;
     const prev = undoStackRef.current.pop();
     if (!prev) { setUndoCount(0); return; }
-    redoStackRef.current = [...redoStackRef.current.slice(-9), { content: activeSvg.content, layers: activeSvg.layers }];
+    redoStackRef.current = [...redoStackRef.current.slice(-9), currentHistoryEntry()];
     setUndoCount(undoStackRef.current.length);
     setRedoCount(redoStackRef.current.length);
-    setActiveSvg((p) => p ? { ...p, content: prev.content, layers: prev.layers } : null);
-  }, [activeSvg]);
+    restoreHistory(prev);
+  }, [activeSvg, currentHistoryEntry, restoreHistory]);
 
   const redo = useCallback(() => {
     if (!activeSvg) return;
     const next = redoStackRef.current.pop();
     if (!next) { setRedoCount(0); return; }
-    undoStackRef.current = [...undoStackRef.current.slice(-9), { content: activeSvg.content, layers: activeSvg.layers }];
+    undoStackRef.current = [...undoStackRef.current.slice(-9), currentHistoryEntry()];
     setUndoCount(undoStackRef.current.length);
     setRedoCount(redoStackRef.current.length);
-    setActiveSvg((p) => p ? { ...p, content: next.content, layers: next.layers } : null);
-  }, [activeSvg]);
+    restoreHistory(next);
+  }, [activeSvg, currentHistoryEntry, restoreHistory]);
 
   const applyParsed = useCallback(
     (raw: string, name: string, src: string, objectUrl?: string, edit?: 0 | 1) => {
@@ -392,6 +702,10 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       setHiddenLayers(new Set(defaultHidden));
       setSelectedLayer(null);
       setSelectedLayers(new Set());
+      // What a previous document's passes hid says nothing about this one.
+      setRemovedRecords([]);
+      removedIdsRef.current = new Set();
+      setPreviewRemovedId(null);
       setIsLoading(false);
       setCustomiseDone(false);
       // A cooldown belongs to the artwork that was open, not to the editor. The review
@@ -671,6 +985,9 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     setDefaultHiddenLayers(new Set());
     setSelectedLayer(null);
     setSelectedLayers(new Set());
+    setRemovedRecords([]);
+    removedIdsRef.current = new Set();
+    setPreviewRemovedId(null);
   }, [revokePrev]);
 
   // ── Layer toggle ───────────────────────────────────────────────────────────
@@ -686,6 +1003,13 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   // After an edit deletes layers, drop the selection/visibility state that pointed at
   // them: otherwise the overlay tracks an element that no longer exists and the export
   // count still subtracts layers that have gone.
+  //
+  // Visibility gets an exemption the other two don't. What an AI pass hides is usually
+  // nested inside a layer rather than being a layer row itself, so filtering hidden ids
+  // down to the rows would discard every one of them the instant they were set — the
+  // artwork would come straight back and the pass would look like it had done nothing.
+  // Those ids are tracked in a ref rather than read from `removedRecords`, because a
+  // pass registers them and calls this in the same tick, before any re-render.
   const dropSelectionOutside = useCallback((...groups: SvgLayer[][]) => {
     const ids = new Set(groups.flat().map((l) => l.id));
     const filterSet = (prev: Set<string>) => {
@@ -694,8 +1018,62 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     };
     setSelectedLayer((cur) => (cur && !ids.has(cur) ? null : cur));
     setSelectedLayers(filterSet);
-    setHiddenLayers(filterSet);
+    setHiddenLayers((prev) => {
+      const next = new Set([...prev].filter((id) => ids.has(id) || removedIdsRef.current.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
   }, []);
+
+  // Hovering one entry has to show its whole hidden subtree, for the same reason
+  // restoring does — see removedSubtree.
+  const previewIds = previewRemovedId
+    ? removedSubtree(removedRecords, previewRemovedId)
+    : EMPTY_PREVIEW;
+
+  // The export label counts LAYER ROWS, so it has to count only hidden ids that are rows.
+  // Since the AI passes hide nested elements too, `hiddenLayers.size` is no longer the
+  // number of rows switched off and would make the label read "Export (3/21)" for a
+  // document with every row still showing.
+  const hiddenRowCount = (activeSvg?.layers ?? []).filter((l) => hiddenLayers.has(l.id)).length;
+
+  // Records what a pass took, in both the ref the pruning above consults and the state
+  // the dev panel renders from. One entry point so the two can't drift.
+  const registerRemoved = useCallback((records: RemovedRecord[]) => {
+    if (records.length === 0) return;
+    const ids = records.map((r) => r.id);
+    removedIdsRef.current = new Set([...removedIdsRef.current, ...ids]);
+    setRemovedRecords((prev) => [...prev, ...records]);
+    setHiddenLayers((prev) => new Set([...prev, ...ids]));
+  }, []);
+
+  // Puts hidden artwork back for good: it becomes visible, stops being a removal record,
+  // and gains a layer row so it can be selected, recoloured and hidden again by hand like
+  // anything else. Without the row it would be visible but unreachable — the panel that
+  // restored it no longer lists it.
+  const restoreRemoved = useCallback((ids: string[]) => {
+    if (ids.length === 0 || !activeSvg) return;
+    snapshotForUndo(activeSvg.content, activeSvg.layers);
+    const all = removedRecordsRef.current;
+    // Always the whole subtree: a group without its children is an empty box, and a
+    // child without its group stays invisible.
+    const restoring = new Set(ids.flatMap((id) => [...removedSubtree(all, id)]));
+    const byId = new Map(all.map((r) => [r.id, r]));
+    removedIdsRef.current = new Set([...removedIdsRef.current].filter((id) => !restoring.has(id)));
+    setRemovedRecords((prev) => prev.filter((r) => !restoring.has(r.id)));
+    setHiddenLayers((prev) => new Set([...prev].filter((id) => !restoring.has(id))));
+    setPreviewRemovedId(null);
+    setActiveSvg((prev) => {
+      if (!prev) return null;
+      const existing = new Set(prev.layers.map((l) => l.id));
+      const added = ids
+        .filter((id) => !existing.has(id))
+        .map((id) => {
+          const claimedBy = byId.get(id)?.claimedBy;
+          return { id, label: claimedBy ? `${claimedBy} (restored)` : 'Restored artwork' };
+        });
+      return added.length ? { ...prev, layers: [...prev.layers, ...added] } : prev;
+    });
+  }, [activeSvg, snapshotForUndo]);
 
   // Which layers render as text — drives the element list's type icon (§1.7).
   const textLayerIds = useMemo(() => {
@@ -1824,19 +2202,29 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
 
   // ── Load + register a Google Font ─────────────────────────────────────────
 
-  const loadGoogleFontLink = useCallback((fontName: string) => {
-    const linkId = `gfont-${fontName.replace(/\s+/g, '-')}`;
-    if (!document.getElementById(linkId)) {
+  const loadGoogleFontLink = useCallback((fontName: string, weight?: number) => {
+    const family = fontName.replace(/\s+/g, '+');
+    const slug = fontName.replace(/\s+/g, '-');
+    const inject = (id: string, href: string) => {
+      if (document.getElementById(id)) return;
       const link = document.createElement('link');
-      link.id = linkId; link.rel = 'stylesheet';
-      link.href = `https://fonts.googleapis.com/css2?family=${fontName.replace(/\s+/g, '+')}:wght@400;700&display=swap`;
+      link.id = id; link.rel = 'stylesheet'; link.href = href;
       document.head.appendChild(link);
+    };
+    inject(`gfont-${slug}`, `https://fonts.googleapis.com/css2?family=${family}:wght@400;700&display=swap`);
+    // A weight outside the base pair goes in its OWN request rather than being appended to
+    // it. Google's css2 endpoint rejects the whole request when any requested weight is
+    // unavailable for the family, so folding an 800 into the base request would take 400
+    // and 700 down with it and leave the family with no faces at all. Split, the worst a
+    // missing weight costs is that one weight, and the browser synthesises it.
+    if (weight && weight !== 400 && weight !== 700) {
+      inject(`gfont-${slug}-${weight}`, `https://fonts.googleapis.com/css2?family=${family}:wght@${weight}&display=swap`);
     }
   }, []);
 
-  const addGoogleFont = useCallback((fontName: string) => {
+  const addGoogleFont = useCallback((fontName: string, weight?: number) => {
     setExtraFonts((prev) => prev.includes(fontName) ? prev : [...prev, fontName]);
-    loadGoogleFontLink(fontName);
+    loadGoogleFontLink(fontName, weight);
   }, [loadGoogleFontLink]);
 
   // ── Image-level font suggestions ──────────────────────────────────────────
@@ -1947,6 +2335,9 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
       const markEls = (el: Element) => {
         for (const child of Array.from(el.children)) {
           if (isEditableTextField(child)) continue;
+          // Already taken by an earlier pass — offering it again would have the model
+          // re-detect text that is no longer on the artwork.
+          if (child.id && hiddenLayers.has(child.id)) continue;
           const tag = child.tagName.toLowerCase().replace(/.*:/, '');
           if (SHAPE_TAGS.has(tag)) {
             const sid = String(aiIdx++);
@@ -1998,6 +2389,7 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
       // sub-part.
       const markContent = (el: Element) => {
         const tag = el.tagName.toLowerCase().replace(/.*:/, '');
+        if (el.id && hiddenLayers.has(el.id)) return;
         if (SHAPE_TAGS.has(tag) && el.children.length === 0 && !isEditableTextField(el)) {
           const sid = String(aiIdx++);
           el.setAttribute('data-ai-idx', sid);
@@ -2009,7 +2401,9 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
       const contentXml = contentEls.map((el) => new XMLSerializer().serializeToString(el)).join('');
       // Scoped raster: defs + content layers only (no background) at the full viewBox.
       const contentSvg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="${viewBox}">${defsXml}${contentXml}</svg>`;
-      const pngBase64 = await svgToBase64Png(contentSvg, Math.round(vw * scale), Math.round(vh * scale), bgColor);
+      const pngBase64 = await svgToBase64Png(
+        svgWithoutHidden(contentSvg, hiddenLayers), Math.round(vw * scale), Math.round(vh * scale), bgColor,
+      );
 
       // Dev-only cache. The marked source is derived deterministically from the document,
       // so reverting and running again — or reloading mid-iteration — reproduces the
@@ -2021,7 +2415,12 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
       // just the source: the same contentXml against a different backdrop is a different
       // question. v2 also retires every answer cached from the era when the raster had no
       // backdrop at all — those were answered on an image with the artwork missing.
-      const cacheKey = `customise-v2:${TEXT_PARSE_MODEL}:${bgColor ?? 'none'}:${hashString(contentXml)}`;
+      // v3 retired the v2 answers for the same reason strip-text bumped to v7: they carry
+      // no per-row removeIds, so their rows can never anchor to measured geometry. v4
+      // retires v3 alongside strip-text v8, for the duplicated-rows prompt bug. v5 retires
+      // v4: those answers predate the per-row font instruction and tend to name one family
+      // for the whole image, which renders a script tagline as whatever the wordmark used.
+      const cacheKey = `customise-v5:${TEXT_PARSE_MODEL}:${bgColor ?? 'none'}:${hashString(contentXml)}`;
       let parsed: CustomiseResult;
       const cachedRaw = readAiCache(cacheKey);
 
@@ -2036,21 +2435,23 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
 
 ${TEXT_PARSING_PROMPT}
 
-TASK 3 — Font suggestions: Suggest 2–4 Google Font names that suit the style, mood, and colour palette of this design. Return names only.
+TASK 4 — Font suggestions: Suggest 2–4 Google Font names that suit the style, mood, and colour palette of this design. Return names only.
 
 SVG source:
 ${contentXml}
 
-Return ONLY valid JSON, no markdown:
-{"hasText":true,"rows":[{"yFraction":0.3,"xFraction":0.5,"font":"Playfair Display","sizeFraction":0.1,"weight":700,"color":"#ffffff","content":"HELLO","letterSpacing":0}],"removeIds":["3","9"],"fonts":["Playfair Display","Lato"]}`,
+Respond with ONLY a valid JSON object — no markdown, no code fences, no explanation, and no preamble before the object:
+{"hasText":true,"rows":[{"yFraction":0.3,"xFraction":0.5,"font":"Playfair Display","sizeFraction":0.1,"weight":700,"color":"#ffffff","content":"HELLO","letterSpacing":0,"removeIds":["3","9"]}],"removeIds":["3","9"],"fonts":["Playfair Display","Lato"]}`,
         });
 
         try {
           parsed = JSON.parse(rawText) as CustomiseResult;
           if (!Array.isArray(parsed.rows)) parsed.rows = [];
-          if (!Array.isArray(parsed.removeIds)) parsed.removeIds = [];
+          parsed.removeIds = Array.isArray(parsed.removeIds) ? parsed.removeIds.map(String) : [];
           if (!Array.isArray(parsed.fonts)) parsed.fonts = [];
-        } catch {
+          parsed.rows.forEach(normaliseRowRemoveIds);
+        } catch (err) {
+          logUnreadable('customise', rawText, err);
           throw new Error('AI returned an unreadable response');
         }
 
@@ -2069,29 +2470,34 @@ Return ONLY valid JSON, no markdown:
       // Deleting on that answer strips the wordmark and re-adds nothing, which is worse
       // than doing nothing at all. Removal is only ever as trustworthy as the
       // replacement that comes with it, so the whole edit is abandoned.
-      const contradictory = !parsed.hasText && parsed.removeIds.length > 0;
+      const requested = allRemoveIds(parsed);
+      const contradictory = !parsed.hasText && requested.length > 0;
       if (contradictory) {
         console.log(
-          `[customise] hasText=false but ${parsed.removeIds.length} removeIds — contradictory answer, removing nothing`,
+          `[customise] hasText=false but ${requested.length} removeIds — contradictory answer, removing nothing`,
         );
       }
 
       const removeIds = contradictory
         ? []
-        : filterOutBackgroundIds(doc.documentElement, parsed.removeIds, vw, vh, 'customise');
-      console.log(`[customise] removing ${removeIds.length}/${parsed.removeIds.length} element(s) after guard`);
-      for (const sid of removeIds) {
-        const el = aiIdMap.get(sid);
-        el?.parentNode?.removeChild(el);
-      }
+        : filterOutBackgroundIds(doc.documentElement, requested, vw, vh, 'customise');
+      console.log(`[customise] taking ${removeIds.length}/${requested.length} element(s) after guard`);
+      // Measured before anything is hidden. The boxes are what the replacement text is
+      // placed from, and they also give the dev panel something to show per entry.
+      const anchors = measureRemovedTextBoxes(doc.documentElement, removeIds);
+      const hidden = hideRemovedElements(aiIdMap, removeIds, parsed.rows, anchors, hiddenLayers, 'customise');
       for (const [, el] of aiIdMap) el.removeAttribute('data-ai-idx');
 
       const allRows = parsed.hasText ? parsed.rows : [];
       const allFonts = parsed.fonts;
 
       // Re-add editable text layers — one per detected row (same placement logic as strip-text)
-      allRows.forEach(({ font }) => addGoogleFont(font));
-      const newTextLayers = appendTextRowLayers(doc, allRows, { x: vbX, y: vbY, w: vw, h: vh });
+      // Each row's own family AND weight, so the face the model matched is the face that
+      // renders — and the face that gets measured a few lines below.
+      allRows.forEach(({ font, weight }) => addGoogleFont(font, weight));
+      await ensureRowFontsReady(allRows);
+      console.log(`[customise] anchored ${countAnchoredRows(allRows, anchors)}/${allRows.length} row(s) to measured geometry`);
+      const newTextLayers = appendTextRowLayers(doc, allRows, { x: vbX, y: vbY, w: vw, h: vh }, undefined, anchors);
 
       // Suggested fonts, deduped across all layers. Registered with addGoogleFont rather
       // than just link-loaded, so they show up in the inspector's Font list and can be
@@ -2100,30 +2506,34 @@ Return ONLY valid JSON, no markdown:
       validFonts.forEach((f) => addGoogleFont(f));
       setCustomiseFonts(validFonts);
 
-      // The first suggestion is the pass's default: applied to every text field this run
-      // re-created, so they read as one typeface rather than a per-row guess, and it
-      // becomes the default for text layers added afterwards.
+      // The first suggestion becomes the default for text layers added AFTERWARDS, and
+      // nothing more.
+      //
+      // It used to be written over every field this run had just created, on the reasoning
+      // that one typeface reads better than a per-row guess. That threw away the whole
+      // per-row answer: TASK 1 identifies each line's own face — a heavy sans wordmark
+      // above a script tagline — and this replaced both with a single image-level
+      // suggestion, so a script line came back set in whatever the wordmark used. It also
+      // silently invalidated the sizing, because appendTextRowLayers measures each field
+      // in ITS font to scale it onto the artwork it replaced, and swapping the family
+      // afterwards changes those widths.
+      //
+      // The suggestions are still registered above, so every one of them is a click away
+      // in the inspector's Font list if a row's match is wrong.
       const primaryFont = validFonts[0] ?? '';
-      if (primaryFont) {
-        setTextForm((f) => ({ ...f, font: primaryFont }));
-        newTextLayers.forEach(({ id }) => {
-          const layerEl = doc.getElementById(id);
-          if (!layerEl) return;
-          const textEls = layerEl.localName.toLowerCase() === 'text'
-            ? [layerEl]
-            : Array.from(layerEl.querySelectorAll('text'));
-          textEls.forEach((t) => t.setAttribute('font-family', primaryFont));
-        });
-      }
+      if (primaryFont) setTextForm((f) => ({ ...f, font: primaryFont }));
 
       const content = new XMLSerializer().serializeToString(root);
-      // The pass deletes elements (the outlined text it replaced); their layer rows have
-      // to go with them, or the panel lists layers that no longer draw anything.
+      // Still called although the pass no longer deletes: a row can become undrawable
+      // another way (an emptied container), and this is where that is caught. For the
+      // elements this pass took it is now a no-op — they are hidden, not gone, so their
+      // rows survive and simply display as hidden.
       const kept = pruneMissingLayers(doc, activeSvg.layers);
       setActiveSvg((prev) => {
         if (!prev) return null;
         return { ...prev, content, layers: [...kept, ...newTextLayers] };
       });
+      registerRemoved(hidden);
       dropSelectionOutside(kept, newTextLayers);
       if (newTextLayers.length > 0) setSelectedLayer(newTextLayers[0].id);
 
@@ -2349,7 +2759,9 @@ Return ONLY valid JSON — no markdown, no explanation:
       const defsXml = defsEl ? new XMLSerializer().serializeToString(defsEl) : '';
       const previewSvg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="${viewBox}">${defsXml}${svgString}</svg>`;
       const scale = Math.min(1, 1024 / Math.max(vw, vh, 1));
-      const pngBase64 = await svgToBase64Png(previewSvg, Math.round(vw * scale), Math.round(vh * scale));
+      const pngBase64 = await svgToBase64Png(
+        svgWithoutHidden(previewSvg, hiddenLayers), Math.round(vw * scale), Math.round(vh * scale),
+      );
 
       // ── Suggest font ───────────────────────────────────────────────────────
       if (action === 'suggest-font') {
@@ -2400,6 +2812,7 @@ No markdown, no code fences, no explanation. Example:
         const rstIdMap = new Map<string, Element>();
         const rstMarkEls = (el: Element) => {
           for (const child of Array.from(el.children)) {
+            if (child.id && hiddenLayers.has(child.id)) continue;
             const tag = child.tagName.toLowerCase().replace(/.*:/, '');
             if (RST_SHAPE_TAGS.has(tag)) {
               const sid = String(rstIdx++);
@@ -2432,11 +2845,20 @@ Respond with ONLY a valid JSON object — no markdown, no code fences:
           throw new Error('AI returned an unreadable response');
         }
         setAiStatusMsg('Applying changes…');
-        for (const sid of removeIds) rstIdMap.get(sid)?.parentNode?.removeChild(rstIdMap.get(sid)!);
+        // Hidden, not deleted, for the same reason as the other passes — the user named
+        // the text but the model chose the elements, and it can choose wrongly. Recorded
+        // under the query, so the dev panel groups these as "what removing X took".
+        const rstAnchors = measureRemovedTextBoxes(doc.documentElement, removeIds);
+        const rstHidden = hideRemovedElements(
+          rstIdMap, removeIds,
+          [{ content: query, removeIds } as TextRow],
+          rstAnchors, hiddenLayers, 'remove-specific-text',
+        );
         for (const [, el] of rstIdMap) el.removeAttribute('data-ai-idx');
         const contentRST = new XMLSerializer().serializeToString(doc.documentElement);
         const keptRST = pruneMissingLayers(doc, activeSvg.layers);
         setActiveSvg((prev) => prev ? { ...prev, content: contentRST, layers: keptRST } : null);
+        registerRemoved(rstHidden);
         dropSelectionOutside(keptRST, []);
         setShowRemoveTextInput(false);
         setRemoveTextQuery('');
@@ -2454,6 +2876,9 @@ Respond with ONLY a valid JSON object — no markdown, no code fences:
       const markEls = (el: Element) => {
         for (const child of Array.from(el.children)) {
           if (isEditableTextField(child)) continue;  // leave user-managed text fields alone
+          // Already taken by an earlier pass. Offering it again would have the model
+          // re-detect text that is no longer on the artwork.
+          if (child.id && hiddenLayers.has(child.id)) continue;
           const tag = child.tagName.toLowerCase().replace(/.*:/, '');
           if (SHAPE_TAGS.has(tag)) {
             const sid = String(aiIdx++);
@@ -2466,7 +2891,13 @@ Respond with ONLY a valid JSON object — no markdown, no code fences:
       markEls(layerEl);
       const markedSvgString = new XMLSerializer().serializeToString(layerEl);
 
-      const cacheKey = `strip-text-v6:${TEXT_PARSE_MODEL}:${hashString(svgString)}`;
+      // v7 retired every v6 answer: those predate the per-row removeIds linking, so
+      // replaying one would place its rows from the estimate and quietly look like the
+      // measurement had failed. v8 retires v7 in turn — its linking instruction read as a
+      // partition ("every index appears in exactly one row"), which made the model answer
+      // with one row per stacked copy of a word, and those answers re-add each field
+      // three times over.
+      const cacheKey = `strip-text-v9:${TEXT_PARSE_MODEL}:${hashString(svgString)}`;
       let parsed: StripResult;
 
       const cachedRaw = readAiCache(cacheKey);
@@ -2485,13 +2916,15 @@ SVG source:
 ${markedSvgString}
 
 Respond with ONLY a valid JSON object — no markdown, no code fences, no explanation:
-{"hasText":true,"rows":[{"yFraction":0.5,"xFraction":0.5,"font":"Impact","sizeFraction":0.08,"weight":700,"color":"#ffffff","content":"HELLO","letterSpacing":0.05}],"removeIds":["3","9"]}`,
+{"hasText":true,"rows":[{"yFraction":0.5,"xFraction":0.5,"font":"Impact","sizeFraction":0.08,"weight":700,"color":"#ffffff","content":"HELLO","letterSpacing":0.05,"removeIds":["3","9"]}],"removeIds":["3","9"]}`,
         });
 
         try {
           parsed = JSON.parse(rawText) as StripResult;
-          if (!Array.isArray(parsed.removeIds)) parsed.removeIds = [];
-        } catch {
+          parsed.removeIds = Array.isArray(parsed.removeIds) ? parsed.removeIds.map(String) : [];
+          if (Array.isArray(parsed.rows)) parsed.rows.forEach(normaliseRowRemoveIds);
+        } catch (err) {
+          logUnreadable('strip-text', rawText, err);
           throw new Error('AI returned an unreadable response');
         }
 
@@ -2505,18 +2938,15 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
         rows: parsed.rows?.length ?? 0,
         removeIds: parsed.removeIds,
       });
-      const stripRemoveIds = filterOutBackgroundIds(doc.documentElement, parsed.removeIds, vw, vh, 'strip-text');
-      let stripDeleted = 0;
-      for (const sid of stripRemoveIds) {
-        const el = aiIdMap.get(sid);
-        if (el?.parentNode) {
-          el.parentNode.removeChild(el);
-          stripDeleted++;
-        } else {
-          console.log('[strip-text] removeId has no matching element:', sid);
-        }
-      }
-      console.log(`[strip-text] deleted ${stripDeleted}/${parsed.removeIds.length} element(s)`);
+      const stripRequested = allRemoveIds(parsed);
+      const stripRemoveIds = filterOutBackgroundIds(doc.documentElement, stripRequested, vw, vh, 'strip-text');
+      // Ground truth for placement: the boxes are read off the live geometry, and the
+      // elements stay in the document, so this is measuring rather than salvaging.
+      const stripAnchors = measureRemovedTextBoxes(doc.documentElement, stripRemoveIds);
+      const stripHidden = hideRemovedElements(
+        aiIdMap, stripRemoveIds, parsed.rows ?? [], stripAnchors, hiddenLayers, 'strip-text',
+      );
+      console.log(`[strip-text] took ${stripHidden.length}/${stripRequested.length} element(s)`);
       // Clean up temporary index attributes from remaining elements
       for (const [, el] of aiIdMap) {
         el.removeAttribute('data-ai-idx');
@@ -2524,16 +2954,20 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
 
       // One editable text layer per detected row — no grouping, no sub-layers.
       const detectedRows = parsed.hasText ? parsed.rows ?? [] : [];
-      detectedRows.forEach(({ font }) => addGoogleFont(font));
-      const newTextLayers = appendTextRowLayers(doc, detectedRows, { x: vbX, y: vbY, w: vw, h: vh });
+      detectedRows.forEach(({ font, weight }) => addGoogleFont(font, weight));
+      await ensureRowFontsReady(detectedRows);
+      console.log(`[strip-text] anchored ${countAnchoredRows(detectedRows, stripAnchors)}/${detectedRows.length} row(s) to measured geometry`);
+      const newTextLayers = appendTextRowLayers(doc, detectedRows, { x: vbX, y: vbY, w: vw, h: vh }, undefined, stripAnchors);
 
       const content = new XMLSerializer().serializeToString(doc.documentElement);
-      // Same as the customise pass: stripped elements take their layer rows with them.
+      // Same as the customise pass: a no-op for what this run took (hidden, not gone),
+      // still the catch for a row left undrawable some other way.
       const kept = pruneMissingLayers(doc, activeSvg.layers);
       setActiveSvg((prev) => {
         if (!prev) return null;
         return { ...prev, content, layers: [...kept, ...newTextLayers] };
       });
+      registerRemoved(stripHidden);
       dropSelectionOutside(kept, newTextLayers);
       if (newTextLayers.length > 0) setSelectedLayer(newTextLayers[0].id);
 
@@ -2730,10 +3164,18 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
 
     snapshotForUndo(activeSvg.content, activeSvg.layers);
     if (!parent.id) parent.id = `_grp_${Date.now()}`;
+
+    // Ids this app generated are plumbing, not names — showing one turns "Layer 3" into
+    // "_layer_2" on the way back out. Fall back to the same positional naming parseSvg
+    // uses, which restores the name the row had before it was opened.
+    const firstIdx = activeSvg.layers.findIndex((l) => l.id === absorbed[0].id);
+    const synthetic = /^_(layer|sub|grp|text|hidden|layer_copy)_/.test(parent.id);
     const label =
       parent.getAttribute('data-name')?.trim() ||
-      (!parent.id.startsWith('_grp_') ? parent.id : null) ||
-      'Group';
+      parent.getAttribute('inkscape:label')?.trim() ||
+      (!synthetic ? parent.id : null) ||
+      `Layer ${(firstIdx < 0 ? activeSvg.layers.length : firstIdx) + 1}`;
+
     const content = new XMLSerializer().serializeToString(doc.documentElement);
     const absorbedIds = new Set(absorbed.map((l) => l.id));
 
@@ -2922,6 +3364,8 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
             isLoading={isLoading}
             activeSvg={activeSvg}
             hiddenLayers={hiddenLayers}
+            previewIds={previewIds}
+            previewOutlineId={previewRemovedId}
             backgroundLayerId={backgroundLayerId}
             showSelectionOverlay={showSelectionOverlay}
             selectionIsEmptyText={selectionIsEmptyText}
@@ -2944,8 +3388,8 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
             onUndo={undo}
             redoCount={redoCount}
             onRedo={redo}
-            exportLabel={activeSvg && hiddenLayers.size > 0
-              ? `Export (${activeSvg.layers.length - hiddenLayers.size}/${activeSvg.layers.length})`
+            exportLabel={activeSvg && hiddenRowCount > 0
+              ? `Export (${activeSvg.layers.length - hiddenRowCount}/${activeSvg.layers.length})`
               : 'Export'}
             onExport={openRating}
             onClose={clear}
@@ -3110,6 +3554,19 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
           onOpenFetched={openSample}
           onOpenReviewUuid={openReviewUuid}
           onReviewListLoaded={onReviewListLoaded}
+        />
+      )}
+
+      {/* What the AI passes took — internal only. Renders nothing until a pass has run. */}
+      {SHOW_DEV_UI && activeSvg && (
+        <DevRemovedPanel
+          records={removedRecords}
+          previewId={previewRemovedId}
+          open={removedPanelOpen}
+          onSetOpen={setRemovedPanelOpen}
+          onPreview={setPreviewRemovedId}
+          onRestore={(id) => restoreRemoved([id])}
+          onRestoreGroup={restoreRemoved}
         />
       )}
     </div>

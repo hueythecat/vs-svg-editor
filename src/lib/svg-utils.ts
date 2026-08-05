@@ -121,9 +121,16 @@ export function parseSvg(raw: string): { content: string; layers: SvgLayer[] } {
 
 // Returns the element's bounding box in SVG root coordinate space,
 // correctly accounting for the element's own transform attribute.
-export function bboxInRootSpace(svgEl: SVGSVGElement, el: SVGGraphicsElement): DOMRect | null {
+export function bboxInRootSpace(
+  svgEl: SVGSVGElement,
+  el: SVGGraphicsElement,
+  // The element's box in its OWN coordinate space. Defaults to its geometric bbox;
+  // callers override it to map a box they derived themselves (an ink box narrowed from
+  // the line box getBBox reports for <text>) through the same transform chain.
+  localBox?: DOMRect,
+): DOMRect | null {
   try {
-    const local = el.getBBox();
+    const local = localBox ?? el.getBBox();
     const m = svgEl.getScreenCTM()!.inverse().multiply(el.getScreenCTM()!);
     const corners = [
       [local.x,               local.y],
@@ -177,18 +184,33 @@ export function applyTranslateDelta(existing: string, dx: number, dy: number): s
 // of cy from the bulge. Offsetting it by h/2 leaves the arc spanning [cy−h/2, cy+h/2] —
 // centred on cy, so bending the text does not move it up or down the canvas.
 //
+// How much longer than the text the path is built. Big enough to absorb the gap between
+// an off-screen measurement and the live render, small enough not to loosen the curve.
+const ARC_SLACK = 0.08;
+
 // `fallbackLen` stands in when the text cannot be measured (empty string, no live DOM).
 export function computeArcPath(
   cx: number, cy: number, curve: number, textLen: number, fallbackLen: number,
 ): string {
   const L = textLen > 0 ? textLen : Math.max(1, fallbackLen);
+
+  // Build the path a little longer than the text rather than to an exact fit. The length
+  // is measured off-screen and the artwork is drawn live, and the two need not agree to
+  // the unit — webfont substitution, hinting and rounding all move it. Fit the arc
+  // exactly and any shortfall pushes glyphs off the ends of the path, where they simply
+  // are not drawn; because the run is centred, that eats the first AND last characters.
+  // Slack is invisible (the text just stops short of the ends) and can only fail safe.
+  const arcLen = L * (1 + ARC_SLACK);
+
   const alpha = (Math.min(100, Math.abs(curve)) / 100) * (Math.PI / 2);
-  const r = L / (2 * alpha);
+  const r = arcLen / (2 * alpha);
   const halfW = r * Math.sin(alpha);
   const h = r * (1 - Math.cos(alpha));
 
+  // The text now covers only part of the arc, so centre it on what it actually covers.
+  const s = r * (1 - Math.cos(Math.min(L, arcLen) / (2 * r)));
   const sweep = curve > 0 ? 1 : 0;
-  const chordY = curve > 0 ? cy + h / 2 : cy - h / 2;
+  const chordY = curve > 0 ? cy + h - s / 2 : cy - h + s / 2;
   // alpha never exceeds π/2, so the arc is never more than a semicircle: large-arc is 0.
   return `M ${cx - halfW} ${chordY} A ${r} ${r} 0 0 ${sweep} ${cx + halfW} ${chordY}`;
 }
@@ -407,8 +429,31 @@ export function parseViewBox(svgRoot: Element, fallback = '0 0 800 600'): { x: n
 // detached/parsed SVG document, runs fn against it, and always unmounts.
 export const withOffscreenSvg = <T,>(svgRoot: Element, fn: (mounted: SVGSVGElement) => T): T => {
   const measureSvg = svgRoot.cloneNode(true) as SVGSVGElement;
+
+  // The clone has to be laid out at its natural size. Mounted into the 1x1 holder this
+  // used to use, Chrome scales the viewBox down so far that TEXT measurement degrades —
+  // measured against the same clone in a correctly sized holder, getBBox on a <text> came
+  // back 5% narrow and returned an ink-ish height instead of the font's line box. Path
+  // geometry is resolution-independent and was unaffected, which is why this stayed
+  // invisible: it only ever corrupted the text this helper is used to measure.
+  //
+  // Only an SVG with a viewBox needs its size pinned. Without one there is no scaling to
+  // get wrong — one user unit is one pixel — so the clone keeps its own width/height and
+  // only the holder is opened up.
+  const vb = measureSvg.getAttribute('viewBox');
+  const { w, h } = parseViewBox(measureSvg);
+  const width = Math.max(1, w);
+  const height = Math.max(1, h);
+  if (vb) {
+    measureSvg.setAttribute('width', String(width));
+    measureSvg.setAttribute('height', String(height));
+  }
+
   const holder = document.createElement('div');
-  holder.setAttribute('style', 'position:absolute;left:-99999px;top:0;width:1px;height:1px;overflow:hidden');
+  holder.setAttribute(
+    'style',
+    `position:absolute;left:-99999px;top:0;width:${width}px;height:${height}px;overflow:hidden`,
+  );
   holder.appendChild(measureSvg);
   document.body.appendChild(holder);
   try {
@@ -441,8 +486,15 @@ export function measureTextAdvance(root: Element, groupId: string): number {
   try {
     return withOffscreenSvg(root, (measureSvg) => {
       const el = measureSvg.querySelector(`[id="${groupId}"] text`) as SVGTextContentElement | null;
+      if (!el) return estimate();
+      // Measure the string laid out flat. On a <textPath>, glyphs that run past the end
+      // of the path are not rendered and so are not measured either — which would report
+      // a length short enough to rebuild the same too-short arc, and the text could never
+      // recover. Replacing the textPath with its own characters takes the path out of it.
+      const tp = el.querySelector('textPath');
+      if (tp) el.textContent = tp.textContent;
       let w = 0;
-      try { w = el?.getComputedTextLength?.() ?? 0; } catch { /* unrenderable — estimate below */ }
+      try { w = el.getComputedTextLength?.() ?? 0; } catch { /* unrenderable — estimate below */ }
       return w > 0 ? w : estimate();
     });
   } catch {
@@ -453,11 +505,19 @@ export function measureTextAdvance(root: Element, groupId: string): number {
 // ─── AI text rows → editable text layers ─────────────────────────────────────
 
 // One line of text the vision pass found, in canvas-relative fractions.
+//
+// The fractions are the model's *estimate* of where the line sits — read off a raster,
+// independently per row, and routinely out by several percent of the canvas. removeIds
+// is the correction: the indices of the source elements that actually render this line,
+// whose measured geometry replaces the estimate entirely (see appendTextRowLayers).
+// Optional because a row can legitimately have no source element behind it — a line the
+// raster shows but the source analysis never matched.
 export type TextRow = {
   yFraction: number; xFraction: number;
   font: string; sizeFraction: number;
   weight: number; color: string; content: string;
   letterSpacing: number;
+  removeIds?: string[];
 };
 
 // Letter-spacing steps the inspector's slider offers. AI estimates are snapped onto
@@ -466,63 +526,373 @@ const LS_OPTIONS = [-0.1, -0.05, 0, 0.05, 0.1, 0.15, 0.2, 0.3];
 const snapLetterSpacing = (v: number) =>
   LS_OPTIONS.reduce((a, b) => (Math.abs(b - v) < Math.abs(a - v) ? b : a));
 
-// Rows whose vertical centres are within this fraction of the canvas height read as
-// one horizontal band — the only rows that can collide with each other.
-const BAND_Y_THRESHOLD = 0.03;
+// How close two rows' vertical centres must be to count as the same line of text — the
+// only rows that can collide with each other — as a fraction of the smaller row's font
+// size. Measured against the TEXT, not the canvas: words sharing a line share a baseline,
+// so their centres differ by almost nothing whatever size the canvas is, while separate
+// lines are a line-height apart by definition.
+//
+// This was a flat 0.03 of canvas height, which is not a property of the rows at all. On a
+// diagram whose eight stacked labels sat 0.02 of the canvas apart, every one of them fell
+// inside that window, so the whole vertical list was read as a single horizontal band and
+// re-laid left to right — turning a column of labels into an overlapping row of them.
+const BAND_SAME_LINE_EM = 0.5;
 // Space kept between two fields in the same band, as a fraction of the larger font size.
 const BAND_GAP_EM = 0.25;
+
+// Two views of one element's geometry, both in root space. `box` is what getBBox reports;
+// `ink` is the box the element's visible marks actually fill. They differ only for
+// <text>, where getBBox returns the font's LINE box — ascender to descender, the same
+// height whatever the string — and are the same object for everything else.
+type BoxPair = { box: DOMRect; ink: DOMRect };
+
+const TEXTISH_TAGS = new Set(['text', 'tspan']);
+
+// Ink bounds of a rendered <text>, in the element's OWN coordinate space, or null for
+// anything that isn't text. Canvas is the only source of per-string ink extents, and its
+// actualBoundingBox* values were checked against a pixel scan of the same string (agreed
+// within ~1px). getBBox gives the line box, whose top is fontBoundingBoxAscent above the
+// baseline — so the baseline is recoverable, and the ink follows from it.
+function textInkBounds(el: Element, localBox: DOMRect): { top: number; bottom: number } | null {
+  try {
+    if (!TEXTISH_TAGS.has(el.tagName.toLowerCase().replace(/.*:/, ''))) return null;
+    const size = Number(el.getAttribute('font-size'));
+    if (!Number.isFinite(size) || size <= 0) return null;
+    const raw = el.getAttribute('font-family') || 'Arial';
+    // A bare multi-word family name is legal in the CSS font shorthand, but quoting is
+    // safer; one that is already a list or already quoted is passed through as-is.
+    const family = /[",]/.test(raw) ? raw : `"${raw}"`;
+    const ctx = document.createElement('canvas').getContext('2d');
+    if (!ctx) return null;
+    ctx.font = `${el.getAttribute('font-weight') || '400'} ${size}px ${family}`;
+    const m = ctx.measureText(el.textContent ?? '');
+    const { fontBoundingBoxAscent: asc, actualBoundingBoxAscent: ia, actualBoundingBoxDescent: id } = m;
+    if (![asc, ia, id].every((v) => typeof v === 'number' && Number.isFinite(v))) return null;
+    const baseline = localBox.y + asc;
+    return { top: baseline - ia, bottom: baseline + id };
+  } catch {
+    return null;
+  }
+}
+
+// Root-space geometry for a set of elements, keyed by a caller-chosen name and located by
+// a caller-supplied selector. One offscreen mount serves the whole set: cloning and
+// mounting the document is the expensive part, measuring within it is not.
+//
+// Root space (not raw getBBox) because the interesting elements are usually nested under
+// transformed groups, and the only coordinates worth comparing are the ones the root
+// <svg> writes its own children in. The ink box is narrowed in LOCAL space and mapped
+// through the same transform chain, so a wordmark inside a scale(1.5) group is handled
+// like any other.
+function measureBoxPairs(root: Element, selectors: Map<string, string>): Map<string, BoxPair> {
+  const pairs = new Map<string, BoxPair>();
+  if (selectors.size === 0) return pairs;
+  try {
+    withOffscreenSvg(root, (measureSvg) => {
+      for (const [key, selector] of selectors) {
+        const el = measureSvg.querySelector(selector) as SVGGraphicsElement | null;
+        if (!el) continue;
+        const box = bboxInRootSpace(measureSvg, el);
+        // A zero-area box is a measurement failure, not a measurement — an unrenderable
+        // or empty element. Leaving it out lets callers fall back rather than snap to it.
+        if (!box || box.width <= 0 || box.height <= 0) continue;
+        const local = el.getBBox();
+        const bounds = textInkBounds(el, local);
+        const ink = bounds
+          ? bboxInRootSpace(measureSvg, el, new DOMRect(local.x, bounds.top, local.width, bounds.bottom - bounds.top)) ?? box
+          : box;
+        pairs.set(key, { box, ink });
+      }
+    });
+  } catch { /* no live DOM (tests, SSR) — callers fall back to the model's estimate */ }
+  return pairs;
+}
+
+export function measureBoxes(root: Element, selectors: Map<string, string>): Map<string, DOMRect> {
+  return new Map([...measureBoxPairs(root, selectors)].map(([key, p]) => [key, p.box]));
+}
+
+// Root-space INK boxes of the elements a vision pass is about to delete, keyed by the
+// data-ai-idx the model addressed them by.
+//
+// MUST be called before the removal loop: once the paths are gone their geometry is
+// unrecoverable, and it is the only ground truth about where the original lettering
+// actually sat. Feeds appendTextRowLayers's `anchors`.
+//
+// Ink rather than plain boxes so the anchor means the same thing whichever way the source
+// drew its lettering — outlines, where the two are identical, or a live <text>, where the
+// plain box would be the line box and would drag the replacement off by up to 0.1em.
+export const measureRemovedTextBoxes = (svgRoot: Element, removeIds: string[]): Map<string, DOMRect> =>
+  new Map(
+    [...measureBoxPairs(svgRoot, new Map(removeIds.map((sid) => [sid, `[data-ai-idx="${sid}"]`])))]
+      .map(([key, p]) => [key, p.ink]),
+  );
+
+const unionBox = (boxes: DOMRect[]): DOMRect | null => {
+  if (boxes.length === 0) return null;
+  const x = Math.min(...boxes.map((b) => b.x));
+  const y = Math.min(...boxes.map((b) => b.y));
+  const right  = Math.max(...boxes.map((b) => b.x + b.width));
+  const bottom = Math.max(...boxes.map((b) => b.y + b.height));
+  return new DOMRect(x, y, right - x, bottom - y);
+};
 
 // Rendered width of each id, measured off-screen. Falls back to a glyph-count estimate
 // for anything unmeasurable (detached geometry, no live DOM under test).
 function measureTextWidths(root: Element, ids: string[]): Map<string, number> {
-  const widths = new Map<string, number>();
   const estimate = (el: Element | null) => {
     const len = (el?.textContent ?? '').length;
     const fs = Number(el?.getAttribute('font-size') ?? 16);
     return Math.max(1, len * fs * 0.55);
   };
-  try {
-    withOffscreenSvg(root, (measureSvg) => {
-      ids.forEach((id) => {
-        const el = measureSvg.querySelector(`[id="${id}"]`) as SVGGraphicsElement | null;
-        let w = 0;
-        try { w = el?.getBBox?.().width ?? 0; } catch { /* unrenderable — estimate below */ }
-        widths.set(id, w > 0 ? w : estimate(el));
-      });
-    });
-  } catch {
-    ids.forEach((id) => widths.set(id, estimate(root.querySelector(`[id="${id}"]`))));
+  const boxes = measureBoxes(root, new Map(ids.map((id) => [id, `[id="${id}"]`])));
+  return new Map(ids.map((id) => [
+    id,
+    boxes.get(id)?.width ?? estimate(root.querySelector(`[id="${id}"]`)),
+  ]));
+}
+
+// How far a row's estimated centre may sit from an unclaimed box before the two stop
+// being plausibly the same line, as a fraction of the larger viewBox dimension. Only
+// used for rows the model didn't tag with removeIds.
+const ANCHOR_MATCH_RADIUS = 0.25;
+// Ceiling on a snapped font size, as a fraction of the viewBox height. A sanity bound on
+// the OUTPUT, deliberately not a bound on how far the measurement may drag the model's
+// estimate: the estimate is the untrusted input here, and a wordmark the model sized at
+// 5% of the canvas when it really fills 18% needs a 3.6x correction to land — exactly the
+// case worth fixing. Only a result larger than the canvas itself is self-evidently wrong.
+const MAX_SNAPPED_SIZE = 1.0;
+
+// How much closer another row's estimate must be before a link is judged mis-assigned.
+// A margin rather than a plain comparison because rows sharing a line sit near each
+// other's estimates by nature, and a near-tie is not evidence of anything.
+const MISMATCH_MARGIN = 0.8;
+
+// Discards anchors that belong to a different row than the one claiming them.
+//
+// The linking is the model's, and on artwork where each label is a pile of letter paths
+// it can come back shuffled — a diagram whose eight labels were linked to the eight label
+// ids in almost reverse order, so every label anchored onto a different label's geometry
+// and the whole stack landed scrambled. Nothing downstream can detect that: the boxes are
+// real, the measurement is exact, only the pairing is wrong.
+//
+// The estimates are the independent second opinion. They are imprecise — that is why
+// anchoring exists — but they are never shuffled, because they are read straight off the
+// raster. So require the two to at least agree on WHICH row is which: a row's anchor must
+// sit nearer that row's own estimate than any other row's. When it doesn't, the link is
+// not trustworthy and the row falls back to the estimate, which is exactly where it sat
+// before any of this existed.
+function dropMismatchedAnchors(
+  rows: TextRow[],
+  targets: (DOMRect | null)[],
+  vb: { x: number; y: number; w: number; h: number },
+  // Hands the row's ids back to the pool, so the boxes a rejected link was holding are
+  // available to whichever row actually belongs on them.
+  release: (row: number) => void,
+): void {
+  if (rows.length < 2) return;
+  const estimates = rows.map((r) => ({ x: vb.x + r.xFraction * vb.w, y: vb.y + r.yFraction * vb.h }));
+  const dist2 = (a: { x: number; y: number }, b: { x: number; y: number }) =>
+    (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
+
+  rows.forEach((row, i) => {
+    const t = targets[i];
+    if (!t) return;
+    const centre = { x: t.x + t.width / 2, y: t.y + t.height / 2 };
+    const own = dist2(centre, estimates[i]);
+    const stolen = estimates.findIndex((e, j) => j !== i && dist2(centre, e) < own * MISMATCH_MARGIN ** 2);
+    if (stolen === -1) return;
+    console.log(
+      `[text-rows] dropping anchor for "${row.content}" — its geometry sits nearer the row for "${rows[stolen].content}", so the model's row↔element linking is unreliable here; falling back to the estimate`,
+    );
+    targets[i] = null;
+    release(i);
+  });
+}
+
+// Pairs each row with the box its original lettering occupied, parallel to `rows`.
+//
+// Rows naming removeIds claim those boxes outright — the model tagged them, and it is the
+// only party that knows which outlines spell which word. Untagged rows then take the
+// nearest unclaimed box, which is a guess and is fenced as one: no box within
+// ANCHOR_MATCH_RADIUS means no anchor, and the row keeps the model's estimate.
+function resolveAnchors(
+  rows: TextRow[],
+  vb: { x: number; y: number; w: number; h: number },
+  anchors: Map<string, DOMRect>,
+): (DOMRect | null)[] {
+  const targets: (DOMRect | null)[] = rows.map(() => null);
+  const claimed = new Set<string>();
+  // Which ids each row took, so a rejected link can hand them back. Without that the
+  // boxes stay locked to the row that was just told it may not have them, and the repair
+  // below finds nothing free — every row falls back to its estimate and the measured
+  // geometry goes unused even though it is sitting right there.
+  const claimedBy: string[][] = rows.map(() => []);
+
+  rows.forEach((row, i) => {
+    const ids = (row.removeIds ?? []).filter((sid) => anchors.has(sid) && !claimed.has(sid));
+    const box = unionBox(ids.map((sid) => anchors.get(sid)!));
+    if (!box) return;
+    ids.forEach((sid) => claimed.add(sid));
+    claimedBy[i] = ids;
+    targets[i] = box;
+  });
+
+  dropMismatchedAnchors(rows, targets, vb, (i) => {
+    claimedBy[i].forEach((sid) => claimed.delete(sid));
+    claimedBy[i] = [];
+  });
+
+  // Whatever is still unanchored — never linked, or linked and rejected — takes the
+  // nearest box nobody has claimed. `rows` is in reading order, so walking it in order
+  // consumes the boxes in reading order too, which is what repairs a shuffled linking:
+  // the rows and the boxes describe the same lines top to bottom even when the model
+  // paired them up wrongly.
+  //
+  // Resolving the globally closest pairs first was tried instead and is worse. The
+  // estimates are not just noisy but systematically compressed against the real
+  // geometry — on the diagram above they spanned 60 units where the artwork spanned 134
+  // — so "closest" stops tracking "corresponding" partway down the list, and greedy
+  // matching cross-assigns rows that sequential matching gets right.
+  const limit = ANCHOR_MATCH_RADIUS * Math.max(vb.w, vb.h);
+  rows.forEach((row, i) => {
+    if (targets[i]) return;
+    const cx = vb.x + row.xFraction * vb.w;
+    const cy = vb.y + row.yFraction * vb.h;
+    let best: { sid: string; box: DOMRect; d: number } | null = null;
+    for (const [sid, box] of anchors) {
+      if (claimed.has(sid)) continue;
+      const d = Math.hypot(box.x + box.width / 2 - cx, box.y + box.height / 2 - cy);
+      if (d <= limit && (!best || d < best.d)) best = { sid, box, d };
+    }
+    if (!best) return;
+    claimed.add(best.sid);
+    targets[i] = best.box;
+  });
+
+  return targets;
+}
+
+// Where a row will sit and roughly how big it will be, in root space — enough to tell
+// whether two rows describe the same visible line. Measured geometry when the row has an
+// anchor, the model's estimate when it doesn't.
+type RowExtent = { content: string; cx: number; cy: number; w: number; h: number };
+
+function rowExtent(row: TextRow, target: DOMRect | null, vb: { x: number; y: number; w: number; h: number }): RowExtent {
+  const content = row.content.trim();
+  if (target) {
+    return { content, cx: target.x + target.width / 2, cy: target.y + target.height / 2, w: target.width, h: target.height };
   }
-  return widths;
+  const fontSize = Math.max(8, row.sizeFraction * vb.h);
+  return {
+    content,
+    cx: vb.x + row.xFraction * vb.w,
+    cy: vb.y + row.yFraction * vb.h,
+    w: Math.max(1, content.length * fontSize * 0.55),
+    h: fontSize,
+  };
+}
+
+// Two rows are the same visible line when they say the same thing in the same place.
+// Compared against the SMALLER of the two extents so that stacked copies — a shadow
+// offset by a pixel or two — still read as one line, while the same word repeated in two
+// corners of the canvas stays two lines.
+const sameVisibleLine = (a: RowExtent, b: RowExtent): boolean =>
+  a.content === b.content &&
+  Math.abs(a.cx - b.cx) <= 0.5 * Math.min(a.w, b.w) &&
+  Math.abs(a.cy - b.cy) <= 0.5 * Math.min(a.h, b.h);
+
+// Collapses rows the model returned more than once for the same line of text.
+//
+// Artwork routinely draws a wordmark as several stacked copies (a shadow, an outline, a
+// fill), so the source legitimately holds three elements for one visible word. Asking the
+// model to link rows to those elements invites it to answer with one row per COPY instead
+// of one row per line, which lands as three identical fields on the same spot. The prompt
+// asks for the right shape; this makes the wrong shape harmless, because a duplicate here
+// is not a cosmetic flaw — it is three stacked text layers the user has to find and
+// delete by hand.
+//
+// Merging unions the removeIds and the anchor boxes, which is precisely what would have
+// happened had the model returned the one row it should have.
+function mergeDuplicateRows(
+  rows: TextRow[],
+  targets: (DOMRect | null)[],
+  vb: { x: number; y: number; w: number; h: number },
+): { rows: TextRow[]; targets: (DOMRect | null)[] } {
+  const keptRows: TextRow[] = [];
+  const keptTargets: (DOMRect | null)[] = [];
+  const keptExtents: RowExtent[] = [];
+  let merged = 0;
+
+  rows.forEach((row, i) => {
+    const target = targets[i];
+    const extent = rowExtent(row, target, vb);
+    const at = keptExtents.findIndex((k) => sameVisibleLine(k, extent));
+    if (at === -1) {
+      keptRows.push(row);
+      keptTargets.push(target);
+      keptExtents.push(extent);
+      return;
+    }
+    merged++;
+    keptRows[at] = {
+      ...keptRows[at],
+      removeIds: [...new Set([...(keptRows[at].removeIds ?? []), ...(row.removeIds ?? [])])],
+    };
+    const combined = unionBox([keptTargets[at], target].filter((b): b is DOMRect => !!b));
+    keptTargets[at] = combined;
+    keptExtents[at] = rowExtent(keptRows[at], combined, vb);
+  });
+
+  if (merged > 0) {
+    console.log(`[text-rows] merged ${merged} duplicate row(s) — same content, same place`);
+  }
+  return { rows: keptRows, targets: keptTargets };
 }
 
 // Appends one top-level <text> element per detected row and returns the matching layer
 // entries, in document order. Deliberately flat: every row is its own layer, so the
 // element list has no sub-rows and each field is selected, moved and styled on its own.
 //
-// Rows sharing a horizontal band are then de-overlapped: the model estimates each
-// field's centre independently, so two words on one line routinely come back with
-// centres closer together than their rendered widths allow. When a band collides, its
-// fields are re-laid out left to right around the band's own centre, preserving reading
-// order, and clamped inside the viewBox.
+// `anchors` are the measured boxes of the source elements being deleted in the same pass
+// (see measureRemovedTextBoxes). A row matched to one is placed and sized from that
+// geometry rather than from the model's fractions, which is the difference between a
+// replacement field landing on the wordmark it replaces and landing near it.
+//
+// Rows with no anchor fall back to the estimate, and those are then de-overlapped: the
+// model estimates each field's centre independently, so two words on one line routinely
+// come back with centres closer together than their rendered widths allow. When a band
+// collides, its fields are re-laid out left to right around the band's own centre,
+// preserving reading order, and clamped inside the viewBox. Anchored rows sit this out —
+// real geometry doesn't overlap, and reflowing them would undo the measurement.
 export function appendTextRowLayers(
   doc: Document,
   rows: TextRow[],
   vb: { x: number; y: number; w: number; h: number },
   idPrefix = `_text_${Date.now()}`,
+  anchors: Map<string, DOMRect> = new Map(),
 ): SvgLayer[] {
   if (rows.length === 0) return [];
   const root = doc.documentElement;
   const sorted = [...rows].sort((a, b) => a.yFraction - b.yFraction || a.xFraction - b.xFraction);
+  // Anchor first, then de-duplicate: measured geometry is what makes two rows provably
+  // the same line, so the estimates are only ever the fallback comparison.
+  const anchored = resolveAnchors(sorted, vb, anchors);
+  const { rows: deduped, targets } = mergeDuplicateRows(sorted, anchored, vb);
 
-  const placed = sorted.map((row, i) => {
+  const placed = deduped.map((row, i) => {
     const id = `${idPrefix}_${i}`;
     const label = row.content.trim() || 'Text';
+    const target = targets[i];
     const fontSize = Math.max(8, Math.round(row.sizeFraction * vb.h));
+    // An anchored row is centred on the ink it replaces; an unanchored one on the model's
+    // guess. Both are refined below — the first by measurement, the second by de-overlap.
+    const cx = target ? target.x + target.width / 2 : vb.x + row.xFraction * vb.w;
+    const cy = target ? target.y + target.height / 2 : vb.y + row.yFraction * vb.h;
     const el = doc.createElementNS('http://www.w3.org/2000/svg', 'text');
     el.id = id;
-    el.setAttribute('x', String(vb.x + row.xFraction * vb.w));
-    el.setAttribute('y', String(vb.y + row.yFraction * vb.h));
+    el.setAttribute('x', String(cx));
+    el.setAttribute('y', String(cy));
     el.setAttribute('text-anchor', 'middle');
     el.setAttribute('dominant-baseline', 'middle');
     el.setAttribute('font-family', row.font || 'Arial');
@@ -533,18 +903,25 @@ export function appendTextRowLayers(
     if (ls !== 0) el.setAttribute('letter-spacing', `${ls}em`);
     el.textContent = label;
     root.appendChild(el);
-    return { id, label, row, fontSize, el, cx: vb.x + row.xFraction * vb.w };
+    return { id, label, row, fontSize, el, cx, cy, target };
   });
 
-  // Bands of rows sharing a y position, each already in left-to-right order.
+  snapAnchoredRows(root, placed, vb);
+
+  // Bands of rows sharing a y position, each already in left-to-right order. Anchored
+  // rows are excluded outright rather than merely skipped: they must not influence a
+  // neighbour's reflow either, since their position is the one thing already known good.
   const bands: (typeof placed)[] = [];
   for (const item of placed) {
+    if (item.target) continue;
     const last = bands[bands.length - 1];
-    if (last && Math.abs(item.row.yFraction - last[0].row.yFraction) <= BAND_Y_THRESHOLD) last.push(item);
+    const sameLine = last &&
+      Math.abs(item.cy - last[0].cy) <= BAND_SAME_LINE_EM * Math.min(item.fontSize, last[0].fontSize);
+    if (sameLine) last.push(item);
     else bands.push([item]);
   }
 
-  const widths = measureTextWidths(root, placed.map((p) => p.id));
+  const widths = measureTextWidths(root, placed.filter((p) => !p.target).map((p) => p.id));
   for (const band of bands) {
     if (band.length < 2) continue;
     const gap = BAND_GAP_EM * Math.max(...band.map((b) => b.fontSize));
@@ -576,6 +953,55 @@ export function appendTextRowLayers(
   return placed.map(({ id, label }) => ({ id, label }));
 }
 
+// Re-sizes and re-centres every anchored row onto the box it replaces, by measuring what
+// was actually rendered rather than by deriving a font size from the box.
+//
+// Deriving would need the box height, and box height is not a font size: the same
+// font-size gives a wildly different ink height for "HELLO" and for "gypsy". Measuring
+// the replacement and scaling by the width ratio is glyph-, font- and tracking-agnostic,
+// and self-corrects — whatever the string, the second measurement is of the real thing.
+//
+// The two axes use different boxes, because getBBox on a <text> reports a different kind
+// of thing on each. Its width is the advance width — measured equal to the canvas advance
+// to three decimal places, and within a side bearing of the ink width — so the plain box
+// drives the horizontal directly, letter-spacing included. Its height is the font's line
+// box, identical for "HELLO" and "gypsy", so the vertical goes through the ink box: the
+// targets are ink boxes too, and centring ink on ink is the only comparison that means
+// the same thing for both strings.
+function snapAnchoredRows(
+  root: Element,
+  placed: { id: string; fontSize: number; el: Element; cx: number; cy: number; target: DOMRect | null }[],
+  vb: { x: number; y: number; w: number; h: number },
+): void {
+  const anchored = placed.filter((p) => p.target);
+  if (anchored.length === 0) return;
+  const selectors = () => new Map(anchored.map((p) => [p.id, `[id="${p.id}"]`]));
+
+  // Pass 1 — size.
+  const sized = measureBoxPairs(root, selectors());
+  for (const p of anchored) {
+    const measured = sized.get(p.id);
+    if (!measured) continue;
+    const scaled = p.fontSize * (p.target!.width / measured.box.width);
+    if (!Number.isFinite(scaled)) continue;
+    p.fontSize = Math.round(Math.min(Math.max(scaled, 8), MAX_SNAPPED_SIZE * vb.h));
+    p.el.setAttribute('font-size', String(p.fontSize));
+  }
+
+  // Pass 2 — position, re-measured so the centring accounts for the new size and for
+  // whatever text-anchor and dominant-baseline actually resolved to.
+  const resized = measureBoxPairs(root, selectors());
+  for (const p of anchored) {
+    const measured = resized.get(p.id);
+    if (!measured) continue;
+    const target = p.target!;
+    p.cx += target.x + target.width / 2 - (measured.box.x + measured.box.width / 2);
+    p.cy += target.y + target.height / 2 - (measured.ink.y + measured.ink.height / 2);
+    p.el.setAttribute('x', String(p.cx));
+    p.el.setAttribute('y', String(p.cy));
+  }
+}
+
 // Drops removeIds whose element covers ≥ BACKGROUND_AREA_LIMIT of the canvas — a
 // background or decoration the vision model mislabeled as text. Shared by the
 // strip-text and customise passes so both guard identically. svgRoot must already
@@ -589,21 +1015,23 @@ export const filterOutBackgroundIds = (
   logTag: string,
 ): string[] => {
   const canvasArea = Math.max(1, canvasW * canvasH);
-  return withOffscreenSvg(svgRoot, (measureSvg) =>
-    removeIds.filter((sid) => {
-      const probe = measureSvg.querySelector(`[data-ai-idx="${sid}"]`) as SVGGraphicsElement | null;
-      if (!probe || typeof probe.getBBox !== 'function') return true; // can't measure → trust the model
-      try {
-        const b = probe.getBBox();
-        const frac = (b.width * b.height) / canvasArea;
-        if (frac >= BACKGROUND_AREA_LIMIT) {
-          console.log(`[${logTag}] skipping removeId ${sid} — bbox covers ${(frac * 100).toFixed(0)}% of canvas (background, not text)`);
-          return false;
-        }
-      } catch { /* unrenderable geometry — leave the call to the model */ }
-      return true;
-    }),
-  );
+  // Ink boxes, in root space. The question this asks is how much of the canvas the
+  // element's visible mark covers, so a <text> has to be judged on its ink and not on the
+  // font's line box — that box runs ascender to descender and is about 1.5x taller than
+  // an all-caps string's letters, which is enough on its own to carry a wide wordmark
+  // over the limit and have it thrown away as a background. Root space for the matching
+  // reason: an element inside a scaled group does not cover the area its own bbox claims.
+  const boxes = measureBoxPairs(svgRoot, new Map(removeIds.map((sid) => [sid, `[data-ai-idx="${sid}"]`])));
+  return removeIds.filter((sid) => {
+    const ink = boxes.get(sid)?.ink;
+    if (!ink) return true; // can't measure → trust the model
+    const frac = (ink.width * ink.height) / canvasArea;
+    if (frac >= BACKGROUND_AREA_LIMIT) {
+      console.log(`[${logTag}] skipping removeId ${sid} — ink covers ${(frac * 100).toFixed(0)}% of canvas (background, not text)`);
+      return false;
+    }
+    return true;
+  });
 };
 
 // True when the element (by id) spans essentially the whole canvas in BOTH dimensions

@@ -46,6 +46,13 @@ export const LayerList = React.memo(function LayerList({
   const panelDragIdRef       = useRef<string | null>(null);
   const panelDropPositionRef = useRef<{ targetId: string; before: boolean } | null>(null);
   const panelReorderDoneRef  = useRef(false);
+  // A press anywhere on a row that hasn't moved far enough to be a drag yet. Dragging
+  // used to start only from the grip, so a press that missed it did nothing and the
+  // browser took the gesture instead — which is what dragged the page around. Any part
+  // of the row can start a drag now, once the pointer has moved enough that it clearly
+  // isn't a click.
+  const pendingDragRef = useRef<{ id: string; x: number; y: number } | null>(null);
+  const DRAG_THRESHOLD = 3;
 
   // Range-select anchor: the last row picked *without* shift. Shift-click selects
   // everything between it and the clicked row, and the anchor deliberately stays put so
@@ -140,8 +147,20 @@ export const LayerList = React.memo(function LayerList({
         flexDirection: 'column',
         gap: 2,
         fontFamily: FONT_STACK,
+        // The list handles its own pointer gestures; without this the browser can pan or
+        // scroll on the same drag and fight the reorder.
+        touchAction: 'none',
       }}
       onPointerMove={(e) => {
+        // Promote a held row into a drag once it has moved past the threshold.
+        if (!panelDragIdRef.current && pendingDragRef.current) {
+          const held = pendingDragRef.current;
+          if (Math.abs(e.clientX - held.x) < DRAG_THRESHOLD &&
+              Math.abs(e.clientY - held.y) < DRAG_THRESHOLD) return;
+          layerListRef.current?.setPointerCapture(e.pointerId);
+          panelDragIdRef.current = held.id;
+          pendingDragRef.current = null;
+        }
         if (!panelDragIdRef.current) return;
         setDragLayerId(panelDragIdRef.current);
 
@@ -160,6 +179,16 @@ export const LayerList = React.memo(function LayerList({
         setDropPosition(pos);
       }}
       onPointerUp={(e) => {
+        // A gesture can arrive as one jump with no intermediate move, so a row still
+        // held at release counts as a drag if it travelled far enough — otherwise it was
+        // a click and the selection already made on pointerdown stands.
+        const held = pendingDragRef.current;
+        pendingDragRef.current = null;
+        if (!panelDragIdRef.current && held) {
+          if (Math.abs(e.clientX - held.x) < DRAG_THRESHOLD &&
+              Math.abs(e.clientY - held.y) < DRAG_THRESHOLD) return;
+          panelDragIdRef.current = held.id;
+        }
         if (!panelDragIdRef.current) return;
         layerListRef.current?.releasePointerCapture(e.pointerId);
         // Resolve once more from the release point: the last pointermove can lag behind
@@ -202,6 +231,10 @@ export const LayerList = React.memo(function LayerList({
               className={isSelected ? 'ed-row-selected' : 'ed-row'}
               onPointerDown={(e) => {
                 if (e.button !== 0) return;
+                // Stops the browser starting its own drag of the row/page before ours
+                // begins — that native gesture is what dragged the screen about.
+                e.preventDefault();
+                pendingDragRef.current = { id: layer.id, x: e.clientX, y: e.clientY };
                 if (e.shiftKey) {
                   selectRange(layer.id);
                 } else if (e.metaKey || e.ctrlKey) {
@@ -267,6 +300,8 @@ export const LayerList = React.memo(function LayerList({
                 onPointerDown={(e) => {
                   if (e.button !== 0) return;
                   e.stopPropagation();
+                  e.preventDefault();
+                  pendingDragRef.current = null;   // the grip drags at once, no threshold
                   onSelectOne(layer.id);
                   anchorIdRef.current = layer.id;
                   layerListRef.current?.setPointerCapture(e.pointerId);

@@ -48,7 +48,7 @@ export const CanvasStage = React.memo(function CanvasStage({
   onCanvasClick,
   aiLoading, aiStatusMsg,
   isLoading, activeSvg,
-  hiddenLayers, backgroundLayerId,
+  hiddenLayers, previewIds, previewOutlineId, backgroundLayerId,
   showSelectionOverlay, selectionIsEmptyText,
   onEmptyTextClick,
   onDragHandleMouseDown, onRotateHandleMouseDown, onScaleHandleMouseDown,
@@ -62,6 +62,12 @@ export const CanvasStage = React.memo(function CanvasStage({
   isLoading: boolean;
   activeSvg: ActiveSvg | null;
   hiddenLayers: Set<string>;
+  // Hidden elements to show anyway while the dev panel hovers an entry — the hovered
+  // element AND everything hidden beneath it, because display:none on an ancestor cannot
+  // be overridden by a descendant, and a group's ink all lives in its children.
+  previewIds: Set<string>;
+  // Which of those to outline: the entry itself, not every descendant.
+  previewOutlineId: string | null;
   backgroundLayerId: string | null;
   showSelectionOverlay: boolean;
   selectionIsEmptyText: boolean;
@@ -145,10 +151,22 @@ export const CanvasStage = React.memo(function CanvasStage({
         />
       ) : activeSvg ? (
         <>
-          {hiddenLayers.size > 0 && (
+          {/*
+            Visibility is applied as CSS rather than written into the SVG, so the document
+            keeps every element and hiding stays free to undo. `previewId` is subtracted
+            from the rule so the dev panel can show a hidden element back in place just by
+            hovering it — the element never moved, so it reappears exactly where it was,
+            which is the whole point of not restructuring the DOM when a pass takes it.
+            The outline makes it findable among artwork it may closely resemble.
+          */}
+          {(hiddenLayers.size > 0 || previewIds.size > 0) && (
             <style>{
               [...hiddenLayers]
+                .filter((id) => !previewIds.has(id))
                 .map((id) => `.svg-canvas #${CSS.escape(id)}{display:none!important}`)
+                .concat(previewOutlineId
+                  ? [`.svg-canvas #${CSS.escape(previewOutlineId)}{outline:2px dashed ${C.accent};outline-offset:2px}`]
+                  : [])
                 .join('')
             }</style>
           )}
