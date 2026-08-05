@@ -38,6 +38,7 @@ export type RemovedRecord = {
   claimedBy: string | null;  // the text row's content, or null when no row claimed it
   box: { x: number; y: number; w: number; h: number } | null; // root-space ink, for the list
   parentId: string | null;   // nearest ancestor that is also hidden; null makes this a root
+  containerLayerId: string | null; // the layer row it sits under, so its own row files beside it
 };
 
 // Which LLM backs every AI action. Labels are what the model dropdown shows; the

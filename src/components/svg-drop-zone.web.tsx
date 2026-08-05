@@ -17,6 +17,7 @@ import {
   hashString,
   isFullCanvasLayer,
   isPlainWhiteLayer,
+  isSyntheticLayerId,
   measureRemovedTextBoxes,
   normalizeColor,
   parseSvg,
@@ -30,8 +31,8 @@ import {
   effectiveFill,
   PAINTABLE_TAGS,
   canExpandLayer,
+  expansionTarget,
   collapsibleParent,
-  layerChildren,
   withOffscreenSvg
 } from '@/lib/svg-utils';
 import { C, EDITOR_CSS, FONT_STACK, SHADOW } from '@/lib/design-tokens';
@@ -321,6 +322,7 @@ const hideRemovedElements = (
   rows: TextRow[],
   anchors: Map<string, DOMRect>,
   alreadyHidden: Set<string>,
+  layerIds: Set<string>,
   logTag: string,
 ): RemovedRecord[] => {
   // Which text row, if any, claimed each element. A row naming an index is the model
@@ -337,6 +339,7 @@ const hideRemovedElements = (
   // Ids assigned first, for every element in the batch, because the parent lookup below
   // needs them all to exist — a group and its own children are routinely both in here,
   // and the child is often reached before the parent.
+  const isLayerRow = (id: string | null) => !!id && layerIds.has(id);
   const taken: { sid: string; el: Element }[] = [];
   removeIds.forEach((sid, i) => {
     const el = idMap.get(sid);
@@ -354,8 +357,12 @@ const hideRemovedElements = (
     // invisible regardless of its own rule, so this is what the panel groups on and what
     // preview has to walk.
     let parentId: string | null = null;
-    for (let p = el.parentElement; p && !parentId; p = p.parentElement) {
-      if (p.id && hiddenNow.has(p.id)) parentId = p.id;
+    // The layer row this element lives under, so its own row can be filed beside it
+    // rather than landing at the end of a list that is otherwise in document order.
+    let containerLayerId: string | null = null;
+    for (let p = el.parentElement; p && !(parentId && containerLayerId); p = p.parentElement) {
+      if (!parentId && p.id && hiddenNow.has(p.id)) parentId = p.id;
+      if (!containerLayerId && isLayerRow(p.id)) containerLayerId = p.id;
     }
     const b = anchors.get(sid);
     return {
@@ -364,6 +371,7 @@ const hideRemovedElements = (
       claimedBy: claimant.get(sid) ?? null,
       box: b ? { x: b.x, y: b.y, w: b.width, h: b.height } : null,
       parentId,
+      containerLayerId,
     };
   });
 
@@ -995,8 +1003,25 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   const toggleLayer = useCallback((id: string) => {
     setHiddenLayers((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
+      if (next.has(id)) {
+        next.delete(id);
+        // Switching a row the AI hid back on has to take its whole hidden subtree with
+        // it. A group's ink lives in children that carry their own hide rules, so
+        // clearing only the group would leave the row reading "visible" while still
+        // drawing nothing — the same trap the dev panel's preview hit.
+        for (const sub of removedSubtree(removedRecordsRef.current, id)) next.delete(sub);
+      } else {
+        next.add(id);
+      }
       return next;
+    });
+    // Shown again, it is ordinary artwork with an ordinary row — no longer something a
+    // pass is holding, so it stops being listed as removed.
+    setRemovedRecords((prev) => {
+      if (!prev.some((r) => r.id === id)) return prev;
+      const gone = removedSubtree(prev, id);
+      removedIdsRef.current = new Set([...removedIdsRef.current].filter((x) => !gone.has(x)));
+      return prev.filter((r) => !gone.has(r.id));
     });
   }, []);
 
@@ -1044,36 +1069,34 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     removedIdsRef.current = new Set([...removedIdsRef.current, ...ids]);
     setRemovedRecords((prev) => [...prev, ...records]);
     setHiddenLayers((prev) => new Set([...prev, ...ids]));
-  }, []);
 
-  // Puts hidden artwork back for good: it becomes visible, stops being a removal record,
-  // and gains a layer row so it can be selected, recoloured and hidden again by hand like
-  // anything else. Without the row it would be visible but unreachable — the panel that
-  // restored it no longer lists it.
-  const restoreRemoved = useCallback((ids: string[]) => {
-    if (ids.length === 0 || !activeSvg) return;
-    snapshotForUndo(activeSvg.content, activeSvg.layers);
-    const all = removedRecordsRef.current;
-    // Always the whole subtree: a group without its children is an empty box, and a
-    // child without its group stays invisible.
-    const restoring = new Set(ids.flatMap((id) => [...removedSubtree(all, id)]));
-    const byId = new Map(all.map((r) => [r.id, r]));
-    removedIdsRef.current = new Set([...removedIdsRef.current].filter((id) => !restoring.has(id)));
-    setRemovedRecords((prev) => prev.filter((r) => !restoring.has(r.id)));
-    setHiddenLayers((prev) => new Set([...prev].filter((id) => !restoring.has(id))));
-    setPreviewRemovedId(null);
+    // Each outermost hidden element also becomes a LAYER ROW, switched off.
+    //
+    // Otherwise what a pass took is invisible to the elements panel: the things it hides
+    // are nested inside a layer rather than being layers, so no row carries their state,
+    // and the containing row goes on looking like a normal visible layer while drawing
+    // nothing. Promoting them means the artwork the AI removed reads the same way as
+    // anything else you switched off — eye closed, click to bring it back — instead of
+    // needing a bespoke panel to find at all.
+    //
+    // Only the roots: their descendants are hidden too, but each one is inside a root
+    // and would be a row for the same piece of artwork.
     setActiveSvg((prev) => {
       if (!prev) return null;
       const existing = new Set(prev.layers.map((l) => l.id));
-      const added = ids
-        .filter((id) => !existing.has(id))
-        .map((id) => {
-          const claimedBy = byId.get(id)?.claimedBy;
-          return { id, label: claimedBy ? `${claimedBy} (restored)` : 'Restored artwork' };
-        });
-      return added.length ? { ...prev, layers: [...prev.layers, ...added] } : prev;
+      const layers = [...prev.layers];
+      for (const r of records) {
+        if (r.parentId || existing.has(r.id)) continue;
+        const label = r.claimedBy ? `${r.claimedBy} (original)` : `${r.tag} (hidden)`;
+        // Filed directly after the layer it came out of, so the list stays in roughly
+        // document order rather than collecting new rows at one end.
+        const at = r.containerLayerId ? layers.findIndex((l) => l.id === r.containerLayerId) : -1;
+        if (at === -1) layers.push({ id: r.id, label });
+        else layers.splice(at + 1, 0, { id: r.id, label });
+      }
+      return layers.length === prev.layers.length ? prev : { ...prev, layers };
     });
-  }, [activeSvg, snapshotForUndo]);
+  }, []);
 
   // Which layers render as text — drives the element list's type icon (§1.7).
   const textLayerIds = useMemo(() => {
@@ -2485,7 +2508,8 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
       // Measured before anything is hidden. The boxes are what the replacement text is
       // placed from, and they also give the dev panel something to show per entry.
       const anchors = measureRemovedTextBoxes(doc.documentElement, removeIds);
-      const hidden = hideRemovedElements(aiIdMap, removeIds, parsed.rows, anchors, hiddenLayers, 'customise');
+      const layerIdSet = new Set(activeSvg.layers.map((l) => l.id));
+      const hidden = hideRemovedElements(aiIdMap, removeIds, parsed.rows, anchors, hiddenLayers, layerIdSet, 'customise');
       for (const [, el] of aiIdMap) el.removeAttribute('data-ai-idx');
 
       const allRows = parsed.hasText ? parsed.rows : [];
@@ -2849,10 +2873,11 @@ Respond with ONLY a valid JSON object — no markdown, no code fences:
         // the text but the model chose the elements, and it can choose wrongly. Recorded
         // under the query, so the dev panel groups these as "what removing X took".
         const rstAnchors = measureRemovedTextBoxes(doc.documentElement, removeIds);
+        const layerIdSet = new Set(activeSvg.layers.map((l) => l.id));
         const rstHidden = hideRemovedElements(
           rstIdMap, removeIds,
           [{ content: query, removeIds } as TextRow],
-          rstAnchors, hiddenLayers, 'remove-specific-text',
+          rstAnchors, hiddenLayers, layerIdSet, 'remove-specific-text',
         );
         for (const [, el] of rstIdMap) el.removeAttribute('data-ai-idx');
         const contentRST = new XMLSerializer().serializeToString(doc.documentElement);
@@ -2943,8 +2968,9 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
       // Ground truth for placement: the boxes are read off the live geometry, and the
       // elements stay in the document, so this is measuring rather than salvaging.
       const stripAnchors = measureRemovedTextBoxes(doc.documentElement, stripRemoveIds);
+      const layerIdSet = new Set(activeSvg.layers.map((l) => l.id));
       const stripHidden = hideRemovedElements(
-        aiIdMap, stripRemoveIds, parsed.rows ?? [], stripAnchors, hiddenLayers, 'strip-text',
+        aiIdMap, stripRemoveIds, parsed.rows ?? [], stripAnchors, hiddenLayers, layerIdSet, 'strip-text',
       );
       console.log(`[strip-text] took ${stripHidden.length}/${stripRequested.length} element(s)`);
       // Clean up temporary index attributes from remaining elements
@@ -3116,13 +3142,15 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     if (!canExpandLayer(el)) return;
 
     snapshotForUndo(activeSvg.content, activeSvg.layers);
-    const kids = layerChildren(el!);
+    // Through any single-child wrappers, so opening a wrapped group lands on the level
+    // that actually has alternatives rather than on another identical row.
+    const kids = expansionTarget(el);
     const stamp = Date.now();
     const newLayers: SvgLayer[] = kids.map((kid, i) => {
       if (!kid.id) kid.id = `_sub_${stamp}_${i}`;
       const label =
         kid.getAttribute('data-name')?.trim() ||
-        (!kid.id.startsWith('_sub_') && !kid.id.startsWith('_layer_') ? kid.id : null) ||
+        (!isSyntheticLayerId(kid.id) ? kid.id : null) ||
         `${kid.tagName.toLowerCase().replace(/.*:/, '')} ${i + 1}`;
       return { id: kid.id, label };
     });
@@ -3169,7 +3197,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     // "_layer_2" on the way back out. Fall back to the same positional naming parseSvg
     // uses, which restores the name the row had before it was opened.
     const firstIdx = activeSvg.layers.findIndex((l) => l.id === absorbed[0].id);
-    const synthetic = /^_(layer|sub|grp|text|hidden|layer_copy)_/.test(parent.id);
+    const synthetic = isSyntheticLayerId(parent.id);
     const label =
       parent.getAttribute('data-name')?.trim() ||
       parent.getAttribute('inkscape:label')?.trim() ||
@@ -3565,8 +3593,6 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
           open={removedPanelOpen}
           onSetOpen={setRemovedPanelOpen}
           onPreview={setPreviewRemovedId}
-          onRestore={(id) => restoreRemoved([id])}
-          onRestoreGroup={restoreRemoved}
         />
       )}
     </div>

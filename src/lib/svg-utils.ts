@@ -34,10 +34,34 @@ export const SKIP_TAGS = new Set([
 export const layerChildren = (el: Element): Element[] =>
   Array.from(el.children).filter((c) => !SKIP_TAGS.has(c.tagName.toLowerCase()));
 
-// Whether a layer can usefully be opened into sublayers: it has to hold more than one
-// visual child, or "expanding" would just swap one row for another identical one.
+// The rows a layer should open into: its visual children, but seen THROUGH any chain of
+// single-child wrapper groups.
+//
+// Stopping at the first level was right about the symptom and wrong about the cure —
+// opening a one-child group does swap a row for an identical-looking row, so it was
+// refused outright. But a `<g>` wrapping a `<g>` of twelve paths is then a dead end you
+// can never open, even though one level down is exactly the list you want. Descending
+// costs nothing and lands on the first level that actually has something to choose
+// between. Same reasoning as expandWrappedLayers above, which already unwraps degenerate
+// wrappers when the top-level layer list would otherwise be useless.
+//
+// A wrapper around a single LEAF is still not expandable: descending reaches a childless
+// element, so this returns nothing and the caller correctly refuses.
+const MAX_WRAPPER_DEPTH = 16; // guard against a pathological or cyclic document
+export function expansionTarget(el: Element | null): Element[] {
+  let cur = el;
+  for (let depth = 0; cur && depth < MAX_WRAPPER_DEPTH; depth++) {
+    const kids = layerChildren(cur);
+    if (kids.length !== 1) return kids;
+    cur = kids[0];
+  }
+  return [];
+}
+
+// Whether a layer can usefully be opened into sublayers: somewhere at or below it there
+// has to be a level holding more than one visual child.
 export const canExpandLayer = (el: Element | null): boolean =>
-  !!el && layerChildren(el).length > 1;
+  expansionTarget(el).length > 1;
 
 // The group a layer sits inside and could be folded back into — the way out of a group
 // that was drilled into. Null at the top of the document, and null when the parent is
@@ -105,7 +129,7 @@ export function parseSvg(raw: string): { content: string; layers: SvgLayer[] } {
       const label =
         child.getAttribute('data-name')?.trim() ||
         child.getAttribute('inkscape:label')?.trim() ||
-        (!child.id.startsWith('_layer_') ? child.id : null) ||
+        (!isSyntheticLayerId(child.id) ? child.id : null) ||
         `Layer ${layers.length + 1}`;
 
       layers.push({ id: child.id, label });
@@ -118,6 +142,19 @@ export function parseSvg(raw: string): { content: string; layers: SvgLayer[] } {
     return { content: raw, layers: [] };
   }
 }
+
+// Ids this app generated are plumbing, not names. Showing one turns a layer row into
+// "_layer_2" or "_hidden_1785900720076_3" instead of something you can recognise, so
+// every place that derives a label from an element has to be able to tell them apart.
+//
+// One predicate rather than a check per call site, because they drifted: the three that
+// existed tested different prefixes, and adding `_hidden_` ids — which now stay in the
+// document because the AI passes hide rather than delete — meant a group opened into its
+// parts listed eight raw ids. The prefixes are the ones minted by parseSvg (`_layer_`),
+// expandLayer (`_sub_`), collapseLayer (`_grp_`), appendTextRowLayers (`_text_`),
+// hideRemovedElements (`_hidden_`) and duplicateLayer (`_layer_copy_`).
+export const isSyntheticLayerId = (id: string | null | undefined): boolean =>
+  !!id && /^_(layer|sub|grp|text|hidden|layer_copy)_/.test(id);
 
 // Returns the element's bounding box in SVG root coordinate space,
 // correctly accounting for the element's own transform attribute.
