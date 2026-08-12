@@ -1177,6 +1177,11 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   // side-panel text input so keyboard input edits it immediately.
   const handleCanvasClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
     if (!activeSvg?.layers.length) return;
+    // A drag on the artwork ends with a click on whatever sits under the pointer at
+    // release. That click must not re-select: a multi-layer selection dragged by one of
+    // its members would collapse to that member, and a layer dragged over another would
+    // hand the selection to the layer it landed on.
+    if (dragMovedRef.current) { dragMovedRef.current = false; return; }
     const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
     if (!svgEl) return;
     // Ignore clicks on the selection overlay (drag handle)
@@ -1696,21 +1701,23 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     });
   }, []);
 
-  // Snapshots the current transform of every selected layer, so a gesture can replay
-  // itself from the grab state on each mousemove instead of stacking transforms.
-  const captureBaseTransforms = useCallback((svgEl: SVGSVGElement) => {
+  // Snapshots the current transform of the layers a gesture is about to move, so it can
+  // replay itself from the grab state on each mousemove instead of stacking transforms.
+  // Takes the ids explicitly: a drag started on the artwork picks its layer from the
+  // pointer, and that layer's selection state hasn't been committed yet at grab time.
+  const captureBaseTransforms = useCallback((svgEl: SVGSVGElement, ids: string[]) => {
     const baseTransforms: Record<string, string> = {};
-    selectionIds.forEach((id) => {
+    ids.forEach((id) => {
       const layerEl = svgEl.querySelector(`#${CSS.escape(id)}`);
       if (layerEl) baseTransforms[id] = layerEl.getAttribute('transform') ?? '';
     });
     return baseTransforms;
-  }, [selectionIds]);
+  }, []);
 
-  // mousedown on canvas: drag every selected non-background layer
-  const handleDragHandleMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    e.stopPropagation();
-    if (!selectionIds.length || !activeSvg?.layers.length) return;
+  // Arms a move gesture on `ids` from a grab at the event's position. Shared by the
+  // overlay's move handle and by grabbing the artwork itself.
+  const beginLayerDrag = useCallback((e: React.MouseEvent, ids: string[]) => {
+    if (!ids.length || !activeSvg?.layers.length) return;
     const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
     if (!svgEl) return;
 
@@ -1721,12 +1728,48 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
 
     snapshotForUndo(activeSvg.content, activeSvg.layers);
     setCanvasDrag({
-      layerIds: selectionIds,
+      layerIds: ids,
       startClientX: e.clientX, startClientY: e.clientY,
       startSvgX: svgPt.x,     startSvgY: svgPt.y,
-      baseTransforms: captureBaseTransforms(svgEl),
+      baseTransforms: captureBaseTransforms(svgEl, ids),
     });
-  }, [activeSvg, selectionIds, captureBaseTransforms, snapshotForUndo]);
+  }, [activeSvg, captureBaseTransforms, snapshotForUndo]);
+
+  // mousedown on the overlay's move handle: drag every selected non-background layer
+  const handleDragHandleMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    e.stopPropagation();
+    beginLayerDrag(e, selectionIds);
+  }, [beginLayerDrag, selectionIds]);
+
+  // mousedown on the artwork: press-and-hold anywhere inside a layer drags it, so the
+  // corner handle is a convenience rather than the only way to move something. The
+  // layer under the pointer is found the same way a canvas click finds it.
+  //   • grabbing a layer that's already part of the selection moves the whole selection
+  //   • grabbing anything else selects it first, then moves just that layer
+  //   • shift is the selection-building gesture, so it never starts a drag
+  //   • the background layer is locked, and the overlay's own handles opt out
+  // A gesture that never moved falls through to the click handler as a plain select.
+  const handleCanvasMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.button !== 0 || e.shiftKey) return;
+    if (!activeSvg?.layers.length) return;
+    if ((e.target as Element).closest?.('[data-sel-overlay]')) return;
+    const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
+    if (!svgEl) return;
+
+    const layerIds = new Set(activeSvg.layers.map((l) => l.id));
+    let hitId: string | null = null;
+    for (let el = e.target as Element | null; el && el !== (svgEl as Element); el = el.parentElement) {
+      if (layerIds.has(el.id)) { hitId = el.id; break; }
+    }
+    if (!hitId || hitId === backgroundLayerId) return;
+
+    if (selectedLayers.has(hitId)) {
+      beginLayerDrag(e, selectionIds);
+    } else {
+      selectOne(hitId);
+      beginLayerDrag(e, [hitId]);
+    }
+  }, [activeSvg, backgroundLayerId, selectedLayers, selectionIds, selectOne, beginLayerDrag]);
 
   // mousedown on rotate handle: rotate every selected non-background layer about the
   // selection's shared centre
@@ -1753,7 +1796,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       cx, cy,
       startClientX: e.clientX, startClientY: e.clientY,
       startAngle,
-      baseTransforms: captureBaseTransforms(svgEl),
+      baseTransforms: captureBaseTransforms(svgEl, selectionIds),
     });
   }, [activeSvg, selectionIds, captureBaseTransforms, snapshotForUndo]);
 
@@ -1786,7 +1829,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       cx, cy,
       startClientX: e.clientX, startClientY: e.clientY,
       startDist,
-      baseTransforms: captureBaseTransforms(svgEl),
+      baseTransforms: captureBaseTransforms(svgEl, selectionIds),
     });
   }, [activeSvg, selectionIds, captureBaseTransforms, snapshotForUndo]);
 
@@ -3440,6 +3483,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
             overlayRef={overlayRef}
             sizeBadgeRef={sizeBadgeRef}
             onCanvasClick={handleCanvasClick}
+            onCanvasMouseDown={handleCanvasMouseDown}
             aiLoading={aiLoading}
             aiStatusMsg={aiStatusMsg}
             isLoading={isLoading}

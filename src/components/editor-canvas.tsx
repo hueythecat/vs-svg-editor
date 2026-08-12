@@ -45,7 +45,7 @@ const handleBase: React.CSSProperties = {
 
 export const CanvasStage = React.memo(function CanvasStage({
   svgCanvasRef, overlayRef, sizeBadgeRef,
-  onCanvasClick,
+  onCanvasClick, onCanvasMouseDown,
   aiLoading, aiStatusMsg,
   isLoading, activeSvg,
   hiddenLayers, previewIds, previewOutlineId, backgroundLayerId,
@@ -57,6 +57,7 @@ export const CanvasStage = React.memo(function CanvasStage({
   overlayRef: React.RefObject<HTMLDivElement | null>;
   sizeBadgeRef: React.RefObject<HTMLSpanElement | null>;
   onCanvasClick: (e: React.MouseEvent<HTMLDivElement>) => void;
+  onCanvasMouseDown: (e: React.MouseEvent<HTMLDivElement>) => void;
   aiLoading: boolean;
   aiStatusMsg: string;
   isLoading: boolean;
@@ -93,9 +94,13 @@ export const CanvasStage = React.memo(function CanvasStage({
       // shift-select on the canvas is unaffected. Any selection made before the canvas
       // was touched is collapsed here too, so nothing is left highlighted.
       onMouseDown={(e) => {
-        if (!e.shiftKey) return;
-        e.preventDefault();
-        window.getSelection()?.removeAllRanges();
+        if (e.shiftKey) {
+          e.preventDefault();
+          window.getSelection()?.removeAllRanges();
+        }
+        // Press-and-hold inside a layer starts a move; the parent decides whether this
+        // press landed on something draggable.
+        onCanvasMouseDown(e);
       }}
       style={{
         position: 'absolute',

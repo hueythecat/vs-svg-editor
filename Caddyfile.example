@@ -1,0 +1,117 @@
+# Caddy v2 production config. Copy to /etc/caddy/Caddyfile and set the domain.
+#
+#   sudo cp Caddyfile.example /etc/caddy/Caddyfile
+#   sudo caddy validate --config /etc/caddy/Caddyfile
+#   sudo systemctl reload caddy
+#
+# Caddy terminates TLS and obtains/renews the certificate itself — there is no nginx and
+# no certbot in this stack. For that to work the domain's A/AAAA record must already
+# point here and BOTH :80 and :443 must be open: :80 carries the ACME challenge and the
+# HTTP->HTTPS redirect Caddy installs automatically.
+#
+# Rate limiting is NOT here — Caddy has no built-in limit_req. It lives in
+# server/index.mjs, which is the better layer for it anyway since only that layer can
+# tell the expensive AI proxies apart from ordinary asset requests.
+
+{
+	# Delivery address for expiry / renewal-failure notices. Set this — without it a
+	# failing renewal is silent until the cert actually expires.
+	email ops@example.com
+
+	servers {
+		# An AI customise pass can hold a request open for well over a minute. These are
+		# deliberately generous; trimming them to "normal" web values will cut off
+		# in-flight passes and bill the tokens for nothing.
+		timeouts {
+			read_header 10s
+			idle 5m
+		}
+	}
+}
+
+editor.example.com {
+	encode zstd gzip
+
+	log {
+		output file /var/log/caddy/vs-svg-editor.log {
+			roll_size 50MiB
+			roll_keep 10
+		}
+		format json
+	}
+
+	header {
+		# HSTS. Add `preload` and submit to hstspreload.org only once you are certain
+		# every subdomain is HTTPS-only — it is very hard to undo.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-Frame-Options "DENY"
+		Permissions-Policy "geolocation=(), microphone=(), camera=(), interest-cohort=()"
+
+		# Caddy sets this by default; drop it.
+		-Server
+	}
+
+	# --- Content-Security-Policy ---------------------------------------------------
+	#
+	# This matters more than usual here: editor-canvas.tsx renders imported SVG through
+	# dangerouslySetInnerHTML, guarded only by the regex stripScripts() in svg-utils.ts.
+	# A CSP is the backstop for whatever that regex misses.
+	#
+	# Shipped as Report-Only so a mistake degrades reporting rather than the product.
+	# VERIFY, THEN ENFORCE: load the editor, run a full customise + export, confirm the
+	# browser console logs no violations, then rename the header to
+	# `Content-Security-Policy` and reload Caddy.
+	#
+	# 'unsafe-inline' in script-src is the weakest part and the first thing to try
+	# removing — Expo's SSR output may or may not inline a hydration script depending on
+	# the export. Test with it removed before assuming it's needed.
+	#
+	# frame-ancestors 'none' assumes the editor is NOT embedded. If it is launched in an
+	# iframe from vectorstock, change it to that origin and drop X-Frame-Options above,
+	# or the editor will render as a blank frame.
+	header Content-Security-Policy-Report-Only "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+
+	# --- Blocked in production -------------------------------------------------------
+	#
+	# /samples/* — public/samples/*.svg are copied verbatim into dist/client by the
+	# export, so without this they are freely downloadable artwork with no app involved.
+	# /api/download — unzips from assets/downloads/ and only ever backed the dev rail.
+	# Both are also blocked in server/index.mjs, so a mistake here isn't fatal.
+	handle /samples/* {
+		respond 404
+	}
+	handle /api/download* {
+		respond 404
+	}
+
+	# --- Upstream ---------------------------------------------------------------------
+	#
+	# server/index.mjs serves dist/client itself (with correct immutable caching on the
+	# hashed /_expo assets), so Caddy proxies everything rather than splitting static and
+	# dynamic. One place owns the cache policy.
+	#
+	# Caddy already forwards X-Forwarded-For / X-Forwarded-Proto and preserves Host, and
+	# the app trusts those only from loopback — so there is no proxy_set_header block to
+	# write, and a spoofed X-Forwarded-For cannot dodge the rate limiter.
+	handle {
+		reverse_proxy 127.0.0.1:8081 {
+			health_uri /health
+			health_interval 10s
+			health_timeout 3s
+
+			# Long enough for an AI pass to finish. See the timeouts note above.
+			transport http {
+				response_header_timeout 120s
+			}
+		}
+	}
+
+	# /api/claude carries base64 PNG renders of the canvas to the vision model, so bodies
+	# run to a few MB. Generous, but not unbounded.
+	request_body {
+		max_size 10MB
+	}
+}
