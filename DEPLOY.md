@@ -164,7 +164,9 @@ pm2 reload ecosystem.config.js --update-env
 ## 7. Verify
 
 1. `node -v` → ≥ 20.19; `pm2 -v`; `sudo caddy validate --config /etc/caddy/Caddyfile`
-2. `dist/server/` and `dist/client/index.html` exist
+2. `dist/client/_expo/` and `dist/server/_expo/routes.json` exist. Note there is **no
+   `dist/client/index.html`** — with `web.output: "server"` the prerendered HTML lands in
+   `dist/server/`, and `dist/client/` holds only hashed assets
 3. `curl -s http://127.0.0.1:8081/health` → `{"ok":true,...}`
 4. `curl -s http://127.0.0.1:8081/api/review/list | head -c 200` → JSON, not a 500. Proves
    `API_HOST` reached the runtime process.
