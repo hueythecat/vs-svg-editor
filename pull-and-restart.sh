@@ -1,15 +1,34 @@
 #!/usr/bin/env bash
 # Deploy hook: pull main, rebuild the web export if anything changed, reload pm2.
 #
+#   ./pull-and-restart.sh             pull main, rebuild only if HEAD moved
+#   ./pull-and-restart.sh --no-pull   rebuild the checkout as it stands, unconditionally
+#
 # The server runs the production export (dist/), not the Metro dev server, so a git
 # pull on its own ships nothing — `expo export` is the step that puts new code in
 # front of users. That step used to be commented out here, which meant deploys
 # silently did nothing.
 #
+# --no-pull is for the changes a pull would never notice: an edited .env, or a fix
+# applied directly on the server to be tried before it's committed. It runs the same
+# swap-and-verify path as a real deploy, so the part that can take production down has
+# one implementation rather than a hand-rolled copy in a second script.
+#
 # Safe to run from cron or a webhook: every failure path leaves the previously
 # exported build in place and still serving.
 
 set -uo pipefail
+
+# Parsed before the log redirect below, so a typo'd flag reports to the terminal that
+# typed it rather than disappearing into the deploy log.
+PULL=1
+for arg in "$@"; do
+  case "$arg" in
+    --no-pull) PULL=0 ;;
+    -h|--help) sed -n '2,5p' "${BASH_SOURCE[0]}" | cut -c3-; exit 0 ;;
+    *) echo "unknown option: $arg (try --help)" >&2; exit 2 ;;
+  esac
+done
 
 APP_NAME="vs-svg-editor"
 # Derived from the script's own location rather than hardcoded, so the checkout can
@@ -18,30 +37,52 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_DIR="${LOG_DIR:-$HOME/logs}"
 
 mkdir -p "$LOG_DIR"
-exec >> "$LOG_DIR/$APP_NAME.log" 2>&1
+# Cron and webhooks have no terminal, so everything is written to the log. A manual run
+# does have one, and a deploy that prints nothing for the minute the export takes is
+# indistinguishable from one that never started — so tee to both when there's a TTY.
+if [ -t 1 ]; then
+  exec > >(tee -a "$LOG_DIR/$APP_NAME.log") 2>&1
+else
+  exec >> "$LOG_DIR/$APP_NAME.log" 2>&1
+fi
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S'): $*"; }
 
 cd "$REPO_DIR" || { log "cd to $REPO_DIR failed"; exit 1; }
 
-BEFORE=$(git rev-parse HEAD)
-if ! git pull origin main; then
-  log "git pull failed — previous build still serving"
-  exit 1
-fi
-AFTER=$(git rev-parse HEAD)
+NEED_NPM_CI=0
 
-if [ "$BEFORE" = "$AFTER" ]; then
-  log "No changes."
-  exit 0
-fi
+if [ "$PULL" = 1 ]; then
+  BEFORE=$(git rev-parse HEAD)
+  if ! git pull origin main; then
+    log "git pull failed — previous build still serving"
+    exit 1
+  fi
+  AFTER=$(git rev-parse HEAD)
 
-log "Changes detected ($BEFORE -> $AFTER), rebuilding..."
-CHANGED=$(git diff --name-only "$BEFORE" "$AFTER")
+  if [ "$BEFORE" = "$AFTER" ]; then
+    log "No changes."
+    exit 0
+  fi
+
+  log "Changes detected ($BEFORE -> $AFTER), rebuilding..."
+  if git diff --name-only "$BEFORE" "$AFTER" | grep -qE '^package(-lock)?\.json$'; then
+    NEED_NPM_CI=1
+  fi
+else
+  # Unconditional: --no-pull is only ever run because something changed that git can't
+  # see, so there is nothing here to compare against and no reason to second-guess it.
+  log "--no-pull — rebuilding the checkout as it stands"
+  # No commit range to inspect, so the lockfile's mtime stands in for the diff. Also
+  # true when node_modules is absent entirely, which wants an install just the same.
+  if [ package-lock.json -nt node_modules ]; then
+    NEED_NPM_CI=1
+  fi
+fi
 
 # npm ci rather than npm install: on a server the lockfile is the source of truth,
 # and ci rebuilds node_modules from it instead of mutating what's already there.
-if echo "$CHANGED" | grep -qE '^package(-lock)?\.json$'; then
+if [ "$NEED_NPM_CI" = 1 ]; then
   log "Dependencies changed, running npm ci..."
   if ! npm ci; then
     log "npm ci failed — aborting, previous build still serving"
@@ -91,9 +132,13 @@ fi
 # A reload that "succeeds" while the app crash-loops on boot still reports success to
 # pm2, so confirm the process actually answers before calling the deploy done.
 HEALTH_URL="${HEALTH_URL:-http://127.0.0.1:8081/health}"
+# Read here rather than reusing the pull's AFTER, which doesn't exist under --no-pull.
+# Matches what app.config.js stamped into the bundle, +dirty and all, so the line in the
+# log can be compared against what /api/version reports.
+VERSION=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
 for attempt in $(seq 1 10); do
   if curl -fsS --max-time 3 "$HEALTH_URL" > /dev/null; then
-    log "Deployed $AFTER — health check passed"
+    log "Deployed $VERSION — health check passed"
     exit 0
   fi
   sleep 2

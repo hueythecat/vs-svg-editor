@@ -166,13 +166,33 @@ to `~/logs/vs-svg-editor.log`. Safe for cron or a webhook.
 It reloads via `pm2 reload ecosystem.config.js --update-env`, so a `.env` edit committed to the
 server takes effect on the next deploy without any extra step.
 
-To apply a `.env` change **without** deploying, run that same command by hand — `pm2 reload
-vs-svg-editor` replays the environment pm2 stored at start and will silently keep serving the
-old value:
+### Rebuilding without a pull
+
+A `git pull` is not the only thing that changes what's served — an edited `.env`, or a fix
+applied directly on the box to try before committing it, moves nothing that the default run
+would notice, and it exits with "No changes." and rebuilds nothing.
+
+```bash
+./pull-and-restart.sh --no-pull
+```
+
+Same export, swap, reload and health check, minus the pull, and it rebuilds unconditionally.
+Prefer this over a hand-rolled rebuild script: the risky part is the swap, and a second copy of
+it is a second chance to get it wrong. Output tees to the terminal as well as the log when run
+by hand.
+
+For an `EXPO_PUBLIC_*` change a rebuild is the only thing that works — those are inlined into
+the client bundle at export time, and no amount of reloading will change them.
+
+For an unprefixed, server-only var (`CLAUDE_API_KEY`, `API_HOST`, `EXPO_ADMIN`, …) the reload
+alone is enough, since the routes read `process.env` at request time:
 
 ```bash
 pm2 reload ecosystem.config.js --update-env
 ```
+
+Use that exact form. `pm2 reload vs-svg-editor` replays the environment pm2 recorded at start
+and will silently keep serving the old value.
 
 ## 7. Verify
 
