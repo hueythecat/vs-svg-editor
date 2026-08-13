@@ -13,8 +13,8 @@ const path = require('node:path');
 
 // pm2 does not read .env, and the API routes in src/app/api/**/+api.ts read their
 // secrets from process.env at request time — so an unexported var doesn't fail at
-// boot, it fails on the first Customise pass with a confusing upstream error. Load
-// the file here and hand the values over explicitly.
+// boot, it fails on the first request that needs it, with a confusing error from
+// whatever it was talking to. Load the file here and hand the values to pm2.
 //
 // Only unprefixed vars need this. EXPO_PUBLIC_* are inlined into the client bundle
 // at export time and are already baked into dist/ by the time pm2 sees them.
@@ -41,17 +41,25 @@ module.exports = {
       script: 'server/index.mjs',
       cwd: __dirname,
       env: {
+        // Whatever .env holds, forwarded wholesale. This used to be an allowlist of the
+        // four secrets that existed at the time, which made every new server-only var a
+        // silent deploy trap: adding EXPO_ADMIN to .env changed nothing, because this
+        // file — gitignored, so private to each host — still didn't pass it on, and the
+        // route answered 503 while the deploy reported success. Naming them here bought
+        // nothing that DEPLOY.md's .env listing doesn't already give.
+        //
+        // EXPO_PUBLIC_* come along too and are harmless: they were inlined into dist/ at
+        // export time and nothing reads them from the environment.
+        //
+        // Never prefix a secret with EXPO_PUBLIC_ — that puts it in the client bundle,
+        // readable by anyone who opens devtools.
+        ...fileEnv,
+        // Below the spread, so how this process is run can't be changed by .env.
         NODE_ENV: 'production',
         PORT: '8081',
         // Loopback only — Caddy is the sole ingress. Binding 0.0.0.0 would expose the
         // app with no TLS and none of the edge rules.
         HOST: '127.0.0.1',
-        // Server-only — never prefix these with EXPO_PUBLIC_ or they end up in the
-        // client bundle, readable by anyone who opens devtools.
-        CLAUDE_API_KEY: fileEnv.CLAUDE_API_KEY,
-        KIMI_API_KEY: fileEnv.KIMI_API_KEY,
-        API_HOST: fileEnv.API_HOST,
-        API_COOLDOWN: fileEnv.API_COOLDOWN,
       },
       max_memory_restart: '1G',
       autorestart: true,
@@ -67,7 +75,9 @@ module.exports = {
   ],
 };
 
-// Note: `pm2 reload vs-svg-editor` replays the config pm2 already has stored, so it
-// will NOT pick up edits to .env. After changing a secret:
+// Note: `pm2 reload vs-svg-editor` replays the environment pm2 stored when the app was
+// started, so it will NOT pick up edits to .env. After changing a secret by hand:
 //
 //   pm2 reload ecosystem.config.js --update-env
+//
+// pull-and-restart.sh reloads this way already, so a deploy picks up .env on its own.

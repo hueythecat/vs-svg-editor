@@ -96,8 +96,14 @@ CLAUDE_API_KEY=...
 KIMI_API_KEY=...
 API_HOST=https://dev.vectorstock.com
 API_COOLDOWN=...
+EXPO_ADMIN=user:password
 EXPO_PUBLIC_FONT_SUGGESTION_LIMIT=5
 ```
+
+`EXPO_ADMIN` is the credential behind the sign-in gate on non-production builds
+(`src/app/api/auth+api.ts`). `user:password`, or a bare value to accept any username with that
+password. Unset, `/api/auth` answers 503 and nobody can get past the gate. It also signs the
+session cookie, so changing it signs everyone out — which is what you'd want.
 
 ```bash
 chmod 600 .env && sudo chown svgapp:svgapp .env
@@ -112,7 +118,9 @@ The two fail in completely different ways, which is what makes this confusing:
   as a literal `process.env.EXPO_PUBLIC_…` expression — see `src/lib/env.ts`.
 - **Unprefixed vars are read at runtime** by the API routes. A missing one doesn't fail at boot,
   it fails on the first request that needs it. `ecosystem.config.example.js` parses `.env` and
-  passes them explicitly, because pm2 does not read `.env`.
+  hands the whole lot to pm2, because pm2 does not read `.env` itself. Adding a new server-only
+  var therefore means editing `.env` and nothing else — but the running process still has to be
+  given the new environment, see §6.
 - `EXPO_PUBLIC_APP_ENV` can stay unset — `src/lib/env.ts:17` falls back to `!__DEV__`, so a
   production export already drops the dev rail and AI tools panel. Set it to `production` if
   you'd rather that not depend on the bundler.
@@ -155,7 +163,12 @@ staging directory, swaps it into `dist/`, reloads pm2, then **polls `/health` an
 if the new build doesn't answer**. Every failure path leaves the previous build serving. Logs
 to `~/logs/vs-svg-editor.log`. Safe for cron or a webhook.
 
-After changing a secret in `.env`, a plain reload won't pick it up:
+It reloads via `pm2 reload ecosystem.config.js --update-env`, so a `.env` edit committed to the
+server takes effect on the next deploy without any extra step.
+
+To apply a `.env` change **without** deploying, run that same command by hand — `pm2 reload
+vs-svg-editor` replays the environment pm2 stored at start and will silently keep serving the
+old value:
 
 ```bash
 pm2 reload ecosystem.config.js --update-env

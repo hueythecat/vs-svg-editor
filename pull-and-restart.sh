@@ -67,7 +67,23 @@ rm -rf "$REPO_DIR/dist.old"
 mv "$STAGE" "$REPO_DIR/dist"
 rm -rf "$REPO_DIR/dist.old"
 
-if ! pm2 reload "$APP_NAME"; then
+# Reload from the ecosystem file with --update-env, not by name. Reloading by name
+# replays the environment pm2 recorded when the app was first started, so a secret added
+# or changed in .env since then never reaches the process: the deploy reports success and
+# the route that needs the value keeps failing. Re-reading the config file is what makes
+# .env part of a deploy rather than a manual step someone has to remember.
+#
+# Falls back to the name if there's no config file, for a host that started the app some
+# other way — that reload is still better than none.
+ECOSYSTEM="$REPO_DIR/ecosystem.config.js"
+if [ -f "$ECOSYSTEM" ]; then
+  RELOAD=(pm2 reload "$ECOSYSTEM" --update-env)
+else
+  log "No ecosystem.config.js — reloading by name, .env changes will not be picked up"
+  RELOAD=(pm2 reload "$APP_NAME")
+fi
+
+if ! "${RELOAD[@]}"; then
   log "pm2 reload failed"
   exit 1
 fi
