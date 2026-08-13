@@ -19,6 +19,18 @@ export const IS_PRODUCTION_UI = APP_ENV ? APP_ENV === 'production' : !__DEV__;
 // Convenience inverse — most call sites read better as "show the dev thing".
 export const SHOW_DEV_UI = !IS_PRODUCTION_UI;
 
+// The commit this bundle was built from — short hash, +dirty when the build machine had
+// uncommitted changes. Re-exported from the module app.config.js generates at build time;
+// see that file for why it arrives as a generated literal rather than an env var. Shown
+// in the dev rail's title and served by /api/version, so a deployment that quietly failed
+// to rebuild can be spotted by its hash rather than by its behaviour.
+//
+// Frozen when the bundler starts, not when the page loads: committing while a dev server
+// is running won't change what it reports until Metro restarts.
+//
+// 'nogit' means the build machine had no git to ask.
+export { CODE_VERSION } from './code-version';
+
 // How many font suggestions an AI pass asks for, and how many it keeps.
 //
 // One number for both, because they used to disagree: the customise pass asked for "2–4"

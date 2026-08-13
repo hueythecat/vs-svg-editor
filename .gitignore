@@ -8,6 +8,9 @@ node_modules/
 dist/
 web-build/
 expo-env.d.ts
+# Written by app.config.js on every start/export — committing it would put the build
+# machine's dirty flag in git and dirty the tree on every run.
+src/lib/code-version.ts
 
 # Deploy scratch — pull-and-restart.sh exports here, then swaps into dist/
 .dist-staging/

@@ -53,7 +53,10 @@ fi
 # export that dies partway through can't leave a half-written dist/ being served.
 STAGE="$REPO_DIR/.dist-staging"
 rm -rf "$STAGE"
-if ! npx expo export --platform web --output-dir "$STAGE"; then
+# The local binary rather than `npx`: the service user that runs this may not have npx
+# on PATH even when node is installed, and npx would silently try to fetch a package
+# instead of failing outright.
+if ! ./node_modules/.bin/expo export --platform web --output-dir "$STAGE"; then
   log "expo export failed — aborting, previous build still serving"
   rm -rf "$STAGE"
   exit 1

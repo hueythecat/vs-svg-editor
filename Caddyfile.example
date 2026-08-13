@@ -79,7 +79,9 @@ editor.example.com {
 	# /samples/* — public/samples/*.svg are copied verbatim into dist/client by the
 	# export, so without this they are freely downloadable artwork with no app involved.
 	# /api/download — unzips from assets/downloads/ and only ever backed the dev rail.
-	# Both are also blocked in server/index.mjs, so a mistake here isn't fatal.
+	# /api/download is ALSO blocked in server/index.mjs, so a mistake here isn't fatal for
+# that one. /samples/* is blocked here ONLY — delete this block and the artwork is
+# public immediately, with nothing behind it.
 	handle /samples/* {
 		respond 404
 	}

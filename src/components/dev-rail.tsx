@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 
 import { C, FONT_STACK, SHADOW } from '@/lib/design-tokens';
+import { CODE_VERSION } from '@/lib/env';
 import { clearAiCache, isAiCacheEnabled, setAiCacheEnabled } from '@/lib/ai-cache';
 import {
   isIgnoreCanCustomise, isIgnoreCooldownPrompt, isIgnoreHasCustomised,
@@ -313,8 +314,18 @@ export function DevRail<S extends Sample>({
           {/* Header */}
           <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '11px 12px 8px' }}>
             <span style={{ color: C.devAccent, display: 'flex' }}><SettingsIcon size={11} /></span>
-            <span style={{ flex: 1, fontSize: 9, fontWeight: 700, letterSpacing: '.6px', color: C.devAccent }}>
-              DEV — DOWNLOADS
+            {/* The build's commit, not a section label: this rail's title is the one
+                place the deployed code identifies itself, so a production box still
+                serving last week's export can be caught by reading it. */}
+            <span
+              title={`Built from commit ${CODE_VERSION}`}
+              style={{
+                flex: 1, minWidth: 0, fontSize: 9, fontWeight: 700, letterSpacing: '.6px',
+                color: C.devAccent,
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}
+            >
+              DEV — {CODE_VERSION}
             </span>
             <button
               type="button"
