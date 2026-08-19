@@ -271,7 +271,8 @@ export const CanvasStage = React.memo(function CanvasStage({
                 <ResizeIcon size={11} />
               </div>
 
-              {/* Size badge — text written by the parent's positioning pass */}
+              {/* Size badge — text written by the parent's positioning pass, which adds
+                  the x/y position to it while the selection is being moved */}
               <span
                 ref={sizeBadgeRef}
                 style={{

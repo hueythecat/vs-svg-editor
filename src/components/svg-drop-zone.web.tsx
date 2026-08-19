@@ -131,6 +131,27 @@ const remapClonedIds = (el: Element, newBaseId: string, origId: string) => {
   fixRefs(el);
 };
 
+// The wrappers an element is drawn inside, from just below the root <svg> down to its own
+// parent. Cloning a layer out of its group and into a paste group at the root would drop
+// every transform, clip and inherited paint those wrappers contribute, which is what this
+// is read for.
+const ancestorChain = (el: Element, root: Element): Element[] => {
+  const chain: Element[] = [];
+  for (let n = el.parentElement; n && n !== root; n = n.parentElement) chain.unshift(n);
+  return chain;
+};
+
+// Re-creates that chain around a clone as shallow copies of the wrappers, so the clone
+// still renders exactly where the original does. Ids are stripped: they name the original
+// elements and duplicating one would give the document two nodes answering to it.
+const wrapInAncestorChain = (clone: Element, chain: Element[]): Element =>
+  chain.reduceRight((inner, anc) => {
+    const w = anc.cloneNode(false) as Element;
+    w.removeAttribute('id');
+    w.appendChild(inner);
+    return w;
+  }, clone);
+
 // Shared text-detection + element-identification instructions used by BOTH the
 // strip-text pass and the customise pass, so the two never drift apart. Callers
 // wrap this with their own intro line, any extra tasks (e.g. font suggestions),
@@ -611,7 +632,9 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   };
   const undoStackRef             = useRef<HistoryEntry[]>([]);
   const redoStackRef             = useRef<HistoryEntry[]>([]);
-  const layerClipboardRef        = useRef<string | null>(null);
+  // The layer ids Ctrl/Cmd+C captured, in document order. A multi-layer copy pastes as
+  // one nested group, so the whole selection travels together rather than one id.
+  const layerClipboardRef        = useRef<string[]>([]);
   const [undoCount, setUndoCount] = useState(0);
   const [redoCount, setRedoCount] = useState(0);
   const textEditSnappedRef = useRef(false);
@@ -620,6 +643,11 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   const textContentRef  = useRef<HTMLInputElement>(null);
   const overlayRef      = useRef<HTMLDivElement>(null);
   const sizeBadgeRef    = useRef<HTMLSpanElement>(null);
+  // Whether a move is in progress — the badge only carries x/y while one is. Held in a
+  // ref, not state, because the overlay is positioned by direct DOM writes and must not
+  // trigger a re-render per mousemove.
+  const repositioningRef   = useRef(false);
+  const repositionTimerRef = useRef<number | null>(null);
   // Shown when an AI action is invoked on a gated asset (edit === 0).
   const [showUpsell, setShowUpsell] = useState(false);
   // Shown once a /<uuid> asset has loaded and turns out to be inside the customise
@@ -1227,6 +1255,26 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     }
   }, [activeSvg, selectOne]);
 
+  // Switches the x/y half of the badge on for the duration of a move. Switching it off
+  // repaints rather than waiting for the next reposition: the gesture that ends it may be
+  // the last thing that happens — an arrow-key nudge timing out, or a drag released
+  // without moving — and the coordinate would otherwise stay on screen for good.
+  const setRepositioning = useCallback((on: boolean) => {
+    if (repositionTimerRef.current !== null) {
+      clearTimeout(repositionTimerRef.current);
+      repositionTimerRef.current = null;
+    }
+    repositioningRef.current = on;
+    if (!on) positionOverlayRef.current();
+  }, []);
+
+  // Arrow-key nudges have no gesture end to switch the readout off, so each press keeps
+  // it up a moment longer and the last one lets it go.
+  const flashRepositioning = useCallback(() => {
+    setRepositioning(true);
+    repositionTimerRef.current = window.setTimeout(() => setRepositioning(false), 1200);
+  }, [setRepositioning]);
+
   // Global mouse listeners while the background layer is being dragged
   useEffect(() => {
     if (!canvasDrag) return;
@@ -1239,6 +1287,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
         dragMovedRef.current = true;
       }
       if (!dragMovedRef.current) return;
+      if (!repositioningRef.current) setRepositioning(true);
       const pt = svgEl.createSVGPoint();
       pt.x = e.clientX; pt.y = e.clientY;
       const cur = pt.matrixTransform(svgEl.getScreenCTM()!.inverse());
@@ -1259,6 +1308,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
         const content = new XMLSerializer().serializeToString(svgEl);
         setActiveSvg((prev) => (prev ? { ...prev, content } : null));
       }
+      setRepositioning(false);
       setCanvasDrag(null);
     };
 
@@ -1272,7 +1322,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
     };
-  }, [canvasDrag]);
+  }, [canvasDrag, setRepositioning]);
 
   // Global mouse listeners while a layer is being rotated
   useEffect(() => {
@@ -1428,6 +1478,32 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     const canvasEl = svgCanvasRef.current;
     if (!svgEl || !canvasEl) return;
 
+    const rootCtm = svgEl.getScreenCTM();
+    if (!rootCtm) return;
+
+    // The one place the badge is written, so the three branches below can't drift apart.
+    //
+    // Dimensions arrive as screen pixels and are reported in the SVG's own coordinate
+    // space, because those are the numbers that mean something outside this window: they
+    // match the file and the export, and they don't change when the browser is resized
+    // and the artwork rescaled to fit. The x/y half is in the same space for the same
+    // reason — a canvas-pixel origin would sit in the grey around the artwork.
+    //
+    // Position only appears while something is being moved: a resting selection shouldn't
+    // carry a coordinate that never changes. It reads the min corner of the whole
+    // selection's box, so a multi-layer move reports the corner of the group rather than
+    // of whichever layer happens to be primary.
+    const writeBadge = (widthPx: number, heightPx: number) => {
+      const badge = sizeBadgeRef.current;
+      if (!badge) return;
+      const scale = Math.hypot(rootCtm.a, rootCtm.b) || 1;
+      const size = `w ${Math.round(widthPx / scale)}  h ${Math.round(heightPx / scale)}`;
+      const box = repositioningRef.current ? unionBoxInRootSpace(svgEl, selectionIds) : null;
+      badge.textContent = box
+        ? `x ${Math.round(box.x)}  y ${Math.round(box.y)}  ·  ${size}`
+        : size;
+    };
+
     const layerEl = svgEl.querySelector(`#${CSS.escape(selectionLayerId)}`) as SVGGraphicsElement | null;
     if (!layerEl) return;
 
@@ -1443,8 +1519,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       // angle the frame could take, so it stays upright and the handles work off it.
       if (selectionIds.length > 1) {
         const box = unionBoxInRootSpace(svgEl, selectionIds);
-        const rootCtm = svgEl.getScreenCTM();
-        if (!box || !rootCtm) return;
+        if (!box) return;
         const map = (rx: number, ry: number) => {
           const p = svgEl.createSVGPoint();
           p.x = rx; p.y = ry;
@@ -1461,9 +1536,8 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
         overlay.style.top    = `${TL.y - pad}px`;
         overlay.style.width  = `${width}px`;
         overlay.style.height = `${height}px`;
-        if (sizeBadgeRef.current) {
-          sizeBadgeRef.current.textContent = `${Math.round(width)} × ${Math.round(height)}`;
-        }
+        // Minus the padding the frame is drawn with — that is overlay chrome, not artwork.
+        writeBadge(width - pad * 2, height - pad * 2);
         return;
       }
 
@@ -1498,9 +1572,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
         overlay.style.height          = `${height}px`;
         overlay.style.transformOrigin = '0 0';
         overlay.style.transform       = `rotate(${theta}rad)`;
-        if (sizeBadgeRef.current) {
-          sizeBadgeRef.current.textContent = `${Math.round(width)} × ${Math.round(height)}`;
-        }
+        writeBadge(width - pad * 2, height - pad * 2);
 
         return;
       }
@@ -1527,9 +1599,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       overlay.style.top    = `${sp.y - h / 2 + offY - pad}px`;
       overlay.style.width  = `${w + pad * 2}px`;
       overlay.style.height = `${h + pad * 2}px`;
-      if (sizeBadgeRef.current) {
-        sizeBadgeRef.current.textContent = `${Math.round(w + pad * 2)} × ${Math.round(h + pad * 2)}`;
-      }
+      writeBadge(w, h);
     } catch {
       // matrixTransform / getBBox can throw if the element is detached
     }
@@ -3157,6 +3227,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
       const step = e.shiftKey ? 10 : 1;
       const dx = e.key === 'ArrowRight' ? step : e.key === 'ArrowLeft' ? -step : 0;
       const dy = e.key === 'ArrowDown'  ? step : e.key === 'ArrowUp'   ? -step : 0;
+      flashRepositioning();
       setActiveSvg((prev) => {
         if (!prev) return null;
         const doc = new DOMParser().parseFromString(prev.content, 'image/svg+xml');
@@ -3170,7 +3241,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     };
     window.addEventListener('keydown', onArrow);
     return () => window.removeEventListener('keydown', onArrow);
-  }, [selectedLayers]);
+  }, [selectedLayers, flashRepositioning]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -3210,6 +3281,56 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     setSelectedLayer(newId);
     setSelectedLayers(new Set([newId]));
   }, [activeSvg, snapshotForUndo]);
+
+  // Duplicate several layers at once: every selected element is cloned into ONE new <g>,
+  // which becomes a single new layer row. That is what a shift-selection paste should
+  // give — the pieces stay together, so they drag, rotate and scale as one thing, and the
+  // panel gains one row rather than N rows the user has to re-select to move again.
+  //
+  // The group is appended at the end of the root <svg>: with the sources sitting anywhere
+  // in the tree there is no single position that means "just above the originals", so it
+  // goes on top of everything. Hoisting to the root would otherwise strip the wrappers
+  // each source was drawn under, so every clone is re-wrapped in copies of its own
+  // ancestor chain and lands exactly on its original, before the group's nudge.
+  const duplicateLayersAsGroup = useCallback((layerIds: string[]) => {
+    if (!activeSvg) return;
+    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+    const root = doc.documentElement;
+    const found = layerIds
+      .map((id) => ({ id, el: doc.getElementById(id) as Element | null }))
+      .filter((e): e is { id: string; el: Element } => !!e.el);
+    // Ids that went stale between copy and paste — a layer deleted in between, say — just
+    // drop out. With one element left there is nothing to nest, so it is a plain duplicate.
+    if (found.length < 2) {
+      if (found.length === 1) duplicateLayer(found[0].id);
+      return;
+    }
+    // Paint order, not selection order: the clones have to stack the way the originals do,
+    // and the selection is built in whatever order the rows were shift-clicked.
+    found.sort((a, b) =>
+      a.el.compareDocumentPosition(b.el) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1);
+
+    snapshotForUndo(activeSvg.content, activeSvg.layers);
+    const groupId = `_layer_copy_${Date.now()}`;
+    const group = doc.createElementNS('http://www.w3.org/2000/svg', 'g');
+    group.setAttribute('id', groupId);
+    group.setAttribute('transform', 'translate(12, 12)');
+    found.forEach(({ id, el }, i) => {
+      const clone = el.cloneNode(true) as Element;
+      // A namespace per clone, so two copies of the same sublayer can't collide.
+      remapClonedIds(clone, `${groupId}__${i}`, id);
+      group.appendChild(wrapInAncestorChain(clone, ancestorChain(el, root)));
+    });
+    root.appendChild(group);
+
+    const content = new XMLSerializer().serializeToString(root);
+    const firstLabel = activeSvg.layers.find((l) => l.id === found[0].id)?.label ?? 'Layer';
+    const newLayer: SvgLayer = { id: groupId, label: `${firstLabel} +${found.length - 1} copy` };
+    console.log(`[layers] pasted ${found.length} layers as group ${groupId}`);
+    // Last in document order is topmost, which is where the group was appended.
+    setActiveSvg((prev) => (prev ? { ...prev, content, layers: [...prev.layers, newLayer] } : null));
+    selectOne(groupId);
+  }, [activeSvg, duplicateLayer, snapshotForUndo, selectOne]);
 
   // Open a layer into its parts: the row is replaced by one row per visual child, in
   // document order. Files often deliver a whole logo as a single group, which leaves one
@@ -3329,21 +3450,25 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     });
   }, [activeSvg, snapshotForUndo]);
 
-  // Ctrl/Cmd+C copies the selected layer; Ctrl/Cmd+V pastes it as a duplicate.
+  // Ctrl/Cmd+C copies the selection; Ctrl/Cmd+V pastes it as a duplicate. A shift-built
+  // selection of several layers pastes as one nested group — see duplicateLayersAsGroup.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!(e.metaKey || e.ctrlKey) || e.shiftKey || e.altKey) return;
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
       const key = e.key.toLowerCase();
       if (key === 'c') {
-        if (selectedLayer) layerClipboardRef.current = selectedLayer;
+        if (selectionIds.length) layerClipboardRef.current = selectionIds;
       } else if (key === 'v') {
-        if (layerClipboardRef.current) { e.preventDefault(); duplicateLayer(layerClipboardRef.current); }
+        const ids = layerClipboardRef.current;
+        if (!ids.length) return;
+        e.preventDefault();
+        if (ids.length > 1) duplicateLayersAsGroup(ids); else duplicateLayer(ids[0]);
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [selectedLayer, duplicateLayer]);
+  }, [selectionIds, duplicateLayer, duplicateLayersAsGroup]);
 
   // ── File drag handlers (drop zone) ─────────────────────────────────────────
 
