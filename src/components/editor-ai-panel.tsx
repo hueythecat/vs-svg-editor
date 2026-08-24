@@ -3,6 +3,7 @@ import React from 'react';
 import {
   C, FONT_STACK, SHADOW, inputStyle, labelStyle, sectionLabelStyle,
 } from '@/lib/design-tokens';
+import { useT } from '@/i18n/provider';
 import type {
   AiActionType, AiBundle, FontBundle, LlmProvider, TaxonomyBundle,
 } from './editor-types';
@@ -71,6 +72,7 @@ export const AiPill = React.memo(function AiPill({
   ready?: boolean;
   cooldown?: boolean;
 }) {
+  const t = useT();
   // Two states divert the click to a modal rather than the pass: `gated` (edit === 0 —
   // the upsell) and `cooldown` (customised too recently — the cooldown message). Both
   // must stay live-looking and clickable no matter what the loading/done flags say.
@@ -82,7 +84,7 @@ export const AiPill = React.memo(function AiPill({
   const spent = done && !diverted;
   const busy = loading && !diverted;
   const inert = !ready || busy || spent;
-  const label = busy ? 'Customising…' : spent ? 'Customised' : 'Customise';
+  const label = t(busy ? 'ai.customising' : spent ? 'ai.customised' : 'ai.customise');
   return (
     <div
       style={{
@@ -102,13 +104,13 @@ export const AiPill = React.memo(function AiPill({
         type="button"
         onClick={onCustomise}
         disabled={inert}
-        title={
-          !ready ? 'Waiting for the artwork to load'
-            : gated ? 'Unlock AI editing'
-            : cooldown ? 'This artwork was customised recently — try again later'
-            : spent ? 'This image has already been customised'
-            : 'Run the AI customise pass'
-        }
+        title={t(
+          !ready ? 'ai.titleNotReady'
+            : gated ? 'ai.titleGated'
+            : cooldown ? 'ai.titleCooldown'
+            : spent ? 'ai.titleSpent'
+            : 'ai.titleRun',
+        )}
         style={{
           display: 'flex', alignItems: 'center', gap: 8,
           background: 'transparent', border: 'none',
@@ -139,7 +141,7 @@ export const AiPill = React.memo(function AiPill({
           <button
             type="button"
             onClick={onOpenTools}
-            title="AI tools"
+            title={t('ai.tools')}
             style={{
               display: 'flex', alignItems: 'center',
               background: 'transparent', border: 'none',
@@ -178,6 +180,7 @@ export const AiPanel = React.memo(function AiPanel({
   onUseSuggestedFont: (font: string) => void;
   onRunTaxonomy: () => void;
 }) {
+  const t = useT();
   if (!open) return null;
 
   const busy = ai.loading || fonts.customiseLoading || fonts.imageFontsLoading;
@@ -209,12 +212,12 @@ export const AiPanel = React.memo(function AiPanel({
         >
           <SparklesIcon size={12} />
         </span>
-        <span style={{ fontSize: 12.5, fontWeight: 700, color: C.textPrimary, flex: 1 }}>AI tools</span>
+        <span style={{ fontSize: 12.5, fontWeight: 700, color: C.textPrimary, flex: 1 }}>{t('ai.tools')}</span>
         <button
           type="button"
           className="ed-ghost"
           onClick={onClose}
-          title="Close"
+          title={t('ai.close')}
           style={{ border: 'none', background: 'transparent', color: C.textFaint, padding: 2, borderRadius: 6, cursor: 'pointer', display: 'flex' }}
         >
           <CloseIcon size={13} />
@@ -223,7 +226,7 @@ export const AiPanel = React.memo(function AiPanel({
 
       {/* Model */}
       <div style={{ padding: '0 14px 12px' }}>
-        <label style={labelStyle}>Model</label>
+        <label style={labelStyle}>{t('ai.model')}</label>
         <select
           className="ed-input"
           value={llmProvider}
@@ -239,15 +242,15 @@ export const AiPanel = React.memo(function AiPanel({
 
       {/* Whole-image results. Customise itself is run from the pill, not from here. */}
       <div style={sectionStyle}>
-        <span style={{ ...sectionLabelStyle, display: 'block', marginBottom: 8 }}>This image</span>
+        <span style={{ ...sectionLabelStyle, display: 'block', marginBottom: 8 }}>{t('ai.thisImage')}</span>
         {fonts.customiseLoading ? (
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             {spinner}
-            <span style={{ fontSize: 12, color: C.textMuted }}>Analysing…</span>
+            <span style={{ fontSize: 12, color: C.textMuted }}>{t('ai.analysing')}</span>
           </div>
         ) : fonts.customiseFonts.length > 0 ? (
           <div>
-            <label style={labelStyle}>Apply font globally</label>
+            <label style={labelStyle}>{t('ai.applyFontGlobally')}</label>
             <select
               className="ed-input"
               defaultValue=""
@@ -259,7 +262,7 @@ export const AiPanel = React.memo(function AiPanel({
               }}
               style={{ ...inputStyle, cursor: 'pointer' }}
             >
-              <option value="" disabled>Choose a font…</option>
+              <option value="" disabled>{t('ai.chooseFont')}</option>
               {fonts.customiseFonts.map((f) => (
                 <option key={f} value={f} style={{ fontFamily: f }}>{f}</option>
               ))}
@@ -267,16 +270,14 @@ export const AiPanel = React.memo(function AiPanel({
           </div>
         ) : (
           <p style={{ margin: 0, fontSize: 11.5, color: C.textFaint, lineHeight: 1.5 }}>
-            {fonts.customiseDone
-              ? 'Customise found no fonts to apply.'
-              : 'Run Customise from the pill to detect text and suggest fonts.'}
+            {t(fonts.customiseDone ? 'ai.noFontsFound' : 'ai.runCustomiseHint')}
           </p>
         )}
       </div>
 
       {/* Per-layer actions */}
       <div style={sectionStyle}>
-        <span style={{ ...sectionLabelStyle, display: 'block', marginBottom: 8 }}>Selected layer</span>
+        <span style={{ ...sectionLabelStyle, display: 'block', marginBottom: 8 }}>{t('ai.selectedLayer')}</span>
         <select
           className="ed-input"
           value=""
@@ -295,18 +296,18 @@ export const AiPanel = React.memo(function AiPanel({
           }}
         >
           <option value="" disabled hidden>
-            {ai.loading
-              ? 'Processing…'
+            {t(ai.loading
+              ? 'ai.processing'
               : !selectedLayer
-              ? 'Select a layer first'
+              ? 'ai.selectLayerFirst'
               : selectedLayer === backgroundLayerId
-              ? 'Not available for the canvas'
-              : 'Choose an action…'}
+              ? 'ai.notForCanvas'
+              : 'ai.chooseAction')}
           </option>
-          <option value="strip-text">Strip text</option>
-          <option value="suggest-font">Suggest font</option>
-          <option value="remove-specific-text">Remove specific text</option>
-          <option value="check-text">Check text</option>
+          <option value="strip-text">{t('ai.actionStripText')}</option>
+          <option value="suggest-font">{t('ai.actionSuggestFont')}</option>
+          <option value="remove-specific-text">{t('ai.actionRemoveText')}</option>
+          <option value="check-text">{t('ai.actionCheckText')}</option>
         </select>
 
         {ai.showRemoveTextInput && selectedLayer && (
@@ -314,7 +315,7 @@ export const AiPanel = React.memo(function AiPanel({
             <input
               className="ed-input"
               type="text"
-              placeholder="Text to remove…"
+              placeholder={t('ai.removeTextPlaceholder')}
               value={ai.removeTextQuery}
               onChange={(e) => ai.setRemoveTextQuery(e.target.value)}
               onKeyDown={(e) => {
@@ -339,7 +340,7 @@ export const AiPanel = React.memo(function AiPanel({
                 cursor: !ai.removeTextQuery.trim() || ai.loading ? 'default' : 'pointer',
               }}
             >
-              Remove
+              {t('ai.remove')}
             </button>
           </div>
         )}
@@ -356,7 +357,7 @@ export const AiPanel = React.memo(function AiPanel({
                 {ai.textCheckResult.heading}
               </p>
             ) : (
-              <p style={{ margin: 0, fontSize: 11, fontStyle: 'italic', color: C.textFaint }}>No heading detected</p>
+              <p style={{ margin: 0, fontSize: 11, fontStyle: 'italic', color: C.textFaint }}>{t('ai.noHeading')}</p>
             )}
             {ai.textCheckResult.subheading && (
               <p style={{ margin: '2px 0 0', fontSize: 11.5, color: C.textMuted, lineHeight: 1.4 }}>
@@ -381,7 +382,7 @@ export const AiPanel = React.memo(function AiPanel({
                 onClick={() => onUseSuggestedFont(ai.suggestedFontName!)}
                 style={secondaryButton(false)}
               >
-                Use “{ai.suggestedFontName}”
+                {t('ai.useFont', { font: ai.suggestedFontName })}
               </button>
             )}
           </div>
@@ -399,7 +400,7 @@ export const AiPanel = React.memo(function AiPanel({
             border: 'none', background: 'transparent', padding: 0, cursor: 'pointer',
           }}
         >
-          <span style={{ ...sectionLabelStyle, flex: 1, textAlign: 'left' }}>Taxonomy</span>
+          <span style={{ ...sectionLabelStyle, flex: 1, textAlign: 'left' }}>{t('ai.taxonomy')}</span>
           {taxonomy.loading ? spinner : (
             <span style={{ fontSize: 10, color: C.disabled }}>{taxonomy.open ? '▲' : '▼'}</span>
           )}
@@ -408,7 +409,7 @@ export const AiPanel = React.memo(function AiPanel({
         {taxonomy.open && (
           <div style={{ marginTop: 8, maxHeight: 176, overflowY: 'auto' }} className="ed-scroll">
             {taxonomy.loading && (
-              <span style={{ fontSize: 11.5, color: C.textFaint }}>Analysing…</span>
+              <span style={{ fontSize: 11.5, color: C.textFaint }}>{t('ai.analysing')}</span>
             )}
             {!taxonomy.loading && taxonomy.data === null && (
               <button
@@ -417,12 +418,12 @@ export const AiPanel = React.memo(function AiPanel({
                 style={{ border: 'none', background: 'transparent', padding: 0, cursor: 'pointer', fontSize: 12, color: C.accent, fontFamily: FONT_STACK }}
                 className="ed-link"
               >
-                Analyse structure →
+                {t('ai.analyseStructure')}
               </button>
             )}
             {taxonomy.data && taxonomy.data.length === 0 && (
               <p style={{ margin: 0, fontSize: 11.5, fontStyle: 'italic', color: C.textFaint }}>
-                Could not analyse structure
+                {t('ai.taxonomyFailed')}
               </p>
             )}
             {taxonomy.data?.map((group, i) => (

@@ -1,3 +1,5 @@
+import { t } from '@/i18n';
+
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export interface SvgLayer {
@@ -130,7 +132,10 @@ export function parseSvg(raw: string): { content: string; layers: SvgLayer[] } {
         child.getAttribute('data-name')?.trim() ||
         child.getAttribute('inkscape:label')?.trim() ||
         (!isSyntheticLayerId(child.id) ? child.id : null) ||
-        `Layer ${layers.length + 1}`;
+        // The only string this module invents. Everything above it comes out of the file
+        // and is left exactly as the author wrote it — a layer called "Hintergrund" stays
+        // that in an English UI, and an English one stays English in a German UI.
+        t('layers.numberedLabel', { index: layers.length + 1 });
 
       layers.push({ id: child.id, label });
     });
@@ -919,7 +924,7 @@ export function appendTextRowLayers(
 
   const placed = deduped.map((row, i) => {
     const id = `${idPrefix}_${i}`;
-    const label = row.content.trim() || 'Text';
+    const label = row.content.trim() || t('text.defaultContent');
     const target = targets[i];
     const fontSize = Math.max(8, Math.round(row.sizeFraction * vb.h));
     // An anchored row is centred on the ink it replaces; an unanchored one on the model's

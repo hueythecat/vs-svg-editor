@@ -38,6 +38,12 @@ import {
 import { C, EDITOR_CSS, FONT_STACK, SHADOW } from '@/lib/design-tokens';
 import { FONT_SUGGESTION_LIMIT, SHOW_DEV_UI } from '@/lib/env';
 import { readAiCache, writeAiCache } from '@/lib/ai-cache';
+// Two entry points into the same catalogue: `t` for the imperative side — status text,
+// error messages, generated layer names, all written into state from callbacks — and
+// `useT` for the JSX, so a language change actually repaints it. The provider sets the
+// shared instance's locale during render, so the two never disagree.
+import { t } from '@/i18n';
+import { useT } from '@/i18n/provider';
 import { isIgnoreCanCustomise, isIgnoreCooldownPrompt, isIgnoreHasCustomised } from '@/lib/dev-flags';
 import type { AiActionType, LlmProvider, RemovedRecord } from './editor-types';
 import { LLM_OPTIONS } from './editor-types';
@@ -76,13 +82,17 @@ const isEditableTextField = (el: Element) =>
 
 // Reasons offered when a one-star rating leads the user to abandon the export
 // (handoff §4). Multi-select — any number can apply.
+//
+// Stable keys, not sentences: the selection is what gets reported back, and it has to
+// mean the same thing whichever language the editor was opened in. The modal translates
+// them for display — see abort.reasons.* in the locale files.
 const ABORT_REASONS = [
-  'Colours or fonts came out wrong',
-  'File looks different from the canvas',
-  'Wrong file type for what I need',
-  'Text got cut off or moved',
-  'Took too long to export',
-  'Made a mistake — starting over',
+  'colours',
+  'different',
+  'fileType',
+  'textMoved',
+  'tooSlow',
+  'mistake',
 ];
 
 // The smallest root-space box containing every one of `ids`. It frames a multi-layer
@@ -130,6 +140,36 @@ const remapClonedIds = (el: Element, newBaseId: string, origId: string) => {
   };
   fixRefs(el);
 };
+
+// The name a group goes by: the name the row had when it was opened if we still hold it,
+// else whatever the file called it, else its own id when that isn't one this app minted,
+// else the positional name parseSvg would have given the row. Shared by the drill-in
+// breadcrumb and by collapseLayer, so the group the panel says you are inside is named
+// the same as the row you get back when you leave it.
+//
+// `remembered` comes first because it is the name the user last saw on that row, and
+// re-derivation cannot reproduce it: a row named by parseSvg from a `<title>`, or one
+// whose group is reached through an unnamed wrapper, has nothing on the element itself to
+// recover the name from and would come back as a bare "Layer 5".
+const groupLabelFor = (
+  group: Element,
+  firstRowIndex: number,
+  remembered: ReadonlyMap<string, string>,
+): string =>
+  remembered.get(group.id) ||
+  group.getAttribute('data-name')?.trim() ||
+  group.getAttribute('inkscape:label')?.trim() ||
+  (!isSyntheticLayerId(group.id) ? group.id : '') ||
+  t('layers.numberedLabel', { index: firstRowIndex + 1 });
+
+// How a row relates to the group the list is drilled into: part of it, or part of the
+// level above it. Rows that are neither — the parts of some OTHER group opened at the
+// same level — carry no mark; see the drillContext memo.
+type DrillMark = 'inside' | 'outer';
+
+// Stable empty map for "nothing is drilled into", so the memoised panel isn't re-rendered
+// by a fresh identity on every render of this component.
+const NO_MARKS: ReadonlyMap<string, DrillMark> = new Map<string, DrillMark>();
 
 // The wrappers an element is drawn inside, from just below the root <svg> down to its own
 // parent. Cloning a layer out of its group and into a paste group at the root would drop
@@ -479,14 +519,17 @@ type ReviewCheck = {
 
 const formatRemaining = (ms: number): string => {
   const mins = Math.ceil(ms / 60_000);
-  if (mins < 60) return `in ${mins} minute${mins === 1 ? '' : 's'}`;
+  if (mins < 60) return t('cooldown.inMinutes', { count: mins });
   const hours = Math.round(mins / 60);
-  return `in ${hours} hour${hours === 1 ? '' : 's'}`;
+  return t('cooldown.inHours', { count: hours });
 };
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
+  // Named `tr` rather than `t` so it doesn't shadow the module-level translate this file
+  // also uses — the callbacks below want the unbound one, which needs no dependency.
+  const tr = useT();
   const [activeSvg, setActiveSvg]       = useState<ActiveSvg | null>(null);
   // string (not SampleName) because openSample now also loads fetched downloads,
   // whose names aren't in the static SAMPLES union.
@@ -543,10 +586,10 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   const [abortReasonOpen, setAbortReasonOpen] = useState(false); // secondary abandon-reason overlay
   const [abortReasons, setAbortReasons] = useState<string[]>([]); // multi-select (§4)
   const [abortNote, setAbortNote]       = useState('');           // optional free-text note
-  const [textForm, setTextForm] = useState({ content: 'Text', font: 'Arial', size: 48, weight: 400, color: '#000000', curve: 0, letterSpacing: 0 });
+  const [textForm, setTextForm] = useState({ content: t('text.defaultContent'), font: 'Arial', size: 48, weight: 400, color: '#000000', curve: 0, letterSpacing: 0 });
   const [aiLoading, setAiLoading]         = useState(false);
   const [aiError, setAiError]             = useState<string | null>(null);
-  const [aiStatusMsg, setAiStatusMsg]     = useState<string>('Thinking…');
+  const [aiStatusMsg, setAiStatusMsg]     = useState<string>(t('status.thinking'));
   const [fontSuggestion, setFontSuggestion]   = useState<string | null>(null);
   const [suggestedFontName, setSuggestedFontName] = useState<string | null>(null);
   // Fonts the AI offered, split by how much they've earned their place. `usedFonts` are
@@ -610,7 +653,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     });
     if (!res.ok) {
       const e = await res.json().catch(() => ({})) as { error?: { message?: string } };
-      throw new Error(e.error?.message ?? `API error ${res.status}`);
+      throw new Error(e.error?.message ?? t('errors.api', { status: res.status }));
     }
     const data = await res.json() as { content?: Array<{ text?: string }> };
     return extractJson(data.content?.[0]?.text ?? '');
@@ -630,6 +673,12 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     removed: RemovedRecord[];
     depth: number;
   };
+  // The name each row had when it was opened into its parts, keyed by the id of every
+  // element that opening it could later fold back into — the row's own element and any
+  // wrapper between it and the children. Expanding drops the row from the list, so
+  // without this the name is simply gone: collapsing re-derives one from the element,
+  // which for an unnamed group means "Layer 5" where "old effect" used to be.
+  const expandedLabelsRef        = useRef<Map<string, string>>(new Map());
   const undoStackRef             = useRef<HistoryEntry[]>([]);
   const redoStackRef             = useRef<HistoryEntry[]>([]);
   // The layer ids Ctrl/Cmd+C captured, in document order. A multi-layer copy pastes as
@@ -643,11 +692,6 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   const textContentRef  = useRef<HTMLInputElement>(null);
   const overlayRef      = useRef<HTMLDivElement>(null);
   const sizeBadgeRef    = useRef<HTMLSpanElement>(null);
-  // Whether a move is in progress — the badge only carries x/y while one is. Held in a
-  // ref, not state, because the overlay is positioned by direct DOM writes and must not
-  // trigger a re-render per mousemove.
-  const repositioningRef   = useRef(false);
-  const repositionTimerRef = useRef<number | null>(null);
   // Shown when an AI action is invoked on a gated asset (edit === 0).
   const [showUpsell, setShowUpsell] = useState(false);
   // Shown once a /<uuid> asset has loaded and turns out to be inside the customise
@@ -1037,36 +1081,50 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     setSelectedLayers(new Set());
     setRemovedRecords([]);
     removedIdsRef.current = new Set();
+    expandedLabelsRef.current = new Map();
     setExpandDepth(0);
     setPreviewRemovedId(null);
   }, [revokePrev]);
 
   // ── Layer toggle ───────────────────────────────────────────────────────────
 
+  // The eye acts on the whole selection when the row it was clicked on belongs to one —
+  // the same rule a canvas drag follows, so a shift-built selection behaves as one thing
+  // wherever it is acted on. Clicking the eye of a row OUTSIDE the selection still acts
+  // on that row alone, and leaves the selection as it was.
+  //
+  // Every affected row is driven to the SAME state, the opposite of the clicked row's,
+  // rather than each flipping its own: flipping individually turns a part-hidden
+  // selection inside out and leaves it just as mixed, which is never what the click
+  // meant. The clicked row is the one that decides the direction because it is the one
+  // whose icon the eye was showing.
   const toggleLayer = useCallback((id: string) => {
+    const ids = selectedLayers.size > 1 && selectedLayers.has(id) ? [...selectedLayers] : [id];
+    const hide = !hiddenLayers.has(id);
     setHiddenLayers((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
+      for (const layerId of ids) {
+        if (hide) { next.add(layerId); continue; }
+        next.delete(layerId);
         // Switching a row the AI hid back on has to take its whole hidden subtree with
         // it. A group's ink lives in children that carry their own hide rules, so
         // clearing only the group would leave the row reading "visible" while still
         // drawing nothing — the same trap the dev panel's preview hit.
-        for (const sub of removedSubtree(removedRecordsRef.current, id)) next.delete(sub);
-      } else {
-        next.add(id);
+        for (const sub of removedSubtree(removedRecordsRef.current, layerId)) next.delete(sub);
       }
       return next;
     });
     // Shown again, it is ordinary artwork with an ordinary row — no longer something a
-    // pass is holding, so it stops being listed as removed.
+    // pass is holding, so it stops being listed as removed. Only on the way back on: a
+    // row being hidden here is not one of those to begin with.
+    if (hide) return;
     setRemovedRecords((prev) => {
-      if (!prev.some((r) => r.id === id)) return prev;
-      const gone = removedSubtree(prev, id);
+      if (!prev.some((r) => ids.includes(r.id))) return prev;
+      const gone = new Set(ids.flatMap((layerId) => [...removedSubtree(prev, layerId)]));
       removedIdsRef.current = new Set([...removedIdsRef.current].filter((x) => !gone.has(x)));
       return prev.filter((r) => !gone.has(r.id));
     });
-  }, []);
+  }, [selectedLayers, hiddenLayers]);
 
   // After an edit deletes layers, drop the selection/visibility state that pointed at
   // them: otherwise the overlay tracks an element that no longer exists and the export
@@ -1176,26 +1234,56 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     return ids;
   }, [activeSvg?.content, activeSvg?.layers, textLayerIds]);
 
-  // The row to back out from, or null when nothing has been drilled into. The panel
-  // offers one way out rather than a control per row, so this picks the DEEPEST group
-  // any row currently sits in — the level most recently opened. Backing out repeatedly
-  // therefore walks back up the way you came.
-  const backOutLayerId = useMemo(() => {
+  // What the list is currently drilled into, or null at the top level: the group itself,
+  // the rows that came out of it, and the row to back out from.
+  //
+  // One context for the whole panel rather than a marker per row, because the list is
+  // only ever inside one group at a time — being inside is a property of the view. It
+  // takes the DEEPEST group any row sits in, the level most recently opened, so backing
+  // out repeatedly walks back up the way you came.
+  const drillContext = useMemo(() => {
     // Nothing has been opened, so there is nowhere to go back to — whatever the document
     // happens to be wrapped in.
     if (!activeSvg || expandDepth === 0) return null;
     const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
     const layerIds = new Set(activeSvg.layers.map((l) => l.id));
-    let deepestId: string | null = null;
+    // Resolved once per row and reused below — collapsibleParent walks the tree, and the
+    // marking pass needs the same answer the deepest-group search does.
+    const rows = activeSvg.layers.map((l) => {
+      const el = doc.getElementById(l.id);
+      return { id: l.id, el, parent: collapsibleParent(el, layerIds) };
+    });
+
+    let deepestGroup: Element | null = null;
+    let backOutId: string | null = null;
     let deepest = -1;
-    for (const layer of activeSvg.layers) {
-      const parent = collapsibleParent(doc.getElementById(layer.id), layerIds);
-      if (!parent) continue;
+    for (const row of rows) {
+      if (!row.parent) continue;
       let depth = 0;
-      for (let n: Element | null = parent; n; n = n.parentElement) depth++;
-      if (depth > deepest) { deepest = depth; deepestId = layer.id; }
+      for (let n: Element | null = row.parent; n; n = n.parentElement) depth++;
+      if (depth > deepest) { deepest = depth; deepestGroup = row.parent; backOutId = row.id; }
     }
-    return deepestId;
+    const group = deepestGroup;
+    if (!group || !backOutId) return null;
+
+    // Which rows came out of that group, and which are the level above it. The panel sets
+    // the two apart rather than showing one flat list in which the pieces of the opened
+    // group are indistinguishable from the layers that were always there.
+    //
+    // A row that is inside SOME OTHER group opened at the same level is left unmarked:
+    // this breadcrumb is not about it, but receding it as the level above would be a
+    // plain lie about where it sits.
+    const marks = new Map<string, DrillMark>();
+    for (const { id, el, parent } of rows) {
+      if (el && group.contains(el)) marks.set(id, 'inside');
+      else if (!parent) marks.set(id, 'outer');
+    }
+    const firstIdx = activeSvg.layers.findIndex((l) => marks.get(l.id) === 'inside');
+    return {
+      backOutId,
+      marks,
+      label: groupLabelFor(group, firstIdx < 0 ? activeSvg.layers.length : firstIdx, expandedLabelsRef.current),
+    };
   }, [activeSvg?.content, activeSvg?.layers, expandDepth]);
 
   // Click on canvas: walk up from the clicked element to find its layer. Shift-click
@@ -1255,26 +1343,6 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     }
   }, [activeSvg, selectOne]);
 
-  // Switches the x/y half of the badge on for the duration of a move. Switching it off
-  // repaints rather than waiting for the next reposition: the gesture that ends it may be
-  // the last thing that happens — an arrow-key nudge timing out, or a drag released
-  // without moving — and the coordinate would otherwise stay on screen for good.
-  const setRepositioning = useCallback((on: boolean) => {
-    if (repositionTimerRef.current !== null) {
-      clearTimeout(repositionTimerRef.current);
-      repositionTimerRef.current = null;
-    }
-    repositioningRef.current = on;
-    if (!on) positionOverlayRef.current();
-  }, []);
-
-  // Arrow-key nudges have no gesture end to switch the readout off, so each press keeps
-  // it up a moment longer and the last one lets it go.
-  const flashRepositioning = useCallback(() => {
-    setRepositioning(true);
-    repositionTimerRef.current = window.setTimeout(() => setRepositioning(false), 1200);
-  }, [setRepositioning]);
-
   // Global mouse listeners while the background layer is being dragged
   useEffect(() => {
     if (!canvasDrag) return;
@@ -1287,7 +1355,6 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
         dragMovedRef.current = true;
       }
       if (!dragMovedRef.current) return;
-      if (!repositioningRef.current) setRepositioning(true);
       const pt = svgEl.createSVGPoint();
       pt.x = e.clientX; pt.y = e.clientY;
       const cur = pt.matrixTransform(svgEl.getScreenCTM()!.inverse());
@@ -1308,7 +1375,6 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
         const content = new XMLSerializer().serializeToString(svgEl);
         setActiveSvg((prev) => (prev ? { ...prev, content } : null));
       }
-      setRepositioning(false);
       setCanvasDrag(null);
     };
 
@@ -1322,7 +1388,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       window.removeEventListener('mousemove', onMove);
       window.removeEventListener('mouseup', onUp);
     };
-  }, [canvasDrag, setRepositioning]);
+  }, [canvasDrag]);
 
   // Global mouse listeners while a layer is being rotated
   useEffect(() => {
@@ -1482,25 +1548,29 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     if (!rootCtm) return;
 
     // The one place the badge is written, so the three branches below can't drift apart.
+    // Two lines — position above size — rendered from one string, which is why the span
+    // is styled `white-space: pre`.
     //
     // Dimensions arrive as screen pixels and are reported in the SVG's own coordinate
     // space, because those are the numbers that mean something outside this window: they
     // match the file and the export, and they don't change when the browser is resized
-    // and the artwork rescaled to fit. The x/y half is in the same space for the same
-    // reason — a canvas-pixel origin would sit in the grey around the artwork.
+    // and the artwork rescaled to fit. Position is in the same space for the same reason —
+    // a canvas-pixel origin would sit in the grey around the artwork.
     //
-    // Position only appears while something is being moved: a resting selection shouldn't
-    // carry a coordinate that never changes. It reads the min corner of the whole
-    // selection's box, so a multi-layer move reports the corner of the group rather than
-    // of whichever layer happens to be primary.
+    // The whole badge lives and dies with the selection overlay, so it is on screen
+    // exactly when something has been clicked or is being dragged, and nowhere else.
+    // Position reads the min corner of the WHOLE selection's box, so a multi-layer move
+    // reports the corner of the group rather than of whichever layer happens to be primary.
     const writeBadge = (widthPx: number, heightPx: number) => {
       const badge = sizeBadgeRef.current;
       if (!badge) return;
       const scale = Math.hypot(rootCtm.a, rootCtm.b) || 1;
       const size = `w ${Math.round(widthPx / scale)}  h ${Math.round(heightPx / scale)}`;
-      const box = repositioningRef.current ? unionBoxInRootSpace(svgEl, selectionIds) : null;
+      // Null only when nothing in the selection can be measured — the size line still
+      // says something, so it is shown on its own rather than blanking the badge.
+      const box = unionBoxInRootSpace(svgEl, selectionIds);
       badge.textContent = box
-        ? `x ${Math.round(box.x)}  y ${Math.round(box.y)}  ·  ${size}`
+        ? `x ${Math.round(box.x)}  y ${Math.round(box.y)}\n${size}`
         : size;
     };
 
@@ -2476,7 +2546,7 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
     setCustomiseLoading(true);
     setAiLoading(true);
     setAiError(null);
-    setAiStatusMsg('Analysing image…');
+    setAiStatusMsg(t('status.analysingImage'));
     snapshotForUndo(activeSvg.content, activeSvg.layers);
     try {
       const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
@@ -2602,7 +2672,7 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
         console.log('[customise] cache hit — skipping the model call:', cacheKey);
         parsed = JSON.parse(cachedRaw) as CustomiseResult;
       } else {
-        setAiStatusMsg('Reviewing vector…');
+        setAiStatusMsg(t('status.reviewingVector'));
         const rawText = await callLlmVision({
           model: TEXT_PARSE_MODEL, maxTokens: 8192, pngBase64, tag: 'customise',
           prompt: `Analyze this SVG image and its source.
@@ -2626,7 +2696,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
           parsed.rows.forEach(normaliseRowRemoveIds);
         } catch (err) {
           logUnreadable('customise', rawText, err);
-          throw new Error('AI returned an unreadable response');
+          throw new Error(t('errors.unreadableResponse'));
         }
 
         // Stored post-normalisation, so a cache hit lands on the same shape the
@@ -2635,7 +2705,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
       }
       console.log('[customise] LLM returned:', { hasText: parsed.hasText, removeIds: parsed.removeIds, rows: parsed.rows.length });
 
-      setAiStatusMsg('Applying changes…');
+      setAiStatusMsg(t('status.applyingChanges'));
 
       // The two tasks read different inputs — TASK 1 the raster, TASK 2 the SVG source —
       // so they can disagree. hasText: false with a non-empty removeIds is that
@@ -2722,16 +2792,16 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
         void notifyCustomised();
       } else {
         console.log('[customise] artwork unchanged — not marking customised');
-        setAiError('No text was detected in this artwork — nothing was changed.');
+        setAiError(t('errors.noTextDetected'));
       }
 
     } catch (err) {
-      setAiError(err instanceof Error ? err.message : 'Customise failed');
+      setAiError(err instanceof Error ? err.message : t('errors.customiseFailed'));
       setCustomiseDone(true);
     } finally {
       setCustomiseLoading(false);
       setAiLoading(false);
-      setAiStatusMsg('Thinking…');
+      setAiStatusMsg(t('status.thinking'));
     }
   }, [activeSvg, addGoogleFont, loadGoogleFontLink, snapshotForUndo, notifyCustomised, cooldownActive]);
 
@@ -2912,7 +2982,7 @@ Return ONLY valid JSON — no markdown, no explanation:
     const layerId = selectedLayer;
     setAiLoading(true);
     setAiError(null);
-    setAiStatusMsg('Thinking…');
+    setAiStatusMsg(t('status.thinking'));
     setTextCheckResult(null);
     setFontSuggestion(null);
     setSuggestedFontName(null);
@@ -2922,7 +2992,7 @@ Return ONLY valid JSON — no markdown, no explanation:
     try {
       const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
       const layerEl = doc.getElementById(layerId);
-      if (!layerEl) throw new Error('Layer not found');
+      if (!layerEl) throw new Error(t('errors.layerNotFound'));
       const svgString = new XMLSerializer().serializeToString(layerEl);
 
       // Render layer to PNG for vision
@@ -2958,7 +3028,7 @@ Return JSON only, no markdown.`,
 
       // ── Check text ─────────────────────────────────────────────────────────
       if (action === 'check-text') {
-        setAiStatusMsg('Reading text…');
+        setAiStatusMsg(t('status.readingText'));
         const rawText = await callLlmVision({
           model: 'claude-sonnet-5', maxTokens: 512, pngBase64, tag: 'check-text',
           prompt: `Look at this SVG layer image. Identify the main text content.
@@ -2999,7 +3069,7 @@ No markdown, no code fences, no explanation. Example:
         rstMarkEls(layerEl);
         const rstMarkedSvg = new XMLSerializer().serializeToString(layerEl);
 
-        setAiStatusMsg('Finding text…');
+        setAiStatusMsg(t('status.findingText'));
         const rawText = await callLlmVision({
           model: 'claude-sonnet-5', maxTokens: 1024, pngBase64, tag: 'remove-specific-text',
           prompt: `You are editing an SVG layer. Find and remove ONLY the text matching: "${query}"
@@ -3016,9 +3086,9 @@ Respond with ONLY a valid JSON object — no markdown, no code fences:
         try {
           removeIds = (JSON.parse(rawText) as { removeIds: string[] }).removeIds ?? [];
         } catch {
-          throw new Error('AI returned an unreadable response');
+          throw new Error(t('errors.unreadableResponse'));
         }
-        setAiStatusMsg('Applying changes…');
+        setAiStatusMsg(t('status.applyingChanges'));
         // Hidden, not deleted, for the same reason as the other passes — the user named
         // the text but the model chose the elements, and it can choose wrongly. Recorded
         // under the query, so the dev panel groups these as "what removing X took".
@@ -3079,7 +3149,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences:
         console.log('[strip-text] cache hit — skipping the model call:', cacheKey);
         parsed = JSON.parse(cachedRaw) as StripResult;
       } else {
-        setAiStatusMsg('Reviewing vector…');
+        setAiStatusMsg(t('status.reviewingVector'));
         const rawText = await callLlmVision({
           model: TEXT_PARSE_MODEL, maxTokens: 8192, pngBase64, tag: 'strip-text',
           prompt: `Analyze this SVG layer image and its source code.
@@ -3099,14 +3169,14 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
           if (Array.isArray(parsed.rows)) parsed.rows.forEach(normaliseRowRemoveIds);
         } catch (err) {
           logUnreadable('strip-text', rawText, err);
-          throw new Error('AI returned an unreadable response');
+          throw new Error(t('errors.unreadableResponse'));
         }
 
         writeAiCache(cacheKey, JSON.stringify(parsed));
       }
 
       // Remove identified text elements directly from the DOM
-      setAiStatusMsg('Applying changes…');
+      setAiStatusMsg(t('status.applyingChanges'));
       console.log('[strip-text] LLM returned:', {
         hasText: parsed.hasText,
         rows: parsed.rows?.length ?? 0,
@@ -3146,10 +3216,10 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
       if (newTextLayers.length > 0) setSelectedLayer(newTextLayers[0].id);
 
     } catch (err) {
-      setAiError(err instanceof Error ? err.message : 'AI action failed');
+      setAiError(err instanceof Error ? err.message : t('errors.actionFailed'));
     } finally {
       setAiLoading(false);
-      setAiStatusMsg('Thinking…');
+      setAiStatusMsg(t('status.thinking'));
     }
   }, [activeSvg, selectedLayer, addGoogleFont, snapshotForUndo]);
 
@@ -3227,7 +3297,6 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
       const step = e.shiftKey ? 10 : 1;
       const dx = e.key === 'ArrowRight' ? step : e.key === 'ArrowLeft' ? -step : 0;
       const dy = e.key === 'ArrowDown'  ? step : e.key === 'ArrowUp'   ? -step : 0;
-      flashRepositioning();
       setActiveSvg((prev) => {
         if (!prev) return null;
         const doc = new DOMParser().parseFromString(prev.content, 'image/svg+xml');
@@ -3241,7 +3310,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     };
     window.addEventListener('keydown', onArrow);
     return () => window.removeEventListener('keydown', onArrow);
-  }, [selectedLayers, flashRepositioning]);
+  }, [selectedLayers]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -3270,7 +3339,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     clone.setAttribute('transform', applyTranslateDelta(clone.getAttribute('transform') ?? '', 12, 12));
     el.parentNode?.insertBefore(clone, el.nextSibling);
     const content = new XMLSerializer().serializeToString(doc.documentElement);
-    const newLayer: SvgLayer = { id: newId, label: `${srcLayer.label} copy` };
+    const newLayer: SvgLayer = { id: newId, label: t('layers.copySuffix', { label: srcLayer.label }) };
     setActiveSvg((prev) => {
       if (!prev) return null;
       const idx = prev.layers.findIndex((l) => l.id === layerId);
@@ -3324,7 +3393,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     root.appendChild(group);
 
     const content = new XMLSerializer().serializeToString(root);
-    const firstLabel = activeSvg.layers.find((l) => l.id === found[0].id)?.label ?? 'Layer';
+    const firstLabel = activeSvg.layers.find((l) => l.id === found[0].id)?.label ?? t('layers.defaultLabel');
     const newLayer: SvgLayer = { id: groupId, label: `${firstLabel} +${found.length - 1} copy` };
     console.log(`[layers] pasted ${found.length} layers as group ${groupId}`);
     // Last in document order is topmost, which is where the group was appended.
@@ -3351,6 +3420,22 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     // that actually has alternatives rather than on another identical row.
     const kids = expansionTarget(el);
     const stamp = Date.now();
+
+    // Remember what this row was called before it stops being one. Backing out folds into
+    // the children's own parent, which is the wrapper the walk above ended on rather than
+    // the element the row pointed at, so the name is recorded against every element in
+    // between — each is a level the list can come back to, and all of them are the same
+    // piece of artwork under the one name. Wrappers are given an id where they have none,
+    // since the id is the only handle that survives the re-parse on the way back.
+    const srcLabel = activeSvg.layers.find((l) => l.id === layerId)?.label;
+    if (srcLabel) {
+      let wrapper: Element | null = kids[0]?.parentElement ?? null;
+      for (let up = 0; wrapper && up < 16; up++, wrapper = wrapper.parentElement) {
+        if (!wrapper.id) wrapper.id = `_grp_${stamp}_${up}`;
+        expandedLabelsRef.current.set(wrapper.id, srcLabel);
+        if (wrapper === el) break;
+      }
+    }
     // What an AI pass took, keyed by element, so opening the layer it came out of names
     // it rather than falling through to "g 8". These rows are the way hidden artwork is
     // switched back on, and a positional label gives no way to tell which is which — on
@@ -3410,12 +3495,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     // "_layer_2" on the way back out. Fall back to the same positional naming parseSvg
     // uses, which restores the name the row had before it was opened.
     const firstIdx = activeSvg.layers.findIndex((l) => l.id === absorbed[0].id);
-    const synthetic = isSyntheticLayerId(parent.id);
-    const label =
-      parent.getAttribute('data-name')?.trim() ||
-      parent.getAttribute('inkscape:label')?.trim() ||
-      (!synthetic ? parent.id : null) ||
-      `Layer ${(firstIdx < 0 ? activeSvg.layers.length : firstIdx) + 1}`;
+    const label = groupLabelFor(parent, firstIdx < 0 ? activeSvg.layers.length : firstIdx, expandedLabelsRef.current);
 
     const content = new XMLSerializer().serializeToString(doc.documentElement);
     const absorbedIds = new Set(absorbed.map((l) => l.id));
@@ -3592,9 +3672,9 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
       />
       <ConfirmModal
         open={resetConfirmOpen}
-        title="Revert all changes?"
-        body="This restores the file as it was imported. Everything you've edited since — including hidden layers — is discarded."
-        confirmLabel="Revert changes"
+        title={tr('confirm.resetTitle')}
+        body={tr('confirm.resetBody')}
+        confirmLabel={tr('confirm.resetConfirm')}
         danger
         onCancel={cancelReset}
         onConfirm={confirmReset}
@@ -3627,7 +3707,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
 
           {/* Top toolbar (§1.5) */}
           <EditorToolbar
-            fileName={isLoading && !activeSvg ? 'Loading…' : (activeSvg?.name ?? '')}
+            fileName={isLoading && !activeSvg ? tr('toolbar.loading') : (activeSvg?.name ?? '')}
             isDirty={isDirty}
             onCenter={centerLayersToCanvas}
             onRotate90={rotateSelected90}
@@ -3639,8 +3719,11 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
             redoCount={redoCount}
             onRedo={redo}
             exportLabel={activeSvg && hiddenRowCount > 0
-              ? `Export (${activeSvg.layers.length - hiddenRowCount}/${activeSvg.layers.length})`
-              : 'Export'}
+              ? tr('toolbar.exportPartial', {
+                  shown: activeSvg.layers.length - hiddenRowCount,
+                  total: activeSvg.layers.length,
+                })
+              : tr('toolbar.export')}
             onExport={openRating}
             onClose={clear}
             onReset={requestReset}
@@ -3684,8 +3767,9 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                 expandableLayerIds={expandableLayerIds}
                 hiddenInsideCounts={hiddenInsideCounts}
                 onExpandLayer={expandLayer}
-                canBackOut={!!backOutLayerId}
-                onBackOut={() => backOutLayerId && collapseLayer(backOutLayerId)}
+                drillLabel={drillContext?.label ?? null}
+                drillMarks={drillContext?.marks ?? NO_MARKS}
+                onBackOut={() => drillContext && collapseLayer(drillContext.backOutId)}
                 onAddTextLayer={addTextLayer}
                 onReorderLayers={reorderLayers}
                 onSetSelectedLayers={setSelectedLayers}
@@ -3775,9 +3859,9 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
             </svg>
             <div style={{ textAlign: 'center' }}>
               <p style={{ margin: 0, fontSize: 13, fontWeight: 600, color: isDragging ? C.accent : C.textSecondary }}>
-                {isDragging ? 'Release to open' : 'Drop an SVG file'}
+                {tr(isDragging ? 'dropzone.release' : 'dropzone.prompt')}
               </p>
-              <p style={{ margin: '4px 0 0', fontSize: 12, color: C.textFaint }}>or click to browse</p>
+              <p style={{ margin: '4px 0 0', fontSize: 12, color: C.textFaint }}>{tr('dropzone.browse')}</p>
             </div>
           </div>
           <input

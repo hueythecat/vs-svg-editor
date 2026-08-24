@@ -2,6 +2,7 @@ import React, { Dispatch, SetStateAction } from 'react';
 
 import type { SvgLayer } from '@/lib/svg-utils';
 import { C, FONT_STACK, SHADOW, sectionLabelStyle } from '@/lib/design-tokens';
+import { useT } from '@/i18n/provider';
 import { LayerList } from './layer-list';
 import { ChevronIcon, PlusIcon } from './svg-icons';
 
@@ -10,7 +11,7 @@ import { ChevronIcon, PlusIcon } from './svg-icons';
 export const LayersPanel = React.memo(function LayersPanel({
   layers, hiddenLayers, selectedLayers, backgroundLayerId, textLayerIds, expandableLayerIds,
   hiddenInsideCounts,
-  canBackOut, onBackOut, onAddTextLayer, onReorderLayers, onSetSelectedLayers, onSetSelectedLayer, onSelectOne,
+  drillLabel, drillMarks, onBackOut, onAddTextLayer, onReorderLayers, onSetSelectedLayers, onSetSelectedLayer, onSelectOne,
   onToggleLayer, onDuplicateLayer, onDeleteLayer, onExpandLayer,
 }: {
   layers: SvgLayer[];
@@ -20,7 +21,10 @@ export const LayersPanel = React.memo(function LayersPanel({
   textLayerIds: Set<string>;
   expandableLayerIds: Set<string>;
   hiddenInsideCounts: Map<string, number>;
-  canBackOut: boolean;
+  // The group the list is drilled into, and how each row relates to it. Null / empty at
+  // the top level, which is what the breadcrumb's presence keys off.
+  drillLabel: string | null;
+  drillMarks: ReadonlyMap<string, 'inside' | 'outer'>;
   onBackOut: () => void;
   onAddTextLayer: () => void;
   onReorderLayers: (fromId: string, toId: string, before: boolean) => void;
@@ -32,6 +36,7 @@ export const LayersPanel = React.memo(function LayersPanel({
   onDeleteLayer: (id: string) => void;
   onExpandLayer: (id: string) => void;
 }) {
+  const t = useT();
   return (
     <div
       style={{
@@ -53,29 +58,12 @@ export const LayersPanel = React.memo(function LayersPanel({
       }}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '11px 12px 8px', flex: 'none' }}>
-        {/* One way out for the whole panel, rather than a control on every row: the list
-            is only ever inside one group at a time, so backing out is a property of the
-            view, not of any single layer. Absent when nothing has been drilled into. */}
-        {canBackOut && (
-          <button
-            type="button"
-            className="ed-ghost"
-            onClick={onBackOut}
-            title="Back out of this group"
-            style={{
-              border: 'none', background: 'transparent', color: C.textFaint,
-              padding: 0, cursor: 'pointer', display: 'flex', flex: 'none', borderRadius: 6,
-            }}
-          >
-            <ChevronIcon size={12} direction="left" />
-          </button>
-        )}
-        <span style={{ ...sectionLabelStyle, flex: 1 }}>Elements · {layers.length}</span>
+        <span style={{ ...sectionLabelStyle, flex: 1 }}>{t('layers.heading', { count: layers.length })}</span>
         <button
           type="button"
           className="ed-ghost"
           onClick={onAddTextLayer}
-          title="Add a text layer"
+          title={t('layers.addText')}
           style={{
             border: 'none', background: 'transparent', color: C.disabled,
             padding: 0, cursor: 'pointer', display: 'flex', borderRadius: 6,
@@ -85,8 +73,44 @@ export const LayersPanel = React.memo(function LayersPanel({
         </button>
       </div>
 
+      {/* Breadcrumb — the one piece of context for the whole list, and the one way out,
+          rather than a control on every row: the list is only ever inside one group at a
+          time, so both are properties of the view and not of any single layer. Absent at
+          the top level, where there is nothing to be inside of and nowhere to go back to.
+
+          The whole strip is the button, so the target is a readable width rather than a
+          12px chevron, and it says which group it leaves — the name it will put back in
+          the list on the way out. */}
+      {drillLabel !== null && (
+        <button
+          type="button"
+          className="ed-ghost"
+          onClick={onBackOut}
+          title={t('layers.backOut', { name: drillLabel })}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 5,
+            margin: '0 8px 6px', padding: '4px 6px',
+            border: 'none', borderRadius: 7, background: C.accentTintAlt,
+            color: C.textMuted, cursor: 'pointer', textAlign: 'left',
+            fontFamily: FONT_STACK, fontSize: 11.5, flex: 'none',
+          }}
+        >
+          <ChevronIcon size={11} direction="left" />
+          <span style={{ flex: 'none' }}>{t('layers.inside')}</span>
+          <span
+            style={{
+              flex: 1, minWidth: 0, fontWeight: 600, color: C.accent,
+              overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}
+          >
+            {drillLabel}
+          </span>
+        </button>
+      )}
+
       <LayerList
         layers={layers}
+        marks={drillMarks}
         hiddenLayers={hiddenLayers}
         selectedLayers={selectedLayers}
         backgroundLayerId={backgroundLayerId}

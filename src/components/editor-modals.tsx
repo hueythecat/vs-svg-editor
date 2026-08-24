@@ -3,6 +3,7 @@ import React from 'react';
 import {
   C, FONT_STACK, SHADOW, ghostButtonStyle, inputStyle, primaryButtonStyle, sectionLabelStyle,
 } from '@/lib/design-tokens';
+import { useT } from '@/i18n/provider';
 import { CheckIcon, CloseIcon, SparklesIcon } from './svg-icons';
 
 // The three modal overlays (handoff §2–§4). Each returns null when closed, so the
@@ -27,10 +28,8 @@ const titleStyle: React.CSSProperties = { fontSize: 15, fontWeight: 700, color: 
 const subCopyStyle: React.CSSProperties = { fontSize: 12.5, color: C.textMuted, lineHeight: 1.55, margin: '6px 0 0' };
 const footerStyle: React.CSSProperties = { display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 8 };
 
-const AI_FEATURES: Array<[string, string]> = [
-  ['Suggests fonts', 'Recommends Google Fonts that match the design’s style and mood.'],
-  ['Converts text paths to editable text', 'Detects lettering baked into outlines and turns it back into real, editable text.'],
-];
+// Key stems; each resolves to a `…Title` / `…Desc` pair in the locale files.
+const AI_FEATURES = ['fonts', 'paths'] as const;
 
 // ── Unlock AI editing (§2) ───────────────────────────────────────────────────
 export const UpsellModal = React.memo(function UpsellModal({
@@ -40,6 +39,7 @@ export const UpsellModal = React.memo(function UpsellModal({
   onClose: () => void;
   onUpgrade?: () => void;
 }) {
+  const t = useT();
   if (!open) return null;
   return (
     <div onClick={onClose} style={backdrop(80, C.backdropAi)}>
@@ -55,12 +55,12 @@ export const UpsellModal = React.memo(function UpsellModal({
           >
             <SparklesIcon size={14} />
           </span>
-          <h2 style={{ ...titleStyle, flex: 1 }}>Unlock AI editing</h2>
+          <h2 style={{ ...titleStyle, flex: 1 }}>{t('upsell.title')}</h2>
           <button
             type="button"
             className="ed-ghost"
             onClick={onClose}
-            title="Close"
+            title={t('upsell.close')}
             style={{ border: 'none', background: 'transparent', color: C.textFaint, padding: 2, borderRadius: 6, cursor: 'pointer', display: 'flex' }}
           >
             <CloseIcon size={14} />
@@ -69,15 +69,15 @@ export const UpsellModal = React.memo(function UpsellModal({
 
         <div style={{ padding: '0 20px 18px' }}>
           <p style={{ ...subCopyStyle, margin: '10px 0 0' }}>
-            You need an active subscription or credits to use the AI features on this asset.
+            {t('upsell.body')}
           </p>
 
-          <span style={{ ...sectionLabelStyle, display: 'block', margin: '16px 0 8px' }}>AI features</span>
+          <span style={{ ...sectionLabelStyle, display: 'block', margin: '16px 0 8px' }}>{t('upsell.featuresLabel')}</span>
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-            {AI_FEATURES.map(([title, desc]) => (
+            {AI_FEATURES.map((feature) => (
               <div
-                key={title}
+                key={feature}
                 style={{
                   display: 'flex', gap: 11, alignItems: 'flex-start',
                   border: `1px solid ${C.borderRow}`, borderRadius: 10, padding: 12,
@@ -87,8 +87,8 @@ export const UpsellModal = React.memo(function UpsellModal({
                   <SparklesIcon size={14} />
                 </span>
                 <div>
-                  <span style={{ display: 'block', fontSize: 13, fontWeight: 600, color: C.textPrimary }}>{title}</span>
-                  <span style={{ display: 'block', marginTop: 2, fontSize: 12, color: C.textMuted, lineHeight: 1.5 }}>{desc}</span>
+                  <span style={{ display: 'block', fontSize: 13, fontWeight: 600, color: C.textPrimary }}>{t(`upsell.${feature}Title`)}</span>
+                  <span style={{ display: 'block', marginTop: 2, fontSize: 12, color: C.textMuted, lineHeight: 1.5 }}>{t(`upsell.${feature}Desc`)}</span>
                 </div>
               </div>
             ))}
@@ -96,14 +96,14 @@ export const UpsellModal = React.memo(function UpsellModal({
 
           <div style={{ ...footerStyle, marginTop: 16 }}>
             <button type="button" className="ed-ghost" onClick={onClose} style={ghostButtonStyle}>
-              Maybe later
+              {t('upsell.later')}
             </button>
             <button
               type="button"
               onClick={onUpgrade ?? onClose}
               style={{ ...primaryButtonStyle, background: C.accentGrad }}
             >
-              Upgrade to unlock
+              {t('upsell.upgrade')}
             </button>
           </div>
         </div>
@@ -125,6 +125,7 @@ export const CooldownModal = React.memo(function CooldownModal({
   available?: string;
   onClose: () => void;
 }) {
+  const t = useT();
   if (!open) return null;
   return (
     <div onClick={onClose} style={backdrop(80, C.backdropAi)}>
@@ -139,12 +140,12 @@ export const CooldownModal = React.memo(function CooldownModal({
           >
             <SparklesIcon size={14} />
           </span>
-          <h2 style={{ ...titleStyle, flex: 1 }}>Already customised</h2>
+          <h2 style={{ ...titleStyle, flex: 1 }}>{t('cooldown.title')}</h2>
           <button
             type="button"
             className="ed-ghost"
             onClick={onClose}
-            title="Close"
+            title={t('cooldown.close')}
             style={{ border: 'none', background: 'transparent', color: C.textFaint, padding: 2, borderRadius: 6, cursor: 'pointer', display: 'flex' }}
           >
             <CloseIcon size={14} />
@@ -154,13 +155,13 @@ export const CooldownModal = React.memo(function CooldownModal({
         <div style={{ padding: '0 20px 18px' }}>
           {/* PLACEHOLDER COPY — swap for the final wording. */}
           <p style={{ ...subCopyStyle, margin: '10px 0 0' }}>
-            This artwork has been customised recently, so the AI pass is on cooldown.
-            {available ? ` You can customise it again ${available}.` : ''}
+            {t('cooldown.body')}
+            {available ? t('cooldown.again', { when: available }) : ''}
           </p>
 
           <div style={{ ...footerStyle, marginTop: 16 }}>
             <button type="button" onClick={onClose} style={{ ...primaryButtonStyle, background: C.accentGrad }}>
-              Got it
+              {t('cooldown.gotIt')}
             </button>
           </div>
         </div>
@@ -184,6 +185,7 @@ export const ConfirmModal = React.memo(function ConfirmModal({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
+  const t = useT();
   if (!open) return null;
   return (
     <div onClick={onCancel} style={backdrop(65, C.backdropRating)}>
@@ -195,7 +197,7 @@ export const ConfirmModal = React.memo(function ConfirmModal({
         <p style={subCopyStyle}>{body}</p>
         <div style={{ ...footerStyle, marginTop: 18 }}>
           <button type="button" className="ed-ghost" onClick={onCancel} style={ghostButtonStyle}>
-            Cancel
+            {t('confirm.cancel')}
           </button>
           <button
             type="button"
@@ -231,6 +233,7 @@ export const RatingModal = React.memo(function RatingModal({
   onSubmit: () => void;
   onAbort: () => void;
 }) {
+  const t = useT();
   if (!open) return null;
   const filledTo = Math.max(hover, rating);
   return (
@@ -239,8 +242,8 @@ export const RatingModal = React.memo(function RatingModal({
         onClick={(e) => e.stopPropagation()}
         style={{ ...card(330), boxShadow: SHADOW.modalSoft, padding: '22px 22px 18px' }}
       >
-        <h2 style={titleStyle}>How did that export go?</h2>
-        <p style={subCopyStyle}>Rate it and we&rsquo;ll start your download.</p>
+        <h2 style={titleStyle}>{t('rating.title')}</h2>
+        <p style={subCopyStyle}>{t('rating.body')}</p>
 
         <div
           onMouseLeave={() => onHover(0)}
@@ -250,7 +253,7 @@ export const RatingModal = React.memo(function RatingModal({
             <span
               key={star}
               className="ed-star"
-              title={`${star} of 5`}
+              title={t('rating.star', { star })}
               onMouseEnter={() => onHover(star)}
               onClick={() => onRate(star)}
               style={{
@@ -274,7 +277,7 @@ export const RatingModal = React.memo(function RatingModal({
             }}
           >
             <p style={{ margin: 0, fontSize: 12.5, color: C.dangerOnTint, lineHeight: 1.5 }}>
-              Sorry that missed the mark. You can abandon this export before it downloads and tell us why.
+              {t('rating.missedTheMark')}
             </p>
             <button
               type="button"
@@ -286,14 +289,14 @@ export const RatingModal = React.memo(function RatingModal({
                 padding: '8px 13px', borderRadius: 8, cursor: 'pointer',
               }}
             >
-              Abandon export
+              {t('rating.abandon')}
             </button>
           </div>
         )}
 
         <div style={{ ...footerStyle, marginTop: 18 }}>
           <button type="button" className="ed-ghost" onClick={onCancel} style={ghostButtonStyle}>
-            Cancel
+            {t('rating.cancel')}
           </button>
           <button
             type="button"
@@ -304,7 +307,7 @@ export const RatingModal = React.memo(function RatingModal({
               cursor: rating >= 1 ? 'pointer' : 'default',
             }}
           >
-            Send rating &amp; download
+            {t('rating.submit')}
           </button>
         </div>
       </div>
@@ -314,6 +317,10 @@ export const RatingModal = React.memo(function RatingModal({
 
 // ── Reasons for cancelling (§4) ──────────────────────────────────────────────
 // Multi-select. Sending discards the pending file — no download happens on this path.
+//
+// `reasons` are key stems, not sentences: what is selected travels on to the team, and
+// that has to mean the same thing whichever language the editor was opened in. The
+// German user picks "Falscher Dateityp…" and the report still says `fileType`.
 export const AbortReasonModal = React.memo(function AbortReasonModal({
   open, reasons, selected, note, onToggle, onNote, onBack, onConfirm,
 }: {
@@ -326,6 +333,7 @@ export const AbortReasonModal = React.memo(function AbortReasonModal({
   onBack: () => void;
   onConfirm: () => void;
 }) {
+  const t = useT();
   if (!open) return null;
   return (
     <div onClick={onBack} style={backdrop(70, C.backdropReasons)}>
@@ -334,8 +342,8 @@ export const AbortReasonModal = React.memo(function AbortReasonModal({
         className="ed-scroll"
         style={{ ...card(352), padding: '22px 22px 18px', maxHeight: '88vh', overflowY: 'auto' }}
       >
-        <h2 style={titleStyle}>Why are you abandoning this export?</h2>
-        <p style={subCopyStyle}>Pick anything that applies. It goes straight to the team.</p>
+        <h2 style={titleStyle}>{t('abort.title')}</h2>
+        <p style={subCopyStyle}>{t('abort.body')}</p>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 14 }}>
           {reasons.map((reason) => {
@@ -362,7 +370,7 @@ export const AbortReasonModal = React.memo(function AbortReasonModal({
                 >
                   {isSelected && <CheckIcon size={11} />}
                 </span>
-                <span style={{ fontSize: 13, color: C.textBody }}>{reason}</span>
+                <span style={{ fontSize: 13, color: C.textBody }}>{t(`abort.reasons.${reason}`)}</span>
                 <input
                   type="checkbox"
                   checked={isSelected}
@@ -376,27 +384,27 @@ export const AbortReasonModal = React.memo(function AbortReasonModal({
 
         <div style={{ marginTop: 14 }}>
           <label style={{ display: 'block', fontSize: 11, color: C.textMuted, marginBottom: 6 }}>
-            Anything else? (optional)
+            {t('abort.noteLabel')}
           </label>
           <textarea
             className="ed-input"
             value={note}
             onChange={(e) => onNote(e.target.value)}
-            placeholder="Tell us what happened…"
+            placeholder={t('abort.notePlaceholder')}
             style={{ ...inputStyle, minHeight: 64, resize: 'vertical' }}
           />
         </div>
 
         <div style={{ ...footerStyle, marginTop: 16 }}>
           <button type="button" className="ed-ghost" onClick={onBack} style={ghostButtonStyle}>
-            Back
+            {t('abort.back')}
           </button>
           <button
             type="button"
             onClick={onConfirm}
             style={{ ...primaryButtonStyle, background: C.danger, padding: '8px 16px', fontWeight: 600 }}
           >
-            Abandon &amp; send
+            {t('abort.confirm')}
           </button>
         </div>
       </div>

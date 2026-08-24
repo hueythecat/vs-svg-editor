@@ -1,0 +1,222 @@
+{
+  "toolbar": {
+    "loading": "Loading…",
+    "unsavedChanges": "Unsaved changes",
+    "undo": "Undo (⌘Z)",
+    "redo": "Redo (⇧⌘Z)",
+    "center": "Center",
+    "centerTitle": "Centre every layer on the canvas",
+    "rotate90Title": "Rotate the selection 90°",
+    "matchRotationTitle": "Match every layer to the selected layer's rotation",
+    "revertTitle": "Revert to the original file",
+    "closeTitle": "Close file (ESC)",
+    "export": "Export",
+    "exportPartial": "Export (%{shown}/%{total})"
+  },
+
+  "inspector": {
+    "titleText": "Editing text",
+    "titleBackground": "Background",
+    "titleColours": "Vector colours",
+    "titleEmpty": "Nothing selected",
+    "deselect": "Deselect",
+    "customColour": "Custom colour",
+    "canvasColor": "Canvas color",
+    "noBackgroundFill": "This background has no fill colour to change.",
+    "findReplace": "Find & replace colours",
+    "findReplaceHint": "Click a colour to recolour every shape in the artwork that uses it.",
+    "noColours": "No colours detected on this layer.",
+    "emptyBefore": "Select a ",
+    "emptyText": "text",
+    "emptyMiddle": " layer to edit type, the ",
+    "emptyArtwork": "artwork",
+    "emptyAfter": " to swap its colours, or drag anything to move, resize and rotate it."
+  },
+
+  "text": {
+    "words": "Words",
+    "wordsPlaceholder": "Type something…",
+    "font": "Font",
+    "groupInDesign": "In this design",
+    "groupSuggested": "Suggested",
+    "groupStandard": "Standard",
+    "size": "Size",
+    "weight": "Weight",
+    "weight400": "400 Regular",
+    "weight500": "500 Medium",
+    "weight700": "700 Bold",
+    "weight800": "800 Black",
+    "color": "Color",
+    "spacing": "Spacing",
+    "spacingNormal": "Normal",
+    "spacingTight": "Tight (%{value}em)",
+    "spacingLoose": "+%{value}em",
+    "curve": "Curve",
+    "defaultContent": "Text"
+  },
+
+  "layers": {
+    "heading": "Elements · %{count}",
+    "addText": "Add a text layer",
+    "backOut": "Back out of %{name}",
+    "inside": "inside",
+    "empty": "No named layers found",
+    "expand": "Open this layer into its parts",
+    "drag": "Drag to reorder",
+    "canvas": "Canvas",
+    "duplicate": "Duplicate layer",
+    "delete": "Delete layer",
+    "show": {
+      "one": "Show layer",
+      "other": "Show %{count} layers"
+    },
+    "hide": {
+      "one": "Hide layer",
+      "other": "Hide %{count} layers"
+    },
+    "hiddenInside": {
+      "one": "%{count} hidden by an AI pass — open this layer to bring it back",
+      "other": "%{count} hidden by an AI pass — open this layer to bring them back"
+    },
+    "defaultLabel": "Layer",
+    "numberedLabel": "Layer %{index}",
+    "copySuffix": "%{label} copy"
+  },
+
+  "canvas": {
+    "beta": "Beta",
+    "rotateHandle": "Drag to rotate (hold Shift to snap to 15°)",
+    "moveHandle": "Drag to move",
+    "resizeHandle": "Drag to resize"
+  },
+
+  "dropzone": {
+    "release": "Release to open",
+    "prompt": "Drop an SVG file",
+    "browse": "or click to browse"
+  },
+
+  "ai": {
+    "customise": "Customise",
+    "customising": "Customising…",
+    "customised": "Customised",
+    "titleNotReady": "Waiting for the artwork to load",
+    "titleGated": "Unlock AI editing",
+    "titleCooldown": "This artwork was customised recently — try again later",
+    "titleSpent": "This image has already been customised",
+    "titleRun": "Run the AI customise pass",
+    "tools": "AI tools",
+    "close": "Close",
+    "model": "Model",
+    "thisImage": "This image",
+    "analysing": "Analysing…",
+    "applyFontGlobally": "Apply font globally",
+    "chooseFont": "Choose a font…",
+    "noFontsFound": "Customise found no fonts to apply.",
+    "runCustomiseHint": "Run Customise from the pill to detect text and suggest fonts.",
+    "selectedLayer": "Selected layer",
+    "processing": "Processing…",
+    "selectLayerFirst": "Select a layer first",
+    "notForCanvas": "Not available for the canvas",
+    "chooseAction": "Choose an action…",
+    "actionStripText": "Strip text",
+    "actionSuggestFont": "Suggest font",
+    "actionRemoveText": "Remove specific text",
+    "actionCheckText": "Check text",
+    "removeTextPlaceholder": "Text to remove…",
+    "remove": "Remove",
+    "noHeading": "No heading detected",
+    "useFont": "Use “%{font}”",
+    "taxonomy": "Taxonomy",
+    "analyseStructure": "Analyse structure →",
+    "taxonomyFailed": "Could not analyse structure"
+  },
+
+  "fonts": {
+    "title": "Font suggestions",
+    "analysing": "Analysing design…",
+    "add": "Add to the font list",
+    "close": "Close"
+  },
+
+  "status": {
+    "thinking": "Thinking…",
+    "analysingImage": "Analysing image…",
+    "reviewingVector": "Reviewing vector…",
+    "applyingChanges": "Applying changes…",
+    "readingText": "Reading text…",
+    "findingText": "Finding text…"
+  },
+
+  "errors": {
+    "unreadableResponse": "AI returned an unreadable response",
+    "noTextDetected": "No text was detected in this artwork — nothing was changed.",
+    "customiseFailed": "Customise failed",
+    "actionFailed": "AI action failed",
+    "layerNotFound": "Layer not found",
+    "api": "API error %{status}"
+  },
+
+  "upsell": {
+    "title": "Unlock AI editing",
+    "close": "Close",
+    "body": "You need an active subscription or credits to use the AI features on this asset.",
+    "featuresLabel": "AI features",
+    "fontsTitle": "Suggests fonts",
+    "fontsDesc": "Recommends Google Fonts that match the design’s style and mood.",
+    "pathsTitle": "Converts text paths to editable text",
+    "pathsDesc": "Detects lettering baked into outlines and turns it back into real, editable text.",
+    "later": "Maybe later",
+    "upgrade": "Upgrade to unlock"
+  },
+
+  "cooldown": {
+    "title": "Already customised",
+    "close": "Close",
+    "body": "This artwork has been customised recently, so the AI pass is on cooldown.",
+    "again": " You can customise it again %{when}.",
+    "inMinutes": {
+      "one": "in %{count} minute",
+      "other": "in %{count} minutes"
+    },
+    "inHours": {
+      "one": "in %{count} hour",
+      "other": "in %{count} hours"
+    },
+    "gotIt": "Got it"
+  },
+
+  "confirm": {
+    "cancel": "Cancel",
+    "resetTitle": "Revert all changes?",
+    "resetBody": "This restores the file as it was imported. Everything you've edited since — including hidden layers — is discarded.",
+    "resetConfirm": "Revert changes"
+  },
+
+  "rating": {
+    "title": "How did that export go?",
+    "body": "Rate it and we’ll start your download.",
+    "star": "%{star} of 5",
+    "missedTheMark": "Sorry that missed the mark. You can abandon this export before it downloads and tell us why.",
+    "abandon": "Abandon export",
+    "cancel": "Cancel",
+    "submit": "Send rating & download"
+  },
+
+  "abort": {
+    "title": "Why are you abandoning this export?",
+    "body": "Pick anything that applies. It goes straight to the team.",
+    "noteLabel": "Anything else? (optional)",
+    "notePlaceholder": "Tell us what happened…",
+    "back": "Back",
+    "confirm": "Abandon & send",
+    "reasons": {
+      "colours": "Colours or fonts came out wrong",
+      "different": "File looks different from the canvas",
+      "fileType": "Wrong file type for what I need",
+      "textMoved": "Text got cut off or moved",
+      "tooSlow": "Took too long to export",
+      "mistake": "Made a mistake — starting over"
+    }
+  }
+}

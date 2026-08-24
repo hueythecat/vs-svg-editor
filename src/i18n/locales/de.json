@@ -1,0 +1,222 @@
+{
+  "toolbar": {
+    "loading": "Wird geladen…",
+    "unsavedChanges": "Nicht gespeicherte Änderungen",
+    "undo": "Rückgängig (⌘Z)",
+    "redo": "Wiederherstellen (⇧⌘Z)",
+    "center": "Zentrieren",
+    "centerTitle": "Alle Ebenen auf der Arbeitsfläche zentrieren",
+    "rotate90Title": "Auswahl um 90° drehen",
+    "matchRotationTitle": "Alle Ebenen an die Drehung der ausgewählten Ebene angleichen",
+    "revertTitle": "Auf die Originaldatei zurücksetzen",
+    "closeTitle": "Datei schließen (ESC)",
+    "export": "Exportieren",
+    "exportPartial": "Exportieren (%{shown}/%{total})"
+  },
+
+  "inspector": {
+    "titleText": "Text bearbeiten",
+    "titleBackground": "Hintergrund",
+    "titleColours": "Vektorfarben",
+    "titleEmpty": "Nichts ausgewählt",
+    "deselect": "Auswahl aufheben",
+    "customColour": "Eigene Farbe",
+    "canvasColor": "Farbe der Arbeitsfläche",
+    "noBackgroundFill": "Dieser Hintergrund hat keine Füllfarbe, die geändert werden kann.",
+    "findReplace": "Farben suchen & ersetzen",
+    "findReplaceHint": "Klicke auf eine Farbe, um jede Form im Motiv umzufärben, die sie verwendet.",
+    "noColours": "Auf dieser Ebene wurden keine Farben erkannt.",
+    "emptyBefore": "Wähle eine ",
+    "emptyText": "Text",
+    "emptyMiddle": "-Ebene, um die Schrift zu bearbeiten, das ",
+    "emptyArtwork": "Motiv",
+    "emptyAfter": ", um seine Farben zu tauschen, oder ziehe ein Element, um es zu verschieben, zu skalieren und zu drehen."
+  },
+
+  "text": {
+    "words": "Text",
+    "wordsPlaceholder": "Etwas eingeben…",
+    "font": "Schriftart",
+    "groupInDesign": "In diesem Design",
+    "groupSuggested": "Vorgeschlagen",
+    "groupStandard": "Standard",
+    "size": "Größe",
+    "weight": "Schriftschnitt",
+    "weight400": "400 Normal",
+    "weight500": "500 Medium",
+    "weight700": "700 Fett",
+    "weight800": "800 Schwarz",
+    "color": "Farbe",
+    "spacing": "Laufweite",
+    "spacingNormal": "Normal",
+    "spacingTight": "Eng (%{value}em)",
+    "spacingLoose": "+%{value}em",
+    "curve": "Wölbung",
+    "defaultContent": "Text"
+  },
+
+  "layers": {
+    "heading": "Elemente · %{count}",
+    "addText": "Textebene hinzufügen",
+    "backOut": "%{name} verlassen",
+    "inside": "in",
+    "empty": "Keine benannten Ebenen gefunden",
+    "expand": "Diese Ebene in ihre Teile öffnen",
+    "drag": "Zum Umsortieren ziehen",
+    "canvas": "Arbeitsfläche",
+    "duplicate": "Ebene duplizieren",
+    "delete": "Ebene löschen",
+    "show": {
+      "one": "Ebene einblenden",
+      "other": "%{count} Ebenen einblenden"
+    },
+    "hide": {
+      "one": "Ebene ausblenden",
+      "other": "%{count} Ebenen ausblenden"
+    },
+    "hiddenInside": {
+      "one": "%{count} Element von einem KI-Durchlauf ausgeblendet — öffne diese Ebene, um es zurückzuholen",
+      "other": "%{count} Elemente von einem KI-Durchlauf ausgeblendet — öffne diese Ebene, um sie zurückzuholen"
+    },
+    "defaultLabel": "Ebene",
+    "numberedLabel": "Ebene %{index}",
+    "copySuffix": "%{label} Kopie"
+  },
+
+  "canvas": {
+    "beta": "Beta",
+    "rotateHandle": "Zum Drehen ziehen (Umschalt halten für 15°-Schritte)",
+    "moveHandle": "Zum Verschieben ziehen",
+    "resizeHandle": "Zum Skalieren ziehen"
+  },
+
+  "dropzone": {
+    "release": "Zum Öffnen loslassen",
+    "prompt": "SVG-Datei hier ablegen",
+    "browse": "oder klicken zum Auswählen"
+  },
+
+  "ai": {
+    "customise": "Anpassen",
+    "customising": "Wird angepasst…",
+    "customised": "Angepasst",
+    "titleNotReady": "Warten, bis das Motiv geladen ist",
+    "titleGated": "KI-Bearbeitung freischalten",
+    "titleCooldown": "Dieses Motiv wurde kürzlich angepasst — bitte später erneut versuchen",
+    "titleSpent": "Dieses Bild wurde bereits angepasst",
+    "titleRun": "KI-Anpassung ausführen",
+    "tools": "KI-Werkzeuge",
+    "close": "Schließen",
+    "model": "Modell",
+    "thisImage": "Dieses Bild",
+    "analysing": "Wird analysiert…",
+    "applyFontGlobally": "Schriftart global anwenden",
+    "chooseFont": "Schriftart wählen…",
+    "noFontsFound": "Die Anpassung hat keine anwendbaren Schriftarten gefunden.",
+    "runCustomiseHint": "Führe „Anpassen“ über die Schaltfläche aus, um Text zu erkennen und Schriftarten vorzuschlagen.",
+    "selectedLayer": "Ausgewählte Ebene",
+    "processing": "Wird verarbeitet…",
+    "selectLayerFirst": "Zuerst eine Ebene auswählen",
+    "notForCanvas": "Für die Arbeitsfläche nicht verfügbar",
+    "chooseAction": "Aktion wählen…",
+    "actionStripText": "Text entfernen",
+    "actionSuggestFont": "Schriftart vorschlagen",
+    "actionRemoveText": "Bestimmten Text entfernen",
+    "actionCheckText": "Text prüfen",
+    "removeTextPlaceholder": "Zu entfernender Text…",
+    "remove": "Entfernen",
+    "noHeading": "Keine Überschrift erkannt",
+    "useFont": "„%{font}“ verwenden",
+    "taxonomy": "Taxonomie",
+    "analyseStructure": "Struktur analysieren →",
+    "taxonomyFailed": "Struktur konnte nicht analysiert werden"
+  },
+
+  "fonts": {
+    "title": "Schriftvorschläge",
+    "analysing": "Design wird analysiert…",
+    "add": "Zur Schriftenliste hinzufügen",
+    "close": "Schließen"
+  },
+
+  "status": {
+    "thinking": "Denkt nach…",
+    "analysingImage": "Bild wird analysiert…",
+    "reviewingVector": "Vektor wird geprüft…",
+    "applyingChanges": "Änderungen werden angewendet…",
+    "readingText": "Text wird gelesen…",
+    "findingText": "Text wird gesucht…"
+  },
+
+  "errors": {
+    "unreadableResponse": "Die KI hat eine unlesbare Antwort zurückgegeben",
+    "noTextDetected": "In diesem Motiv wurde kein Text erkannt — es wurde nichts geändert.",
+    "customiseFailed": "Anpassung fehlgeschlagen",
+    "actionFailed": "KI-Aktion fehlgeschlagen",
+    "layerNotFound": "Ebene nicht gefunden",
+    "api": "API-Fehler %{status}"
+  },
+
+  "upsell": {
+    "title": "KI-Bearbeitung freischalten",
+    "close": "Schließen",
+    "body": "Du benötigst ein aktives Abonnement oder Guthaben, um die KI-Funktionen für dieses Motiv zu nutzen.",
+    "featuresLabel": "KI-Funktionen",
+    "fontsTitle": "Schlägt Schriftarten vor",
+    "fontsDesc": "Empfiehlt Google Fonts, die zu Stil und Stimmung des Designs passen.",
+    "pathsTitle": "Wandelt Textpfade in bearbeitbaren Text um",
+    "pathsDesc": "Erkennt in Konturen eingebettete Schrift und wandelt sie zurück in echten, bearbeitbaren Text.",
+    "later": "Vielleicht später",
+    "upgrade": "Zum Freischalten upgraden"
+  },
+
+  "cooldown": {
+    "title": "Bereits angepasst",
+    "close": "Schließen",
+    "body": "Dieses Motiv wurde kürzlich angepasst, daher pausiert der KI-Durchlauf.",
+    "again": " Du kannst es %{when} erneut anpassen.",
+    "inMinutes": {
+      "one": "in %{count} Minute",
+      "other": "in %{count} Minuten"
+    },
+    "inHours": {
+      "one": "in %{count} Stunde",
+      "other": "in %{count} Stunden"
+    },
+    "gotIt": "Verstanden"
+  },
+
+  "confirm": {
+    "cancel": "Abbrechen",
+    "resetTitle": "Alle Änderungen verwerfen?",
+    "resetBody": "Dadurch wird die Datei so wiederhergestellt, wie sie importiert wurde. Alles, was du seitdem bearbeitet hast — einschließlich ausgeblendeter Ebenen — geht verloren.",
+    "resetConfirm": "Änderungen verwerfen"
+  },
+
+  "rating": {
+    "title": "Wie war der Export?",
+    "body": "Bewerte ihn und wir starten deinen Download.",
+    "star": "%{star} von 5",
+    "missedTheMark": "Schade, dass das nicht gepasst hat. Du kannst diesen Export abbrechen, bevor er heruntergeladen wird, und uns sagen, warum.",
+    "abandon": "Export abbrechen",
+    "cancel": "Abbrechen",
+    "submit": "Bewertung senden & herunterladen"
+  },
+
+  "abort": {
+    "title": "Warum brichst du diesen Export ab?",
+    "body": "Wähle alles Zutreffende aus. Es geht direkt an das Team.",
+    "noteLabel": "Sonst noch etwas? (optional)",
+    "notePlaceholder": "Erzähl uns, was passiert ist…",
+    "back": "Zurück",
+    "confirm": "Abbrechen & senden",
+    "reasons": {
+      "colours": "Farben oder Schriften sind falsch herausgekommen",
+      "different": "Die Datei sieht anders aus als auf der Arbeitsfläche",
+      "fileType": "Falscher Dateityp für meinen Zweck",
+      "textMoved": "Text wurde abgeschnitten oder verschoben",
+      "tooSlow": "Der Export hat zu lange gedauert",
+      "mistake": "Ich habe einen Fehler gemacht — ich fange neu an"
+    }
+  }
+}

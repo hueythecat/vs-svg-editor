@@ -2,6 +2,7 @@ import React, { Dispatch, SetStateAction, useRef, useState } from 'react';
 
 import type { SvgLayer } from '@/lib/svg-utils';
 import { C, FONT_STACK, MONO_STACK } from '@/lib/design-tokens';
+import { useT } from '@/i18n/provider';
 import {
   ChevronIcon,
   DuplicateIcon, EyeIcon, EyeSlashIcon, GripIcon, ImageIcon, ShapeIcon, TrashIcon, TypeIcon,
@@ -20,7 +21,7 @@ const ICON_FOR = {
 
 export const LayerList = React.memo(function LayerList({
   layers, hiddenLayers, selectedLayers, backgroundLayerId, textLayerIds,
-  expandableLayerIds, hiddenInsideCounts,
+  expandableLayerIds, hiddenInsideCounts, marks,
   onReorderLayers, onSetSelectedLayers, onSetSelectedLayer, onSelectOne,
   onToggleLayer, onDuplicateLayer, onDeleteLayer, onExpandLayer,
 }: {
@@ -33,6 +34,10 @@ export const LayerList = React.memo(function LayerList({
   // Per layer: how many outermost pieces of artwork an AI pass hid INSIDE it. Nested
   // hidden elements are not rows of their own, so without this the row gives no sign.
   hiddenInsideCounts: Map<string, number>;
+  // How each row relates to the group the list is drilled into: `inside` for the rows that
+  // came out of it, `outer` for the level above it, absent for rows the breadcrumb has
+  // nothing to say about. Empty at the top level, where every row is equally "here".
+  marks: ReadonlyMap<string, 'inside' | 'outer'>;
   onReorderLayers: (fromId: string, toId: string, before: boolean) => void;
   onSetSelectedLayers: Dispatch<SetStateAction<Set<string>>>;
   onSetSelectedLayer: Dispatch<SetStateAction<string | null>>;
@@ -42,6 +47,7 @@ export const LayerList = React.memo(function LayerList({
   onDeleteLayer: (id: string) => void;
   onExpandLayer: (id: string) => void;
 }) {
+  const t = useT();
   const [dragLayerId, setDragLayerId]   = useState<string | null>(null);
   const [dropPosition, setDropPosition] = useState<{ targetId: string; before: boolean } | null>(null);
 
@@ -215,7 +221,7 @@ export const LayerList = React.memo(function LayerList({
     >
       {layers.length === 0 ? (
         <p style={{ fontSize: 12, color: C.textFaint, padding: '12px 4px', textAlign: 'center', margin: 0 }}>
-          No named layers found
+          {t('layers.empty')}
         </p>
       ) : (
         [...layers].reverse().map((layer) => {
@@ -228,6 +234,18 @@ export const LayerList = React.memo(function LayerList({
           const Icon       = ICON_FOR[kind];
           const dropBefore = dropPosition?.targetId === layer.id && dropPosition.before;
           const dropAfter  = dropPosition?.targetId === layer.id && !dropPosition.before;
+          // The eye acts on the whole selection when this row is part of one, so the
+          // tooltip says how many rows are going with it rather than promising a
+          // single-row change. Its icon still reflects THIS row — that row is the one
+          // deciding the direction the rest are driven to.
+          // Rows opened out of a group are stepped in behind a rail, and the rows of the
+          // level above are receded rather than hidden: they are still perfectly usable,
+          // just not what was drilled into. A selected row is never receded — the
+          // selection has to stay legible wherever it sits.
+          const inside   = marks.get(layer.id) === 'inside';
+          const receded  = marks.get(layer.id) === 'outer' && !isSelected;
+          const togglesWith = isSelected && selectedLayers.size > 1 ? selectedLayers.size : 1;
+          const toggleTitle = t(hidden ? 'layers.show' : 'layers.hide', { count: togglesWith });
           return (
             <div
               key={layer.id}
@@ -263,13 +281,20 @@ export const LayerList = React.memo(function LayerList({
                 position: 'relative',
                 display: 'flex', alignItems: 'center', gap: 7,
                 padding: '7px 8px', borderRadius: 8,
+                marginLeft: inside ? 11 : 0,
                 border: `1px solid ${isSelected ? C.accentTintBorder : 'transparent'}`,
                 background: isSelected ? C.accentTint : 'transparent',
-                opacity: isDragged ? 0.35 : 1,
+                opacity: isDragged ? 0.35 : receded ? 0.62 : 1,
                 userSelect: 'none',
                 cursor: 'default',
               }}
             >
+              {/* Group rail. Drawn in the gutter the row's margin opens up, and overshooting
+                  the 2px row gap at both ends so consecutive rows read as one line rather
+                  than a dashed column. */}
+              {inside && (
+                <span style={{ position: 'absolute', top: -2, bottom: -2, left: -7, width: 2, borderRadius: 1, background: C.accentTintBorder, pointerEvents: 'none' }} />
+              )}
               {dropBefore && (
                 <span style={{ position: 'absolute', top: -1, left: 4, right: 4, height: 2, borderRadius: 1, background: C.accent, pointerEvents: 'none' }} />
               )}
@@ -283,7 +308,7 @@ export const LayerList = React.memo(function LayerList({
                 <button
                   type="button"
                   className="ed-ghost"
-                  title="Open this layer into its parts"
+                  title={t('layers.expand')}
                   onPointerDown={(e) => e.stopPropagation()}
                   onClick={(e) => { e.stopPropagation(); onExpandLayer(layer.id); }}
                   style={{
@@ -300,7 +325,7 @@ export const LayerList = React.memo(function LayerList({
 
               {/* Drag grip */}
               <span
-                title="Drag to reorder"
+                title={t('layers.drag')}
                 onPointerDown={(e) => {
                   if (e.button !== 0) return;
                   e.stopPropagation();
@@ -324,16 +349,16 @@ export const LayerList = React.memo(function LayerList({
 
               {/* Name */}
               <span
-                title={isCanvas ? 'Canvas' : layer.label}
+                title={isCanvas ? t('layers.canvas') : layer.label}
                 style={{
                   flex: 1, minWidth: 0,
                   fontSize: 13,
                   fontWeight: isSelected ? 600 : 400,
-                  color: hidden ? C.textHidden : isSelected ? C.textPrimary : C.textSecondary,
+                  color: hidden ? C.textHidden : isSelected ? C.textPrimary : receded ? C.textFaint : C.textSecondary,
                   overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                 }}
               >
-                {isCanvas ? 'Canvas' : layer.label}
+                {isCanvas ? t('layers.canvas') : layer.label}
               </span>
 
               {/*
@@ -346,7 +371,7 @@ export const LayerList = React.memo(function LayerList({
               */}
               {hiddenInsideCount > 0 && (
                 <span
-                  title={`${hiddenInsideCount} hidden by an AI pass — open this layer to bring ${hiddenInsideCount === 1 ? 'it' : 'them'} back`}
+                  title={t('layers.hiddenInside', { count: hiddenInsideCount })}
                   style={{
                     flex: 'none', padding: '1px 5px', borderRadius: 999,
                     fontSize: 10, fontWeight: 600, lineHeight: 1.5,
@@ -362,12 +387,12 @@ export const LayerList = React.memo(function LayerList({
               <span style={{ display: 'flex', alignItems: 'center', gap: 7, flex: 'none' }}>
                 {action(
                   () => onToggleLayer(layer.id),
-                  hidden ? 'Show layer' : 'Hide layer',
+                  toggleTitle,
                   hidden ? C.disabled : C.accent,
                   hidden ? <EyeSlashIcon size={12} /> : <EyeIcon size={12} />,
                 )}
-                {action(() => onDuplicateLayer(layer.id), 'Duplicate layer', '#8a93a3', <DuplicateIcon size={12} />)}
-                {!isCanvas && action(() => onDeleteLayer(layer.id), 'Delete layer', C.danger, <TrashIcon size={12} />)}
+                {action(() => onDuplicateLayer(layer.id), t('layers.duplicate'), '#8a93a3', <DuplicateIcon size={12} />)}
+                {!isCanvas && action(() => onDeleteLayer(layer.id), t('layers.delete'), C.danger, <TrashIcon size={12} />)}
               </span>
             </div>
           );

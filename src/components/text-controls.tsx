@@ -2,6 +2,7 @@ import React, { RefObject } from 'react';
 
 import type { SelectedTextProps } from '@/lib/svg-utils';
 import { C, TEXT_PALETTE, inputStyle, labelStyle } from '@/lib/design-tokens';
+import { useT } from '@/i18n/provider';
 import type { TextLayerAttrs } from './editor-types';
 import { ColorSwatchRow } from './color-swatches';
 
@@ -14,11 +15,12 @@ import { ColorSwatchRow } from './color-swatches';
 
 const FONTS = ['Arial', 'Helvetica', 'Georgia', 'Times New Roman', 'Courier New', 'Verdana', 'Impact', 'Trebuchet MS'];
 
+// Weight value → the key its name lives under. The numbers are CSS, the words are copy.
 const WEIGHTS: Array<[number, string]> = [
-  [400, '400 Regular'],
-  [500, '500 Medium'],
-  [700, '700 Bold'],
-  [800, '800 Black'],
+  [400, 'text.weight400'],
+  [500, 'text.weight500'],
+  [700, 'text.weight700'],
+  [800, 'text.weight800'],
 ];
 
 const LETTER_SPACING = [-0.1, -0.05, 0, 0.05, 0.1, 0.15, 0.2, 0.3] as const;
@@ -37,27 +39,28 @@ export const TextControls = React.memo(function TextControls({
   extraFonts: string[];
   onUpdateTextLayer: (attrs: Partial<TextLayerAttrs>) => void;
 }) {
+  const t = useT();
   const curve = selectedTextProps.curve ?? 0;
 
   return (
     <div>
       {/* Words */}
       <div style={{ marginBottom: 12 }}>
-        <label style={labelStyle}>Words</label>
+        <label style={labelStyle}>{t('text.words')}</label>
         <input
           ref={textContentRef}
           className="ed-input"
           type="text"
           value={selectedTextProps.content}
           onChange={(e) => onUpdateTextLayer({ content: e.target.value })}
-          placeholder="Type something…"
+          placeholder={t('text.wordsPlaceholder')}
           style={inputStyle}
         />
       </div>
 
       {/* Font */}
       <div style={{ marginBottom: 12 }}>
-        <label style={labelStyle}>Font</label>
+        <label style={labelStyle}>{t('text.font')}</label>
         <select
           className="ed-input"
           value={selectedTextProps.font}
@@ -73,20 +76,20 @@ export const TextControls = React.memo(function TextControls({
             a bare list gives no way to tell a font in use from one merely offered.
           */}
           {usedFonts.length > 0 && (
-            <optgroup label="In this design">
+            <optgroup label={t('text.groupInDesign')}>
               {usedFonts.map((f) => (
                 <option key={f} value={f} style={{ fontFamily: f }}>{f} ✦</option>
               ))}
             </optgroup>
           )}
           {extraFonts.length > 0 && (
-            <optgroup label="Suggested">
+            <optgroup label={t('text.groupSuggested')}>
               {extraFonts.map((f) => (
                 <option key={f} value={f} style={{ fontFamily: f }}>{f} ✦</option>
               ))}
             </optgroup>
           )}
-          <optgroup label="Standard">
+          <optgroup label={t('text.groupStandard')}>
             {FONTS.map((f) => (
               <option key={f} value={f} style={{ fontFamily: f }}>{f}</option>
             ))}
@@ -97,7 +100,7 @@ export const TextControls = React.memo(function TextControls({
       {/* Size + Weight */}
       <div style={fieldRow}>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <label style={labelStyle}>Size</label>
+          <label style={labelStyle}>{t('text.size')}</label>
           <input
             className="ed-input"
             type="number"
@@ -109,15 +112,15 @@ export const TextControls = React.memo(function TextControls({
           />
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <label style={labelStyle}>Weight</label>
+          <label style={labelStyle}>{t('text.weight')}</label>
           <select
             className="ed-input"
             value={selectedTextProps.weight}
             onChange={(e) => onUpdateTextLayer({ weight: Number(e.target.value) })}
             style={{ ...inputStyle, cursor: 'pointer' }}
           >
-            {WEIGHTS.map(([value, label]) => (
-              <option key={value} value={value}>{label}</option>
+            {WEIGHTS.map(([value, labelKey]) => (
+              <option key={value} value={value}>{t(labelKey)}</option>
             ))}
             {/* Keep whatever the file already uses selectable even if it isn't a preset */}
             {!WEIGHTS.some(([w]) => w === selectedTextProps.weight) && (
@@ -129,7 +132,7 @@ export const TextControls = React.memo(function TextControls({
 
       {/* Colour */}
       <div style={{ marginBottom: 12 }}>
-        <label style={labelStyle}>Color</label>
+        <label style={labelStyle}>{t('text.color')}</label>
         <ColorSwatchRow
           palette={TEXT_PALETTE}
           value={selectedTextProps.color}
@@ -141,7 +144,7 @@ export const TextControls = React.memo(function TextControls({
       {/* Spacing + Curve — this editor's extras, in the same two-column rhythm */}
       <div style={fieldRow}>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <label style={labelStyle}>Spacing</label>
+          <label style={labelStyle}>{t('text.spacing')}</label>
           <select
             className="ed-input"
             value={selectedTextProps.letterSpacing}
@@ -150,13 +153,17 @@ export const TextControls = React.memo(function TextControls({
           >
             {LETTER_SPACING.map((v) => (
               <option key={v} value={v}>
-                {v === 0 ? 'Normal' : v < 0 ? `Tight (${v}em)` : `+${v}em`}
+                {v === 0
+                  ? t('text.spacingNormal')
+                  : v < 0
+                  ? t('text.spacingTight', { value: v })
+                  : t('text.spacingLoose', { value: v })}
               </option>
             ))}
           </select>
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <label style={labelStyle}>Curve <span style={{ color: C.textFaint }}>{curve}</span></label>
+          <label style={labelStyle}>{t('text.curve')} <span style={{ color: C.textFaint }}>{curve}</span></label>
           <input
             type="range"
             min={-100}

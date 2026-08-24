@@ -4,6 +4,7 @@ import type { SelectedTextProps } from '@/lib/svg-utils';
 import {
   BG_PALETTE, C, FONT_STACK, MONO_STACK, SHADOW, labelStyle,
 } from '@/lib/design-tokens';
+import { useT } from '@/i18n/provider';
 import type { TextLayerAttrs } from './editor-types';
 import { ColorSwatchRow } from './color-swatches';
 import { CloseIcon, PencilIcon } from './svg-icons';
@@ -45,11 +46,11 @@ function useColorEdit(colors: string[], onReplaceColor: (from: string, to: strin
   return { rows, shown, begin, change, end };
 }
 
-function InspectorTitle(selectedTextProps: SelectedTextProps | null, isBackground: boolean, hasLayer: boolean) {
-  if (selectedTextProps) return 'Editing text';
-  if (isBackground) return 'Background';
-  if (hasLayer) return 'Vector colours';
-  return 'Nothing selected';
+function inspectorTitleKey(selectedTextProps: SelectedTextProps | null, isBackground: boolean, hasLayer: boolean) {
+  if (selectedTextProps) return 'inspector.titleText';
+  if (isBackground) return 'inspector.titleBackground';
+  if (hasLayer) return 'inspector.titleColours';
+  return 'inspector.titleEmpty';
 }
 
 export const EditorInspector = React.memo(function EditorInspector({
@@ -69,8 +70,9 @@ export const EditorInspector = React.memo(function EditorInspector({
   onEndColorEdit: () => void;
   onClose: () => void;
 }) {
+  const t = useT();
   const { rows, shown, begin, change, end } = useColorEdit(layerColors, onReplaceColor, onEndColorEdit);
-  const title = InspectorTitle(selectedTextProps, isBackground, !!selectedLayer);
+  const title = t(inspectorTitleKey(selectedTextProps, isBackground, !!selectedLayer));
   const canvasColor = rows[0] ?? '';
 
   return (
@@ -100,7 +102,7 @@ export const EditorInspector = React.memo(function EditorInspector({
           type="button"
           className="ed-ghost"
           onClick={onClose}
-          title="Deselect"
+          title={t('inspector.deselect')}
           style={{
             border: 'none', background: 'transparent', color: C.textFaint,
             padding: 2, borderRadius: 6, cursor: 'pointer', display: 'flex',
@@ -122,7 +124,7 @@ export const EditorInspector = React.memo(function EditorInspector({
         ) : isBackground ? (
           /* ── Canvas colour ─────────────────────────────────────────────── */
           <div>
-            <label style={labelStyle}>Canvas color</label>
+            <label style={labelStyle}>{t('inspector.canvasColor')}</label>
             {canvasColor ? (
               <ColorSwatchRow
                 palette={BG_PALETTE}
@@ -134,20 +136,20 @@ export const EditorInspector = React.memo(function EditorInspector({
               />
             ) : (
               <p style={{ fontSize: 12, lineHeight: 1.6, color: C.textFaint, margin: 0 }}>
-                This background has no fill colour to change.
+                {t('inspector.noBackgroundFill')}
               </p>
             )}
           </div>
         ) : selectedLayer ? (
           /* ── Find & replace colours ────────────────────────────────────── */
           <div>
-            <label style={labelStyle}>Find &amp; replace colours</label>
+            <label style={labelStyle}>{t('inspector.findReplace')}</label>
             <p style={{ fontSize: 11, color: C.textFaint, margin: '0 0 8px', lineHeight: 1.5 }}>
-              Click a colour to recolour every shape in the artwork that uses it.
+              {t('inspector.findReplaceHint')}
             </p>
             {rows.length === 0 ? (
               <p style={{ fontSize: 12, lineHeight: 1.6, color: C.textFaint, margin: 0 }}>
-                No colours detected on this layer.
+                {t('inspector.noColours')}
               </p>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
@@ -195,10 +197,15 @@ export const EditorInspector = React.memo(function EditorInspector({
           </div>
         ) : (
           /* ── Nothing selected ──────────────────────────────────────────── */
+          /* Split across five keys rather than one, because two words inside it are
+             emphasised — and where those words sit in the sentence is a property of the
+             language, not of the layout. */
           <p style={{ fontSize: 12, lineHeight: 1.6, color: C.textFaint, margin: 0 }}>
-            Select a <strong style={{ color: C.textSecondary, fontWeight: 600 }}>text</strong> layer to edit type,
-            the <strong style={{ color: C.textSecondary, fontWeight: 600 }}>artwork</strong> to swap its colours, or
-            drag anything to move, resize and rotate it.
+            {t('inspector.emptyBefore')}
+            <strong style={{ color: C.textSecondary, fontWeight: 600 }}>{t('inspector.emptyText')}</strong>
+            {t('inspector.emptyMiddle')}
+            <strong style={{ color: C.textSecondary, fontWeight: 600 }}>{t('inspector.emptyArtwork')}</strong>
+            {t('inspector.emptyAfter')}
           </p>
         )}
       </div>

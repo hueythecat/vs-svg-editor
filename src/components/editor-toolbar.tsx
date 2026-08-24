@@ -1,6 +1,7 @@
 import React from 'react';
 
 import { C, SHADOW, FONT_STACK, toolButtonStyle } from '@/lib/design-tokens';
+import { useT } from '@/i18n/provider';
 import {
   CenterIcon, CloseIcon, DownloadIcon, RedoIcon, RevertIcon, RotateIcon, UndoIcon,
 } from './svg-icons';
@@ -63,6 +64,7 @@ export const EditorToolbar = React.memo(function EditorToolbar({
   onClose: () => void;
   onReset: () => void;
 }) {
+  const t = useT();
   return (
     <div
       style={{
@@ -107,17 +109,17 @@ export const EditorToolbar = React.memo(function EditorToolbar({
       </span>
       {isDirty && (
         <span
-          title="Unsaved changes"
+          title={t('toolbar.unsavedChanges')}
           style={{ width: 6, height: 6, borderRadius: '50%', background: C.star, flex: 'none' }}
         />
       )}
 
       {divider}
 
-      <IconButton onClick={onUndo} disabled={undoCount === 0} title="Undo (⌘Z)">
+      <IconButton onClick={onUndo} disabled={undoCount === 0} title={t('toolbar.undo')}>
         <UndoIcon size={15} />
       </IconButton>
-      <IconButton onClick={onRedo} disabled={redoCount === 0} title="Redo (⇧⌘Z)">
+      <IconButton onClick={onRedo} disabled={redoCount === 0} title={t('toolbar.redo')}>
         <RedoIcon size={15} />
       </IconButton>
 
@@ -127,18 +129,18 @@ export const EditorToolbar = React.memo(function EditorToolbar({
         type="button"
         className="ed-ghost"
         onClick={onCenter}
-        title="Centre every layer on the canvas"
+        title={t('toolbar.centerTitle')}
         style={toolButtonStyle}
       >
         <CenterIcon size={14} />
-        Center
+        {t('toolbar.center')}
       </button>
       <button
         type="button"
         className="ed-ghost"
         onClick={onRotate90}
         disabled={transformDisabled}
-        title="Rotate the selection 90°"
+        title={t('toolbar.rotate90Title')}
         style={{
           ...toolButtonStyle,
           color: transformDisabled ? C.disabledIcon : C.textSecondary,
@@ -151,11 +153,11 @@ export const EditorToolbar = React.memo(function EditorToolbar({
       <IconButton
         onClick={onMatchRotation}
         disabled={matchRotationDisabled}
-        title="Match every layer to the selected layer's rotation"
+        title={t('toolbar.matchRotationTitle')}
       >
         <RotateIcon size={15} />
       </IconButton>
-      <IconButton onClick={onReset} disabled={!isDirty} title="Revert to the original file">
+      <IconButton onClick={onReset} disabled={!isDirty} title={t('toolbar.revertTitle')}>
         <RevertIcon size={15} />
       </IconButton>
 
@@ -175,7 +177,7 @@ export const EditorToolbar = React.memo(function EditorToolbar({
         {exportLabel}
       </button>
 
-      <IconButton onClick={onClose} title="Close file (ESC)" color={C.textFaint}>
+      <IconButton onClick={onClose} title={t('toolbar.closeTitle')} color={C.textFaint}>
         <CloseIcon size={15} />
       </IconButton>
     </div>

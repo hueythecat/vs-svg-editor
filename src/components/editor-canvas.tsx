@@ -2,6 +2,7 @@ import React, { useMemo } from 'react';
 
 import type { ActiveSvg } from '@/lib/svg-utils';
 import { C, MONO_STACK, SHADOW, FONT_STACK, checkerStyle } from '@/lib/design-tokens';
+import { useT } from '@/i18n/provider';
 import { MoveIcon, ResizeIcon, RotateIcon, SparklesIcon } from './svg-icons';
 
 // The canvas stage (handoff §1.1–1.3): a full-bleed, flex-centred area holding the
@@ -77,6 +78,7 @@ export const CanvasStage = React.memo(function CanvasStage({
   onRotateHandleMouseDown: (e: React.MouseEvent<HTMLDivElement>) => void;
   onScaleHandleMouseDown: (e: React.MouseEvent<HTMLDivElement>) => void;
 }) {
+  const t = useT();
   const aspect = useMemo(() => documentAspect(activeSvg?.content), [activeSvg?.content]);
   // No full-canvas background layer — or it's hidden — means the artwork exports with
   // transparency, so the board shows a checkerboard rather than implying a white fill.
@@ -129,7 +131,7 @@ export const CanvasStage = React.memo(function CanvasStage({
           fontFamily: FONT_STACK,
         }}
       >
-        Beta
+        {t('canvas.beta')}
       </span>
 
       {aiLoading && (
@@ -228,7 +230,7 @@ export const CanvasStage = React.memo(function CanvasStage({
               <div
                 onMouseDown={onRotateHandleMouseDown}
                 onClick={(e) => e.stopPropagation()}
-                title="Drag to rotate (hold Shift to snap to 15°)"
+                title={t('canvas.rotateHandle')}
                 style={{
                   ...handleBase,
                   left: '50%', top: -42, marginLeft: -10,
@@ -244,7 +246,7 @@ export const CanvasStage = React.memo(function CanvasStage({
               <div
                 onMouseDown={onDragHandleMouseDown}
                 onClick={(e) => e.stopPropagation()}
-                title="Drag to move"
+                title={t('canvas.moveHandle')}
                 style={{
                   ...handleBase,
                   top: -11, left: -11,
@@ -259,7 +261,7 @@ export const CanvasStage = React.memo(function CanvasStage({
               <div
                 onMouseDown={onScaleHandleMouseDown}
                 onClick={(e) => e.stopPropagation()}
-                title="Drag to resize"
+                title={t('canvas.resizeHandle')}
                 style={{
                   ...handleBase,
                   bottom: -11, right: -11,
@@ -271,16 +273,20 @@ export const CanvasStage = React.memo(function CanvasStage({
                 <ResizeIcon size={11} />
               </div>
 
-              {/* Size badge — text written by the parent's positioning pass, which adds
-                  the x/y position to it while the selection is being moved */}
+              {/* Position + size badge — two lines, x/y over w/h, both written by the
+                  parent's positioning pass as one newline-separated string (hence `pre`).
+                  Anchored to the frame's bottom edge rather than offset up from it, so
+                  the second line extends downwards instead of over the artwork. It exists
+                  only while this overlay does — i.e. only for a selected or dragged
+                  layer. */}
               <span
                 ref={sizeBadgeRef}
                 style={{
-                  position: 'absolute', bottom: -24, left: 0,
+                  position: 'absolute', top: '100%', left: 0, marginTop: 8,
                   background: C.accent, color: '#fff',
-                  fontFamily: MONO_STACK, fontSize: 10,
-                  padding: '2px 6px', borderRadius: 4,
-                  pointerEvents: 'none', whiteSpace: 'nowrap',
+                  fontFamily: MONO_STACK, fontSize: 10, lineHeight: 1.45,
+                  padding: '3px 6px', borderRadius: 4,
+                  pointerEvents: 'none', whiteSpace: 'pre',
                 }}
               />
             </div>

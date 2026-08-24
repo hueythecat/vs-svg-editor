@@ -1,6 +1,7 @@
 import React from 'react';
 
 import { C, swatchStyle } from '@/lib/design-tokens';
+import { useT } from '@/i18n/provider';
 
 // The design's colour picker (handoff §1.6): a wrapping row of 24×24 palette swatches
 // plus a dashed "+" tile wrapping a full-bleed, invisible <input type="color"> for
@@ -18,6 +19,7 @@ export const ColorSwatchRow = React.memo(function ColorSwatchRow({
   onCustomPointerDown?: () => void;
   onCustomBlur?: () => void;
 }) {
+  const t = useT();
   return (
     <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
       {palette.map((c) => (
@@ -29,7 +31,7 @@ export const ColorSwatchRow = React.memo(function ColorSwatchRow({
         />
       ))}
       <label
-        title="Custom colour"
+        title={t('inspector.customColour')}
         style={{
           position: 'relative',
           width: 24, height: 24, borderRadius: 6, flex: 'none',
