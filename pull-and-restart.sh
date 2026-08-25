@@ -97,7 +97,16 @@ rm -rf "$STAGE"
 # The local binary rather than `npx`: the service user that runs this may not have npx
 # on PATH even when node is installed, and npx would silently try to fetch a package
 # instead of failing outright.
-if ! ./node_modules/.bin/expo export --platform web --output-dir "$STAGE"; then
+#
+# --clear is not optional here. Metro keys its transform cache on module source, but
+# EXPO_PUBLIC_* values are substituted into that transformed output — so editing .env
+# without touching any .ts leaves every cached module eligible for reuse and the export
+# re-emits the previous bundle, byte for byte, with the old values still inlined. It
+# exits 0 and swaps in a "new" build that is the old one. That failure is invisible from
+# the outside: right commit, healthy /health, stale behaviour. Since --no-pull exists
+# precisely for "an edited .env", the cost of a cold bundle every deploy is worth paying
+# to make the script actually do what it promises.
+if ! ./node_modules/.bin/expo export --platform web --clear --output-dir "$STAGE"; then
   log "expo export failed — aborting, previous build still serving"
   rm -rf "$STAGE"
   exit 1
