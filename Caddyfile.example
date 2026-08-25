@@ -72,7 +72,13 @@ editor.example.com {
 	# frame-ancestors 'none' assumes the editor is NOT embedded. If it is launched in an
 	# iframe from vectorstock, change it to that origin and drop X-Frame-Options above,
 	# or the editor will render as a blank frame.
-	header Content-Security-Policy-Report-Only "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+	# The three paddle.com sources are what the dev rail's Buy button needs: Paddle.js is
+	# fetched from cdn.paddle.com, talks to api/checkout hosts under paddle.com, and draws
+	# the overlay in an iframe from buy.paddle.com (sandbox-buy.paddle.com in sandbox).
+	# Miss any one and the button fails in a way that looks like a Paddle outage rather
+	# than a policy: the script 404s, or the overlay opens blank. Drop all three if the
+	# billing button is removed — they are only here for it.
+	header Content-Security-Policy-Report-Only "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.paddle.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https://*.paddle.com; connect-src 'self' https://*.paddle.com; frame-src https://*.paddle.com; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
 
 	# --- Blocked in production -------------------------------------------------------
 	#

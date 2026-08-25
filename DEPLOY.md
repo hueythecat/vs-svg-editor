@@ -98,7 +98,30 @@ API_HOST=https://dev.vectorstock.com
 API_COOLDOWN=...
 EXPO_ADMIN=user:password
 EXPO_PUBLIC_FONT_SUGGESTION_LIMIT=5
+EXPO_PUBLIC_DEV_AUTH=off
+EXPO_PUBLIC_PADDLE_ENV=sandbox
+EXPO_PUBLIC_PADDLE_TOKEN=test_...
+EXPO_PUBLIC_PADDLE_PRICE_ID=pri_...
 ```
+
+`EXPO_PUBLIC_DEV_AUTH=off` disables the sign-in gate on a non-production build while
+leaving everything else about dev mode in place. Its own switch rather than a second
+reading of `EXPO_PUBLIC_APP_ENV`, because setting that to `production` also drops the dev
+rail, the AI tools panel, the `has_customised` override and the AI response cache. Only
+`off`, `0` or `false` disable it, so a typo leaves the gate armed rather than silently
+opening a dev deployment to the internet. **A deployment with the gate off has no
+authentication of any kind** — the app never had a second layer, so put basic auth in
+Caddy if the host needs closing off.
+
+The three `EXPO_PUBLIC_PADDLE_*` vars configure the dev rail's Buy button, which opens a
+Paddle Billing overlay checkout and nothing else — no webhook, no fulfilment, no record
+that a payment happened. Unset, the button renders disabled and says which var is
+missing. `EXPO_PUBLIC_PADDLE_ENV` is `sandbox` unless it reads exactly `production`, so a
+misconfigured build cannot take real money. `EXPO_PUBLIC_PADDLE_TOKEN` is the
+*client-side* token from Paddle > Developer tools and is meant to ship in the bundle; a
+Paddle **API key** is server-side and must never be given an `EXPO_PUBLIC_` name, which
+would inline it into a bundle served to every visitor. Enforcing the CSP also needs the
+`paddle.com` sources in `Caddyfile.example` — without them the overlay opens blank.
 
 `EXPO_ADMIN` is the credential behind the sign-in gate on non-production builds
 (`src/app/api/auth+api.ts`). `user:password`, or a bare value to accept any username with that

@@ -4,6 +4,7 @@
   "version": "1.0.0",
   "dependencies": {
     "@expo/ui": "~56.0.16",
+    "@paddle/paddle-js": "^1.6.4",
     "@rn-primitives/slot": "^1.4.0",
     "@rn-primitives/types": "^1.4.0",
     "class-variance-authority": "^0.7.1",

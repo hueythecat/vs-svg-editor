@@ -8,15 +8,18 @@
 //
 // Static routes win over this one in expo-router, so /explore and friends are
 // unaffected; a non-uuid segment just renders the editor with nothing to load.
+//
+// /?uuid=<uuid> on the index route is the same thing said another way — see index.tsx.
+// Both spell the check with asReviewUuid so neither can accept a value the other refuses.
 import { useLocalSearchParams } from 'expo-router';
 
 import { SvgDropZone } from '@/components/svg-drop-zone';
-
-const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+import { asReviewUuid } from '@/lib/review-uuid';
 
 export default function ReviewScreen() {
-  const { uuid } = useLocalSearchParams<{ uuid: string }>();
-  const reviewUuid = uuid && UUID_RE.test(uuid) ? uuid : undefined;
+  // Path segment and query string land in the same bag here, so a /<uuid> link keeps
+  // working and a stray ?uuid= on this route resolves rather than being quietly dropped.
+  const { uuid } = useLocalSearchParams<{ uuid?: string }>();
 
-  return <SvgDropZone reviewUuid={reviewUuid} />;
+  return <SvgDropZone reviewUuid={asReviewUuid(uuid)} />;
 }

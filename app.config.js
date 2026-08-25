@@ -73,6 +73,11 @@ const BUILD_ENV_KEYS = [
   'EXPO_PUBLIC_DEV_AUTH',
   'EXPO_PUBLIC_FONT_SUGGESTION_LIMIT',
   'EXPO_PUBLIC_DEFAULT_LANGUAGE',
+  // Which Paddle account a checkout would charge, and what it would put in the basket.
+  // Not EXPO_PUBLIC_PADDLE_TOKEN: it is a client-side token and public by design, but
+  // /api/version is a status endpoint, not a place to hand out credentials of any kind.
+  'EXPO_PUBLIC_PADDLE_ENV',
+  'EXPO_PUBLIC_PADDLE_PRICE_ID',
 ];
 
 // null rather than omitted for an unset name: "this build had no value for it" is a

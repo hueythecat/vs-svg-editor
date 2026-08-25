@@ -8,6 +8,7 @@ import {
   setIgnoreCanCustomise as setIgnoreCanCustomiseFlag,
   setIgnoreCooldownPrompt, setIgnoreHasCustomised,
 } from '@/lib/dev-flags';
+import { PADDLE_ENV, openPaddleCheckout, paddleConfigError } from '@/lib/paddle';
 import { ChevronIcon, SettingsIcon } from './svg-icons';
 
 type Sample = { label: string; name: string; src: string; edit?: 0 | 1 };
@@ -100,6 +101,12 @@ export function DevRail<S extends Sample>({
   const [ignoreCustomised, setIgnoreCustomised] = useState(() => isIgnoreHasCustomised());
   const [ignoreCooldown, setIgnoreCooldown] = useState(() => isIgnoreCooldownPrompt());
   const [ignoreCanCustomise, setIgnoreCanCustomise] = useState(() => isIgnoreCanCustomise());
+  // Paddle checkout. Read once at render rather than on click: whether the build was
+  // given a token and a price is fixed at export time, so the button can say up front
+  // that it can't work instead of looking live and failing.
+  const paddleError = paddleConfigError();
+  const [buying, setBuying] = useState(false);
+  const [buyStatus, setBuyStatus] = useState<string | null>(null);
 
   // The dropdown's contents come from the review host, not a hardcoded list, so it
   // always reflects what's actually there to open. Fetched once the rail is expanded —
@@ -512,6 +519,60 @@ export function DevRail<S extends Sample>({
               />
               Ignore can_customise
             </label>
+          </div>
+
+          {/* Billing — opens Paddle's hosted overlay and stops there. Nothing records the
+              result: a completed payment reaches nothing in this app (see lib/paddle.ts). */}
+          <div style={{ padding: '0 12px 10px' }}>
+            <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: '.6px', color: C.devTextDim }}>
+              BILLING
+            </span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 7 }}>
+              <button
+                type="button"
+                disabled={buying || paddleError !== null}
+                onClick={async () => {
+                  setBuying(true);
+                  setBuyStatus(null);
+                  try {
+                    await openPaddleCheckout();
+                    // The overlay is Paddle's from here; there is no completion to await.
+                    setBuyStatus('Checkout opened');
+                  } catch (err) {
+                    setBuyStatus(err instanceof Error ? err.message : 'Checkout failed');
+                  } finally {
+                    setBuying(false);
+                  }
+                }}
+                title={paddleError ?? `Open a ${PADDLE_ENV} Paddle checkout`}
+                style={{
+                  border: `1px solid ${C.devBorder}`, background: C.devSurfaceAlt,
+                  color: C.devTextDim, borderRadius: 6, padding: '3px 9px',
+                  fontSize: 9, fontWeight: 700, letterSpacing: '.4px',
+                  fontFamily: FONT_STACK, flex: 'none',
+                  opacity: buying || paddleError ? 0.45 : 1,
+                  cursor: buying || paddleError ? 'default' : 'pointer',
+                }}
+              >
+                {buying ? 'OPENING…' : 'BUY'}
+              </button>
+              {/* Which account the money would go to is the thing worth having on screen
+                  next to a live-looking button, so a production token can't sit here
+                  unnoticed behind a control someone is clicking to test with. */}
+              <span
+                style={{
+                  fontSize: 9, fontWeight: 700, letterSpacing: '.4px',
+                  color: PADDLE_ENV === 'production' ? C.dangerText : C.devTextFaint,
+                }}
+              >
+                {PADDLE_ENV.toUpperCase()}
+              </span>
+            </div>
+            {(buyStatus ?? paddleError) && (
+              <span style={{ display: 'block', marginTop: 6, fontSize: 9, color: C.devTextFaint, lineHeight: 1.5 }}>
+                {buyStatus ?? paddleError}
+              </span>
+            )}
           </div>
 
           {/* Samples */}
