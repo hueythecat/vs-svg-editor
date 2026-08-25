@@ -3,14 +3,16 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   C, EDITOR_CSS, FONT_STACK, MONO_STACK, SHADOW, inputStyle, primaryButtonStyle,
 } from '@/lib/design-tokens';
-import { CODE_VERSION, SHOW_DEV_UI } from '@/lib/env';
+import { CODE_VERSION, REQUIRE_DEV_AUTH } from '@/lib/env';
 
 // Sign-in wall for dev builds. A dev deployment is publicly reachable but isn't for the
 // public: it carries the dev rail, the AI tools panel and the review-host plumbing. This
 // asks for the EXPO_ADMIN credentials before any of it is mounted.
 //
-// Inert in a production build — SHOW_DEV_UI is false there, and this renders its children
-// straight through, so the shipped app never sees a login box.
+// Inert whenever REQUIRE_DEV_AUTH is false — always in a production build, and in a dev
+// build that sets EXPO_PUBLIC_DEV_AUTH=off to keep the dev surfaces without the wall. In
+// both cases this renders its children straight through, so the shipped app never sees a
+// login box.
 //
 // The children are not rendered until the session checks out, rather than being covered
 // by an overlay: an overlay would still mount the editor, which starts fetching from the
@@ -26,10 +28,10 @@ const centred: React.CSSProperties = {
 };
 
 export function DevAuthGate({ children }: { children: React.ReactNode }) {
-  // A production build starts (and stays) open. SHOW_DEV_UI is a build-time constant, so
-  // this is decided once and can't change between renders — and it's the same value
+  // An ungated build starts (and stays) open. REQUIRE_DEV_AUTH is a build-time constant,
+  // so this is decided once and can't change between renders — and it's the same value
   // during SSR as it is after hydration, so the two agree on what to paint.
-  const [status, setStatus] = useState<Status>(SHOW_DEV_UI ? 'checking' : 'in');
+  const [status, setStatus] = useState<Status>(REQUIRE_DEV_AUTH ? 'checking' : 'in');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -37,7 +39,7 @@ export function DevAuthGate({ children }: { children: React.ReactNode }) {
   const passwordRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    if (!SHOW_DEV_UI) return;
+    if (!REQUIRE_DEV_AUTH) return;
     let live = true;
     // A valid cookie from an earlier sign-in means straight through — the gate should
     // cost one login per session, not one per reload.

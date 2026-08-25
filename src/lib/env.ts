@@ -19,6 +19,25 @@ export const IS_PRODUCTION_UI = APP_ENV ? APP_ENV === 'production' : !__DEV__;
 // Convenience inverse — most call sites read better as "show the dev thing".
 export const SHOW_DEV_UI = !IS_PRODUCTION_UI;
 
+// Whether the dev build's sign-in wall is armed.
+//
+// Its own switch rather than a second reading of APP_ENV. Flipping APP_ENV to production
+// does open the gate, but it also drops the dev rail, the AI tools panel, the
+// has_customised override and the AI response cache — so "stop asking me for the
+// password" quietly costs a 24h cooldown on every asset customised and a live call on
+// every pass. Those are separate questions, so they get separate answers.
+//
+// This only ever loosens: a production build has no gate to arm and this cannot add one.
+// Anything other than an explicit off value leaves it armed, so a typo here fails closed
+// rather than silently exposing a dev deployment.
+//
+// As with APP_ENV the name must appear as a literal `process.env.EXPO_PUBLIC_…`
+// expression to be inlined, and changing it needs a dev-server restart.
+const DEV_AUTH = process.env.EXPO_PUBLIC_DEV_AUTH;
+
+export const REQUIRE_DEV_AUTH =
+  SHOW_DEV_UI && !(DEV_AUTH === 'off' || DEV_AUTH === '0' || DEV_AUTH === 'false');
+
 // The commit this bundle was built from — short hash, +dirty when the build machine had
 // uncommitted changes. Re-exported from the module app.config.js generates at build time;
 // see that file for why it arrives as a generated literal rather than an env var. Shown
