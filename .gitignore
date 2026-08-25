@@ -15,6 +15,8 @@ src/lib/code-version.ts
 # Deploy scratch — pull-and-restart.sh exports here, then swaps into dist/
 .dist-staging/
 dist.old/
+# Lock held by pull-and-restart.sh so two deploys can't race for .dist-staging
+.deploy.lock
 
 
 # Native

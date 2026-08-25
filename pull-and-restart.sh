@@ -50,6 +50,27 @@ log() { echo "$(date '+%Y-%m-%d %H:%M:%S'): $*"; }
 
 cd "$REPO_DIR" || { log "cd to $REPO_DIR failed"; exit 1; }
 
+# One deploy at a time. Two concurrent runs share .dist-staging, and the second's
+# `rm -rf "$STAGE"` deletes the first's export out from under it while it is still being
+# written — the swap then puts a half-finished dist/ in front of users and the site 503s
+# until someone re-runs it. Easy to trigger by hand: a deploy that seems stuck invites a
+# second one in another shell.
+#
+# Non-blocking rather than queueing. A second run started because the first looked slow
+# wants to be told it is redundant, not to silently run again a minute later against a
+# tree someone has since changed.
+LOCK_FILE="$REPO_DIR/.deploy.lock"
+if command -v flock > /dev/null 2>&1; then
+  exec 9> "$LOCK_FILE" || { log "cannot open $LOCK_FILE"; exit 1; }
+  if ! flock -n 9; then
+    log "another deploy is already running — this run is doing nothing"
+    exit 1
+  fi
+else
+  # Don't fail the deploy over a missing util-linux; say so and carry on unguarded.
+  log "flock not found — concurrent-deploy guard is off for this run"
+fi
+
 NEED_NPM_CI=0
 
 if [ "$PULL" = 1 ]; then
@@ -148,6 +169,18 @@ VERSION=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
 for attempt in $(seq 1 10); do
   if curl -fsS --max-time 3 "$HEALTH_URL" > /dev/null; then
     log "Deployed $VERSION — health check passed"
+    # What actually shipped, not what the checkout says. /api/version answers from the
+    # constants inlined at export time, so this line distinguishes a real deploy from an
+    # export that re-emitted the previous bundle with stale EXPO_PUBLIC_* values — the
+    # case where the commit, the health check and pm2 all still report success. Read it
+    # after any .env edit: if the flags don't show the change, the export didn't take it.
+    #
+    # Advisory only. The deploy is already live and healthy by this point, so a failure
+    # to read it back is not a reason to report the deploy as failed.
+    VERSION_URL="${VERSION_URL:-${HEALTH_URL%/health}/api/version}"
+    BUILD=$(curl -fsS --max-time 3 "$VERSION_URL" 2>/dev/null) \
+      && log "Build: $BUILD" \
+      || log "Build: could not read $VERSION_URL (deploy is healthy regardless)"
     exit 0
   fi
   sleep 2
