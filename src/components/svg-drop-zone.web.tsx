@@ -3515,20 +3515,95 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     selectOne(parent.id);
   }, [activeSvg, snapshotForUndo, selectOne]);
 
-  // Delete a layer (removes its element and its layers-list entry). Undoable.
-  const deleteLayer = useCallback((layerId: string) => {
+  // Delete layers (their elements and their layers-list entries). Undoable, as one
+  // step: a multi-row delete is one action to the person who asked for it, so one undo
+  // has to put all of it back rather than making them press it once per layer.
+  const deleteLayers = useCallback((requestedIds: string[]) => {
     if (!activeSvg) return;
-    snapshotForUndo(activeSvg.content, activeSvg.layers);
+    // The background layer is locked everywhere else — the overlay won't frame it and
+    // the handles won't move it — so it can't be the one thing a delete does reach.
+    const ids = requestedIds.filter((id) => id !== backgroundLayerId);
+    if (!ids.length) return;
+
     const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
-    doc.getElementById(layerId)?.remove();
+
+    // Removing a group takes its descendants out of the document with it, so they have
+    // to leave the layers list too. Expanding a group lists its children as rows of
+    // their own: without this, deleting the group leaves those rows behind pointing at
+    // elements that no longer exist, and the export count keeps counting them.
+    //
+    // Collected from the document rather than the layers list because the list only
+    // holds what is currently expanded, while the removal takes the whole subtree.
+    const gone = new Set<string>();
+    for (const id of ids) {
+      const el = doc.getElementById(id);
+      if (!el) continue;
+      gone.add(id);
+      for (const child of el.querySelectorAll('[id]')) gone.add(child.id);
+      el.remove();
+    }
+    // Nothing resolved to a real element — don't snapshot an edit that didn't happen,
+    // which would otherwise cost the user an undo press that appears to do nothing.
+    if (!gone.size) return;
+
+    snapshotForUndo(activeSvg.content, activeSvg.layers);
     const content = new XMLSerializer().serializeToString(doc.documentElement);
-    setActiveSvg((prev) => (prev ? { ...prev, content, layers: prev.layers.filter((l) => l.id !== layerId) } : null));
-    setSelectedLayer((cur) => (cur === layerId ? null : cur));
-    setSelectedLayers((prev) => {
-      if (!prev.has(layerId)) return prev;
-      const next = new Set(prev); next.delete(layerId); return next;
+    setActiveSvg((prev) => (
+      prev ? { ...prev, content, layers: prev.layers.filter((l) => !gone.has(l.id)) } : null
+    ));
+
+    const withoutGone = (prev: Set<string>) => {
+      const next = new Set([...prev].filter((id) => !gone.has(id)));
+      return next.size === prev.size ? prev : next;
+    };
+    setSelectedLayer((cur) => (cur && gone.has(cur) ? null : cur));
+    setSelectedLayers(withoutGone);
+    // Hidden ids for elements that are gone would keep the overlay and the export count
+    // reasoning about artwork that no longer exists. Unlike dropSelectionOutside there
+    // is no exemption for AI-hidden nested ids here: those elements have been removed
+    // from the document outright, not merely filtered out of the rows.
+    setHiddenLayers(withoutGone);
+    // A restore entry for a deleted element would offer to bring back something with
+    // nowhere to go. Mirrors the pruning toggleLayer does when a row is shown again.
+    setRemovedRecords((prev) => {
+      if (!prev.some((r) => gone.has(r.id))) return prev;
+      removedIdsRef.current = new Set([...removedIdsRef.current].filter((x) => !gone.has(x)));
+      return prev.filter((r) => !gone.has(r.id));
     });
-  }, [activeSvg, snapshotForUndo]);
+  }, [activeSvg, backgroundLayerId, snapshotForUndo]);
+
+  // The row's trash button. Deleting a row that is part of a multi-row selection takes
+  // the whole selection, matching toggleLayer: with several rows selected, an action on
+  // one of them is read as an action on all of them. Clicking the trash on a row
+  // *outside* the selection still deletes only that row — it isn't what was selected.
+  const deleteLayer = useCallback((layerId: string) => {
+    const ids = selectedLayers.size > 1 && selectedLayers.has(layerId) ? [...selectedLayers] : [layerId];
+    deleteLayers(ids);
+  }, [selectedLayers, deleteLayers]);
+
+  // Delete/Backspace removes whatever is selected on the canvas, so a selection made by
+  // clicking artwork can be deleted without hunting for its row in the panel.
+  //
+  // selectionIds rather than selectedLayers: it already excludes the locked background,
+  // so the key does nothing when the background is all that's selected instead of
+  // silently deleting the artwork's backdrop.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Delete' && e.key !== 'Backspace') return;
+      // Modified presses belong to other bindings, and a caret in a field — the layer
+      // rename box, the AI prompt — must keep deleting characters rather than artwork.
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const target = e.target;
+      if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) return;
+      if (target instanceof HTMLElement && target.isContentEditable) return;
+      if (!selectionIds.length) return;
+      // Backspace is Back in some browsers, which would drop the unsaved document.
+      e.preventDefault();
+      deleteLayers(selectionIds);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [selectionIds, deleteLayers]);
 
   // Ctrl/Cmd+C copies the selection; Ctrl/Cmd+V pastes it as a duplicate. A shift-built
   // selection of several layers pastes as one nested group — see duplicateLayersAsGroup.
