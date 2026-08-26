@@ -1,14 +1,19 @@
 import React, { Dispatch, SetStateAction } from 'react';
 
 import type { SvgLayer } from '@/lib/svg-utils';
-import { C, FONT_STACK, SHADOW, sectionLabelStyle } from '@/lib/design-tokens';
+import { C, FONT_STACK, sectionLabelStyle } from '@/lib/design-tokens';
 import { useT } from '@/i18n/provider';
 import { LayerList } from './layer-list';
 import { ChevronIcon, PlusIcon } from './svg-icons';
 
-// The floating "ELEMENTS" panel, bottom-left (handoff §1.7): a count header with an
-// add-text affordance, over the drag-to-reorder layer list.
-export const LayersPanel = React.memo(function LayersPanel({
+// The Layers tab of the control panel (editor-control-panel.tsx): an "ELEMENTS · n"
+// count header with an add-text affordance, over the drag-to-reorder layer list.
+//
+// This was the floating bottom-left panel; the tabbed handoff folds it into the shared
+// card, so it no longer draws its own frame. It still owns the column layout, because
+// the list underneath is the one part of the panel that scrolls — the header and the
+// breadcrumb stay put while it does.
+export const LayersTab = React.memo(function LayersTab({
   layers, hiddenLayers, selectedLayers, backgroundLayerId, textLayerIds, expandableLayerIds,
   hiddenInsideCounts,
   drillLabel, drillMarks, onBackOut, onAddTextLayer, onReorderLayers, onSetSelectedLayers, onSetSelectedLayer, onSelectOne,
@@ -40,20 +45,10 @@ export const LayersPanel = React.memo(function LayersPanel({
   return (
     <div
       style={{
-        position: 'absolute',
-        left: 16,
-        bottom: 16,
-        width: 214,
-        zIndex: 15,
-        // Bottom-anchored but free to grow upward to just under the toolbar, so a long
-        // element list is shown in full instead of being scrolled inside 170px.
-        maxHeight: 'calc(100vh - 92px)',
         display: 'flex',
         flexDirection: 'column',
-        background: C.surface,
-        border: `1px solid ${C.borderPanel}`,
-        borderRadius: 12,
-        boxShadow: SHADOW.layers,
+        minHeight: 0,
+        flex: '0 1 auto',
         fontFamily: FONT_STACK,
       }}
     >

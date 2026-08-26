@@ -45,16 +45,14 @@ import { readAiCache, writeAiCache } from '@/lib/ai-cache';
 import { t } from '@/i18n';
 import { useT } from '@/i18n/provider';
 import { isIgnoreCanCustomise, isIgnoreCooldownPrompt, isIgnoreHasCustomised } from '@/lib/dev-flags';
-import type { AiActionType, LlmProvider, RemovedRecord } from './editor-types';
+import type { AiActionType, DocBundle, LlmProvider, RemovedRecord, TextLayerAttrs } from './editor-types';
 import { LLM_OPTIONS } from './editor-types';
-import { LayersPanel } from './editor-layers-panel';
-import { EditorInspector } from './editor-inspector';
+import { EditorControlPanel, type ControlTab } from './editor-control-panel';
 import { AiPanel, AiPill } from './editor-ai-panel';
 import { DevRail, SAMPLE_DRAG_MIME } from './dev-rail';
 import { DevRemovedPanel } from './dev-removed-panel';
 import type { OpenedSample } from './dev-rail';
 import { UpsellModal, CooldownModal, RatingModal, AbortReasonModal, ConfirmModal } from './editor-modals';
-import { EditorToolbar } from './editor-toolbar';
 import { CanvasStage } from './editor-canvas';
 import { FontSuggestions } from './editor-font-suggestions';
 
@@ -170,6 +168,13 @@ type DrillMark = 'inside' | 'outer';
 // Stable empty map for "nothing is drilled into", so the memoised panel isn't re-rendered
 // by a fresh identity on every render of this component.
 const NO_MARKS: ReadonlyMap<string, DrillMark> = new Map<string, DrillMark>();
+
+// How far the pointer may travel between press and release and still count as a click
+// rather than a drag. This is the line between "type into this text" and "move it", so
+// it is deliberately looser than a pixel or two: at 2px an ordinary slightly-shaky click
+// on a text layer nudged it a fraction instead of opening the editor, which reads as the
+// click having done nothing except damage the artwork.
+const CLICK_SLOP_PX = 4;
 
 // The wrappers an element is drawn inside, from just below the root <svg> down to its own
 // parent. Cloning a layer out of its group and into a paste group at the root would drop
@@ -612,6 +617,13 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   const [showRemoveTextInput, setShowRemoveTextInput] = useState(false);
   const [textCheckResult, setTextCheckResult] = useState<{ heading: string; subheading: string } | null>(null);
   const [aiPanelOpen, setAiPanelOpen]         = useState(false);   // opened by the AI pill
+  // Which tab of the one control panel is showing. Panel state, deliberately separate
+  // from document state — the tab choice never enters the undo stack.
+  const [controlTab, setControlTab]           = useState<ControlTab>('tools');
+  // The text layer being typed into directly on the canvas, if any. Only ever the
+  // selected layer — inline editing is a mode the selection is in, not a second
+  // selection of its own.
+  const [editingTextId, setEditingTextId]     = useState<string | null>(null);
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false); // "Revert changes?" overlay
   const [devRailOpen, setDevRailOpen]           = useState(false); // dev rail expanded
   const [removedPanelOpen, setRemovedPanelOpen] = useState(false); // dev hidden-by-AI ledger
@@ -691,6 +703,10 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   const svgCanvasRef    = useRef<HTMLDivElement>(null);
   const textContentRef  = useRef<HTMLInputElement>(null);
   const overlayRef      = useRef<HTMLDivElement>(null);
+  // The contentEditable that sits over the artwork during inline editing. Deliberately
+  // uncontrolled: the document round-trips through a string on every keystroke, and
+  // rewriting the node's text from that would fight the caret.
+  const textEditorRef   = useRef<HTMLDivElement>(null);
   const sizeBadgeRef    = useRef<HTMLSpanElement>(null);
   // Shown when an AI action is invoked on a gated asset (edit === 0).
   const [showUpsell, setShowUpsell] = useState(false);
@@ -1072,6 +1088,10 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     setSelectedLayers(id ? new Set([id]) : new Set());
   }, []);
 
+  // Stable, because the control panel is memoised and an inline arrow here would
+  // re-render it on every parent render.
+  const deselect = useCallback(() => selectOne(null), [selectOne]);
+
   const clear = useCallback(() => {
     setActiveSvg((prev) => { revokePrev(prev); return null; });
     setActiveSample(null);
@@ -1322,21 +1342,25 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
           return;   // building a selection, not editing — never steal focus to the text input
         }
         selectOne(id);
+        // Clicking a text layer used to pull focus into the panel's Words field, so that
+        // typing went somewhere. Inline editing is that, done properly — and the focus
+        // grab actively broke it, landing on the rAF after this click and blurring the
+        // editable node the second click had just opened. Selecting is all a single
+        // click does now.
+        //
+        // A plain click on text starts editing it. This handler only ever sees clicks
+        // that did NOT move — a gesture that travelled set dragMovedRef and returned at
+        // the top — so press-and-hold-drag still moves the layer and never drops a caret
+        // into it. That is the whole split: click to type, hold to move.
         const isText =
           el.getAttribute('data-text-layer') === '1' ||
           el.tagName.toLowerCase() === 'text' ||
           !!el.querySelector('text');
-        if (isText) {
-          // Focus the inspector's Words input so typing edits the text in place. Place
-          // the caret at the end (rather than selecting all) so typing appends.
-          requestAnimationFrame(() => {
-            const input = textContentRef.current;
-            if (!input) return;
-            input.focus();
-            const end = input.value.length;
-            input.setSelectionRange(end, end);
-          });
-        }
+        // Curved layers have no flat box to type in — the editable node is a rectangle
+        // and the glyphs run along an arc, so what you typed would sit visibly off the
+        // artwork it replaces. The Text tab still edits those.
+        const curved = Number(el.getAttribute('data-curve') ?? '0') !== 0;
+        if (isText && !curved) setEditingTextId(id);
         return;
       }
       el = el.parentElement;
@@ -1350,8 +1374,8 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
 
     const onMove = (e: MouseEvent) => {
       if (!svgEl) return;
-      if (Math.abs(e.clientX - canvasDrag.startClientX) > 2 ||
-          Math.abs(e.clientY - canvasDrag.startClientY) > 2) {
+      if (Math.abs(e.clientX - canvasDrag.startClientX) > CLICK_SLOP_PX ||
+          Math.abs(e.clientY - canvasDrag.startClientY) > CLICK_SLOP_PX) {
         dragMovedRef.current = true;
       }
       if (!dragMovedRef.current) return;
@@ -1397,8 +1421,8 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
 
     const onMove = (e: MouseEvent) => {
       if (!svgEl) return;
-      if (Math.abs(e.clientX - canvasRotate.startClientX) > 2 ||
-          Math.abs(e.clientY - canvasRotate.startClientY) > 2) {
+      if (Math.abs(e.clientX - canvasRotate.startClientX) > CLICK_SLOP_PX ||
+          Math.abs(e.clientY - canvasRotate.startClientY) > CLICK_SLOP_PX) {
         dragMovedRef.current = true;
       }
       if (!dragMovedRef.current) return;
@@ -1450,8 +1474,8 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
 
     const onMove = (e: MouseEvent) => {
       if (!svgEl) return;
-      if (Math.abs(e.clientX - canvasScale.startClientX) > 2 ||
-          Math.abs(e.clientY - canvasScale.startClientY) > 2) {
+      if (Math.abs(e.clientX - canvasScale.startClientX) > CLICK_SLOP_PX ||
+          Math.abs(e.clientY - canvasScale.startClientY) > CLICK_SLOP_PX) {
         dragMovedRef.current = true;
       }
       if (!dragMovedRef.current) return;
@@ -1577,6 +1601,22 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     const layerEl = svgEl.querySelector(`#${CSS.escape(selectionLayerId)}`) as SVGGraphicsElement | null;
     if (!layerEl) return;
 
+    // Inline editor: match the artwork's type size, converted to screen pixels, so the
+    // words being typed are the size of the words they replace. Written here rather than
+    // in JSX because the scale only exists once the layer is measured — and it changes
+    // whenever the board is resized, which this function already tracks.
+    const editor = textEditorRef.current;
+    if (editor) {
+      const tEl = (layerEl.tagName.toLowerCase() === 'text'
+        ? layerEl
+        : layerEl.querySelector('text')) as SVGTextElement | null;
+      const tCtm = tEl?.getScreenCTM();
+      if (tEl && tCtm) {
+        const fs = parseFloat(tEl.getAttribute('font-size') ?? '16');
+        editor.style.fontSize = `${fs * (Math.hypot(tCtm.a, tCtm.b) || 1)}px`;
+      }
+    }
+
     const pad = 4;
 
     try {
@@ -1682,7 +1722,9 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
 
   useLayoutEffect(() => {
     positionSelectionOverlay();
-  }, [positionSelectionOverlay, activeSvg?.content, canvasDrag, canvasRotate, canvasScale]);
+    // editingTextId is in here so the editor gets sized the moment it mounts, not on
+    // whatever unrelated change happens to reposition the overlay next.
+  }, [positionSelectionOverlay, activeSvg?.content, canvasDrag, canvasRotate, canvasScale, editingTextId]);
 
   // ── Layer reorder ──────────────────────────────────────────────────────────
 
@@ -1830,16 +1872,13 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     if (activeSvg?.edit === 0) { setShowUpsell(true); return; }
     setAiPanelOpen((o) => !o);
   }, [activeSvg?.edit]);
-  // Empty-text selection overlay click: focus the inspector's Words input.
-  const focusEmptyTextInput = useCallback(() => {
-    requestAnimationFrame(() => {
-      const input = textContentRef.current;
-      if (!input) return;
-      input.focus();
-      const end = input.value.length;
-      input.setSelectionRange(end, end);
-    });
-  }, []);
+  // An empty text layer draws no glyphs, so there is nothing on the canvas to
+  // double-click. Its placeholder box is the target instead: one click on it opens the
+  // same inline editor, which is the only way to type the first word into a layer that
+  // has none.
+  const editEmptyText = useCallback(() => {
+    if (selectedLayer) setEditingTextId(selectedLayer);
+  }, [selectedLayer]);
 
   // Snapshots the current transform of the layers a gesture is about to move, so it can
   // replay itself from the grab state on each mousemove instead of stacking transforms.
@@ -2011,6 +2050,23 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   // selection box fall through to the background. Flag it so the overlay can
   // capture those clicks and keep the empty text layer selected instead.
   const selectionIsEmptyText = !!selectedTextProps && selectedTextProps.content.trim() === '';
+
+  // Live mirror, so the inline editor can seed itself from the current text without
+  // taking a dependency on it — depending on the content would re-seed mid-typing.
+  const selectedTextPropsRef = useRef(selectedTextProps);
+  useEffect(() => { selectedTextPropsRef.current = selectedTextProps; });
+
+  // The control panel follows the selection: picking text on the canvas brings up the
+  // type form, picking artwork or the background brings up the colours. The Layers tab
+  // is the exception and stays put — it is a list you work down, and having it flip away
+  // under you on every row you select would make it unusable. Read as a functional
+  // update so the current tab is not itself a dependency; otherwise the effect would
+  // re-fire (and fight the user) on every manual tab change.
+  const selectionIsText = !!selectedTextProps;
+  useEffect(() => {
+    if (!selectedLayer) return;
+    setControlTab((cur) => (cur === 'layers' ? cur : selectionIsText ? 'text' : 'tools'));
+  }, [selectedLayer, selectionIsText]);
 
   const updateTextLayer = useCallback((attrs: Partial<{ content: string; font: string; size: number; weight: number; color: string; curve: number; letterSpacing: number }>) => {
     if (!activeSvg) return;
@@ -2189,6 +2245,71 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     });
   }, [selectedLayer, selectedLayers, textLayerIds, activeSvg, snapshotForUndo]);
 
+  // ── Inline text editing ────────────────────────────────────────────────────
+  // Double-clicking a text layer types straight onto the artwork instead of into the
+  // Text tab. The editable node is an HTML overlay, not the SVG <text> itself: the
+  // document lives as a string that is re-parsed and re-rendered on every edit, so a
+  // contentEditable inside it would be destroyed on the first keystroke.
+  //
+  // Curved text is deliberately excluded — see handleCanvasClick, where editing starts.
+  //
+  // Push the current text in and select it, so the first keypress replaces the word —
+  // which is what double-clicking a word is asking for. Runs on entry only; after that
+  // the node is the user's to type in.
+  useLayoutEffect(() => {
+    if (!editingTextId) return;
+    const node = textEditorRef.current;
+    if (!node) return;
+    node.textContent = selectedTextPropsRef.current?.content ?? '';
+    node.focus();
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
+    // Deliberately keyed on the id alone: re-running as the content changes would
+    // re-select everything mid-typing.
+  }, [editingTextId]);
+
+  const endInlineEdit = useCallback(() => {
+    setEditingTextId(null);
+    window.getSelection()?.removeAllRanges();
+  }, []);
+
+  // Type styling for the editor, mirroring the layer it stands over. Font size is absent
+  // on purpose — it depends on the board scale and is written onto the node by the
+  // overlay positioning pass.
+  const inlineEditStyle = useMemo(() => ({
+    fontFamily: selectedTextProps?.font ?? 'Arial',
+    fontWeight: selectedTextProps?.weight ?? 400,
+    color: selectedTextProps?.color ?? '#000000',
+    letterSpacing: selectedTextProps?.letterSpacing ?? 0,
+  }), [selectedTextProps?.font, selectedTextProps?.weight, selectedTextProps?.color, selectedTextProps?.letterSpacing]);
+
+  // Every keystroke goes through the same path the Text tab's Words field uses, so the
+  // two are never out of step and a whole edit session is still one undo entry.
+  const onInlineTextInput = useCallback(() => {
+    const node = textEditorRef.current;
+    if (!node) return;
+    updateTextLayer({ content: node.textContent ?? '' });
+  }, [updateTextLayer]);
+
+  // Leaving edit mode whenever the selection moves off the layer being typed into —
+  // clicking another layer, deleting this one, or opening a group.
+  useEffect(() => {
+    if (editingTextId && selectedLayer !== editingTextId) setEditingTextId(null);
+  }, [selectedLayer, editingTextId]);
+
+  // The Text tab is always live — it has no empty state, so the controls need something
+  // to read and write whether or not a text layer is selected. Selected: the layer's own
+  // attributes, edited in place. Nothing selected: `textForm`, the draft Add text layer
+  // already builds from, so the fields set up the next layer instead of going blank.
+  const textProps = selectedTextProps ?? textForm;
+  const updateTextLayerOrDraft = useCallback((attrs: Partial<TextLayerAttrs>) => {
+    if (selectionIsText) updateTextLayer(attrs);
+    else setTextForm((f) => ({ ...f, ...attrs }));
+  }, [selectionIsText, updateTextLayer]);
+
   // Toggle a suggested font: deselect if already selected, else apply it to the
   // selected text layer (or the pending text-form default when nothing is selected).
   // Defined after updateTextLayer/selectedTextProps so it can depend on them.
@@ -2290,8 +2411,11 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     const content = new XMLSerializer().serializeToString(svg);
     const newLayer = { id, label: textContent };
     setActiveSvg((prev) => (prev ? { ...prev, content, layers: [...prev.layers, newLayer] } : null));
-    // Select it outright — the inspector switches to the type form for the new layer.
+    // Select it outright, and show the type form for it. The tab is set here rather
+    // than left to the follow-the-selection effect because Add can be pressed from the
+    // Layers tab, which that effect deliberately never moves off.
     setSelectedLayer(id); setSelectedLayers(new Set([id]));
+    setControlTab('text');
   }, [activeSvg, textForm, snapshotForUndo]);
 
   // ── Center to canvas horizontal midpoint ─────────────────────────────────
@@ -3279,16 +3403,6 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
   }, [activeSvg?.src]);
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return;
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
-      clear();
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [clear]);
-
-  useEffect(() => {
     if (!selectedLayers.size) return;
     const onArrow = (e: KeyboardEvent) => {
       if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) return;
@@ -3515,6 +3629,12 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     selectOne(parent.id);
   }, [activeSvg, snapshotForUndo, selectOne]);
 
+  // The Layers tab's breadcrumb. Stable for the memoised control panel; a no-op at the
+  // top level, where the breadcrumb isn't rendered at all.
+  const onBackOutOfDrill = useCallback(() => {
+    if (drillContext) collapseLayer(drillContext.backOutId);
+  }, [drillContext, collapseLayer]);
+
   // Delete layers (their elements and their layers-list entries). Undoable, as one
   // step: a multi-row delete is one action to the person who asked for it, so one undo
   // has to put all of it back rather than making them press it once per layer.
@@ -3681,11 +3801,42 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     [...hiddenLayers].some((id) => !defaultHiddenLayers.has(id));
   const isDirty = !!activeSvg && (visibilityChanged || activeSvg.content !== activeSvg.originalContent);
   const selectionIsBackground = !!selectedLayer && selectedLayer === backgroundLayerId;
+  // What the Tools tab says it is acting on. The background's row is named by the
+  // Layers tab's own label for it, not by whatever id the file gave it.
+  const selectedLayerName = selectionIsBackground
+    ? tr('layers.canvas')
+    : (activeSvg?.layers.find((l) => l.id === selectedLayer)?.label ?? '');
 
   // The AI panel's "Use this font": applies to the selected text layer if there is one,
   // otherwise it becomes the default for the next text layer added.
   const useSuggestedFont = (font: string) =>
     selectedTextProps ? updateTextLayer({ font }) : setTextForm((f) => ({ ...f, font }));
+
+  // The document controls that used to be the floating top toolbar, now the head of the
+  // Tools tab. Memoised because the panel is memoised — a fresh object every render
+  // would defeat that.
+  const docBundle: DocBundle = useMemo(() => ({
+    isDirty,
+    undoCount, onUndo: undo,
+    redoCount, onRedo: redo,
+    onReset: requestReset,
+    exportLabel: activeSvg && hiddenRowCount > 0
+      ? tr('toolbar.exportPartial', {
+          shown: activeSvg.layers.length - hiddenRowCount,
+          total: activeSvg.layers.length,
+        })
+      : tr('toolbar.export'),
+    onExport: openRating,
+    onCenter: centerLayersToCanvas,
+    onRotate90: rotateSelected90,
+    transformDisabled: !selectedLayers.size || selectionIsBackground,
+    onMatchRotation: matchRotationToSelected,
+    matchRotationDisabled: selectedLayers.size !== 1 || selectionIsBackground,
+  }), [
+    activeSvg, isDirty, undoCount, undo, redoCount, redo, requestReset,
+    hiddenRowCount, openRating, centerLayersToCanvas, rotateSelected90,
+    selectedLayers.size, selectionIsBackground, matchRotationToSelected, tr,
+  ]);
 
   return (
     /* Full-bleed canvas with floating panels (handoff §1) — no docked columns, so the
@@ -3774,34 +3925,15 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
             backgroundLayerId={backgroundLayerId}
             showSelectionOverlay={showSelectionOverlay}
             selectionIsEmptyText={selectionIsEmptyText}
-            onEmptyTextClick={focusEmptyTextInput}
+            onEmptyTextClick={editEmptyText}
+            editingTextId={editingTextId}
+            textEditorRef={textEditorRef}
+            editingStyle={inlineEditStyle}
+            onInlineTextInput={onInlineTextInput}
+            onEndInlineEdit={endInlineEdit}
             onDragHandleMouseDown={handleDragHandleMouseDown}
             onRotateHandleMouseDown={handleRotateHandleMouseDown}
             onScaleHandleMouseDown={handleScaleHandleMouseDown}
-          />
-
-          {/* Top toolbar (§1.5) */}
-          <EditorToolbar
-            fileName={isLoading && !activeSvg ? tr('toolbar.loading') : (activeSvg?.name ?? '')}
-            isDirty={isDirty}
-            onCenter={centerLayersToCanvas}
-            onRotate90={rotateSelected90}
-            transformDisabled={!selectedLayers.size || selectionIsBackground}
-            onMatchRotation={matchRotationToSelected}
-            matchRotationDisabled={selectedLayers.size !== 1 || selectionIsBackground}
-            undoCount={undoCount}
-            onUndo={undo}
-            redoCount={redoCount}
-            onRedo={redo}
-            exportLabel={activeSvg && hiddenRowCount > 0
-              ? tr('toolbar.exportPartial', {
-                  shown: activeSvg.layers.length - hiddenRowCount,
-                  total: activeSvg.layers.length,
-                })
-              : tr('toolbar.export')}
-            onExport={openRating}
-            onClose={clear}
-            onReset={requestReset}
           />
 
           {/* Font suggestions strip (memoised) — see editor-font-suggestions.tsx */}
@@ -3817,23 +3949,25 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
 
           {activeSvg && (
             <>
-              {/* Inspector (§1.6) */}
-              <EditorInspector
+              {/* The one control panel — inspector and elements list behind three tabs
+                  (assets/UI/design_handoff_tabbed_panel) */}
+              <EditorControlPanel
+                tab={controlTab}
+                onSelectTab={setControlTab}
+                doc={docBundle}
                 selectedLayer={selectedLayer}
+                selectedLayerName={selectedLayerName}
                 isBackground={selectionIsBackground}
-                selectedTextProps={selectedTextProps}
+                layerColors={layerColors}
+                onReplaceColor={replaceLayerColor}
+                onEndColorEdit={endColorEdit}
+                onDeselect={deselect}
+                textProps={textProps}
                 textContentRef={textContentRef}
                 usedFonts={usedFonts}
                 extraFonts={suggestedFonts}
-                layerColors={layerColors}
-                onUpdateTextLayer={updateTextLayer}
-                onReplaceColor={replaceLayerColor}
-                onEndColorEdit={endColorEdit}
-                onClose={() => selectOne(null)}
-              />
-
-              {/* Elements (§1.7) */}
-              <LayersPanel
+                onUpdateTextLayer={updateTextLayerOrDraft}
+                onAddTextLayer={addTextLayer}
                 layers={activeSvg.layers}
                 hiddenLayers={hiddenLayers}
                 selectedLayers={selectedLayers}
@@ -3844,8 +3978,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                 onExpandLayer={expandLayer}
                 drillLabel={drillContext?.label ?? null}
                 drillMarks={drillContext?.marks ?? NO_MARKS}
-                onBackOut={() => drillContext && collapseLayer(drillContext.backOutId)}
-                onAddTextLayer={addTextLayer}
+                onBackOut={onBackOutOfDrill}
                 onReorderLayers={reorderLayers}
                 onSetSelectedLayers={setSelectedLayers}
                 onSetSelectedLayer={setSelectedLayer}

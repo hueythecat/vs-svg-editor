@@ -11,6 +11,25 @@ export type TextLayerAttrs = {
   weight: number; color: string; curve: number; letterSpacing: number;
 };
 
+// Document-level controls: what can be undone, what leaves the app, and what moves the
+// artwork as a whole. These were the floating top toolbar; they are now the head of the
+// Tools tab, so they travel as one bundle rather than a dozen separate props.
+export type DocBundle = {
+  isDirty: boolean;
+  undoCount: number;
+  onUndo: () => void;
+  redoCount: number;
+  onRedo: () => void;
+  onReset: () => void;
+  exportLabel: string;
+  onExport: () => void;
+  onCenter: () => void;
+  onRotate90: () => void;
+  transformDisabled: boolean;
+  onMatchRotation: () => void;
+  matchRotationDisabled: boolean;
+};
+
 export type AiActionType = 'strip-text' | 'suggest-font' | 'remove-specific-text' | 'check-text';
 
 // One element an AI pass took out of the artwork.

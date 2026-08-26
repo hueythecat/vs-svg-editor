@@ -9,9 +9,16 @@
     "rotate90Title": "Auswahl um 90° drehen",
     "matchRotationTitle": "Alle Ebenen an die Drehung der ausgewählten Ebene angleichen",
     "revertTitle": "Auf die Originaldatei zurücksetzen",
-    "closeTitle": "Datei schließen (ESC)",
     "export": "Exportieren",
     "exportPartial": "Exportieren (%{shown}/%{total})"
+  },
+
+  "panel": {
+    "tabTools": "Werkzeuge",
+    "tabText": "Text",
+    "tabLayers": "Ebenen",
+    "selection": "Auswahl · %{name}",
+    "arrange": "Anordnen"
   },
 
   "inspector": {
@@ -52,7 +59,8 @@
     "spacingTight": "Eng (%{value}em)",
     "spacingLoose": "+%{value}em",
     "curve": "Wölbung",
-    "defaultContent": "Text"
+    "defaultContent": "Text",
+    "addLayer": "Textebene hinzufügen"
   },
 
   "layers": {

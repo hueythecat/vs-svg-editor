@@ -52,6 +52,7 @@ export const CanvasStage = React.memo(function CanvasStage({
   hiddenLayers, previewIds, previewOutlineId, backgroundLayerId,
   showSelectionOverlay, selectionIsEmptyText,
   onEmptyTextClick,
+  editingTextId, textEditorRef, editingStyle, onInlineTextInput, onEndInlineEdit,
   onDragHandleMouseDown, onRotateHandleMouseDown, onScaleHandleMouseDown,
 }: {
   svgCanvasRef: React.RefObject<HTMLDivElement | null>;
@@ -74,6 +75,15 @@ export const CanvasStage = React.memo(function CanvasStage({
   showSelectionOverlay: boolean;
   selectionIsEmptyText: boolean;
   onEmptyTextClick: () => void;
+  // Inline editing. `editingTextId` doubles as the flag and as the id whose glyphs are
+  // hidden while the editable node stands in for them.
+  editingTextId: string | null;
+  textEditorRef: React.RefObject<HTMLDivElement | null>;
+  // Type styling copied off the layer so the editor matches it. Size is not here — it
+  // depends on the board scale, so the parent writes it straight onto the node.
+  editingStyle: { fontFamily: string; fontWeight: number; color: string; letterSpacing: number };
+  onInlineTextInput: () => void;
+  onEndInlineEdit: () => void;
   onDragHandleMouseDown: (e: React.MouseEvent<HTMLDivElement>) => void;
   onRotateHandleMouseDown: (e: React.MouseEvent<HTMLDivElement>) => void;
   onScaleHandleMouseDown: (e: React.MouseEvent<HTMLDivElement>) => void;
@@ -118,10 +128,12 @@ export const CanvasStage = React.memo(function CanvasStage({
         WebkitUserSelect: 'none',
       }}
     >
-      {/* Beta badge — top-right, clear of the dev rail and the toolbar */}
+      {/* Beta badge — bottom-left. It sat top-right until the control panel took that
+          corner outright; bottom-left is the one corner nothing else claims (dev rail
+          top-left, panel top-right, AI pill bottom-right). */}
       <span
         style={{
-          position: 'absolute', top: 16, right: 16, zIndex: 20,
+          position: 'absolute', bottom: 16, left: 16, zIndex: 20,
           pointerEvents: 'none',
           padding: '2px 8px', borderRadius: 6,
           fontSize: 10, fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase',
@@ -166,13 +178,20 @@ export const CanvasStage = React.memo(function CanvasStage({
             which is the whole point of not restructuring the DOM when a pass takes it.
             The outline makes it findable among artwork it may closely resemble.
           */}
-          {(hiddenLayers.size > 0 || previewIds.size > 0) && (
+          {(hiddenLayers.size > 0 || previewIds.size > 0 || editingTextId) && (
             <style>{
               [...hiddenLayers]
                 .filter((id) => !previewIds.has(id))
                 .map((id) => `.svg-canvas #${CSS.escape(id)}{display:none!important}`)
                 .concat(previewOutlineId
                   ? [`.svg-canvas #${CSS.escape(previewOutlineId)}{outline:2px dashed ${C.accent};outline-offset:2px}`]
+                  : [])
+                // While a layer is being typed into, its glyphs give way to the editable
+                // node standing over them — otherwise the old and new words overlap.
+                // `visibility` rather than `display`, so the element keeps its box and
+                // the overlay stays measurable and in place as the text changes.
+                .concat(editingTextId
+                  ? [`.svg-canvas text#${CSS.escape(editingTextId)},.svg-canvas #${CSS.escape(editingTextId)} text{visibility:hidden}`]
                   : [])
                 .join('')
             }</style>
@@ -219,6 +238,56 @@ export const CanvasStage = React.memo(function CanvasStage({
                 zIndex: 5,
               }}
             >
+              {/* Inline text editor. A child of the overlay so it inherits the box AND
+                  the rotation the parent already computed for the layer — positioning it
+                  separately would mean duplicating that matrix work. Inset by the 4px the
+                  frame is padded with, so it lands on the glyphs rather than the frame. */}
+              {editingTextId && (
+                <div
+                  ref={textEditorRef}
+                  contentEditable
+                  suppressContentEditableWarning
+                  spellCheck={false}
+                  onInput={onInlineTextInput}
+                  onBlur={onEndInlineEdit}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  onClick={(e) => e.stopPropagation()}
+                  onDoubleClick={(e) => e.stopPropagation()}
+                  onKeyDown={(e) => {
+                    // Enter commits rather than inserting a line break: these layers are
+                    // single-line <text>, so a break would be typed but never drawn.
+                    if (e.key === 'Enter') { e.preventDefault(); onEndInlineEdit(); }
+                    // Escape leaves the field. It does not revert — every keystroke has
+                    // already gone into the document as one undo entry, so undo is the
+                    // way back and Escape pretending otherwise would be a lie.
+                    if (e.key === 'Escape') { e.preventDefault(); onEndInlineEdit(); }
+                    e.stopPropagation();
+                  }}
+                  style={{
+                    position: 'absolute', inset: 4,
+                    display: 'flex', alignItems: 'center',
+                    // Centred whatever the layer's text-anchor is: the overlay hugs the
+                    // glyphs' own ink box, so the box IS the text's extent and centring
+                    // inside it lands on the same place a start-, middle- or end-anchored
+                    // string was already drawn.
+                    justifyContent: 'center',
+                    pointerEvents: 'auto',
+                    outline: 'none',
+                    whiteSpace: 'pre',
+                    lineHeight: 1,
+                    cursor: 'text',
+                    // Overrides the canvas-wide userSelect:none — this is the one place
+                    // on the board where a text selection is the point.
+                    userSelect: 'text',
+                    WebkitUserSelect: 'text',
+                    fontFamily: editingStyle.fontFamily,
+                    fontWeight: editingStyle.fontWeight,
+                    color: editingStyle.color,
+                    letterSpacing: `${editingStyle.letterSpacing}em`,
+                  }}
+                />
+              )}
+
               {/* Rotate stem + handle */}
               <span
                 style={{

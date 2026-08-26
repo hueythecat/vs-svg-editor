@@ -9,9 +9,16 @@
     "rotate90Title": "Rotate the selection 90°",
     "matchRotationTitle": "Match every layer to the selected layer's rotation",
     "revertTitle": "Revert to the original file",
-    "closeTitle": "Close file (ESC)",
     "export": "Export",
     "exportPartial": "Export (%{shown}/%{total})"
+  },
+
+  "panel": {
+    "tabTools": "Tools",
+    "tabText": "Text",
+    "tabLayers": "Layers",
+    "selection": "Selection · %{name}",
+    "arrange": "Arrange"
   },
 
   "inspector": {
@@ -52,7 +59,8 @@
     "spacingTight": "Tight (%{value}em)",
     "spacingLoose": "+%{value}em",
     "curve": "Curve",
-    "defaultContent": "Text"
+    "defaultContent": "Text",
+    "addLayer": "Add text layer"
   },
 
   "layers": {

@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+  html,body{margin:0;min-height:100%;background:#eef0f3;font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased}
+  input,select,button{font-family:inherit}
+  input:focus,select:focus{outline:none;border-color:#5b6cff;box-shadow:0 0 0 3px rgba(91,108,255,.15)}
+  a{color:#5b6cff}a:hover{color:#4453d6}
+  .rowbtn:hover{background:#f2f4f7}
+</style>
+</helmet>
+<div style="padding:24px;display:flex;justify-content:center;background:#eef0f3;min-height:100vh;box-sizing:border-box">
+  <div style="width:272px;align-self:flex-start;background:#fff;border:1px solid #e6e8eb;border-radius:12px;box-shadow:0 16px 40px rgba(0,0,0,.15);display:flex;flex-direction:column;overflow:hidden;max-height:calc(100vh - 48px)">
+    <div style="display:flex;gap:2px;padding:12px 12px 0;flex:none">
+      <sc-for list="{{ tabs }}" as="t" hint-placeholder-count="3">
+        <button onClick="{{ t.onPick }}" style="{{ t.style }}">{{ t.label }}</button>
+      </sc-for>
+    </div>
+    <div style="height:1px;background:#e6e8eb;margin-top:-1px;flex:none"></div>
+    <div style="flex:0 1 auto;min-height:0;overflow-y:auto;overflow-x:hidden;padding:14px">
+
+      <sc-if value="{{ onTools }}" hint-placeholder-val="{{ true }}">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px">
+        <div style="width:22px;height:22px;border-radius:6px;background:#5b6cff;display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;flex:none">◆</div>
+        <span style="flex:1;font-size:12.5px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">RocketJet-logo.svg</span>
+        <button title="Undo" class="rowbtn" style="background:transparent;border:none;font-size:15px;padding:4px 6px;border-radius:7px;cursor:pointer;color:#4b5563">↶</button>
+        <button title="Redo" class="rowbtn" style="background:transparent;border:none;font-size:15px;padding:4px 6px;border-radius:7px;cursor:pointer;color:#d3d7dd">↷</button>
+      </div>
+      <button style="width:100%;border:none;background:#5b6cff;color:#fff;font-size:12.5px;font-weight:600;padding:10px;border-radius:8px;cursor:pointer;margin-bottom:18px">↓ Export SVG</button>
+      <div style="font-size:10px;font-weight:700;letter-spacing:.5px;color:#9aa1ab;margin-bottom:9px">SELECTION · Logo mark</div>
+      <div style="display:flex;gap:7px;margin-bottom:18px">
+        <button class="rowbtn" style="flex:1;background:#fff;border:1px solid #d7dbe1;color:#4b5563;font-size:12.5px;padding:9px 8px;border-radius:8px;cursor:pointer">⤢ Center</button>
+        <button class="rowbtn" style="flex:1;background:#fff;border:1px solid #d7dbe1;color:#4b5563;font-size:12.5px;padding:9px 8px;border-radius:8px;cursor:pointer">⟳ Rotate 90°</button>
+      </div>
+      <div style="font-size:10px;font-weight:700;letter-spacing:.5px;color:#9aa1ab;margin-bottom:6px">FIND &amp; REPLACE COLOURS</div>
+      <div style="font-size:11px;color:#9aa1ab;line-height:1.5;margin-bottom:10px">Click a colour to recolour every shape in the artwork that uses it.</div>
+      <div style="display:flex;flex-direction:column;gap:7px;margin-bottom:18px">
+        <sc-for list="{{ artColors }}" as="c" hint-placeholder-count="3">
+          <label class="rowbtn" style="display:flex;align-items:center;gap:10px;border:1px solid #eceef2;border-radius:9px;padding:7px 9px;cursor:pointer;position:relative">
+            <span style="{{ c.swStyle }}"></span>
+            <span style="flex:1;font:11px ui-monospace,monospace;color:#4b5563;text-transform:uppercase;letter-spacing:.3px">{{ c.hex }}</span>
+            <span style="font-size:12px;color:#9aa1ab">✎</span>
+            <input type="color" value="{{ c.hex }}" onChange="{{ c.onChange }}" style="position:absolute;inset:0;opacity:0;cursor:pointer">
+          </label>
+        </sc-for>
+      </div>
+      <div style="font-size:10px;font-weight:700;letter-spacing:.5px;color:#9aa1ab;margin-bottom:8px">CANVAS COLOUR</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px">
+        <sc-for list="{{ bgSwatches }}" as="c" hint-placeholder-count="5"><span onClick="{{ c.onPick }}" style="{{ c.style }}"></span></sc-for>
+        <label title="Custom colour" style="width:24px;height:24px;border-radius:6px;border:1px dashed #c3c9d2;display:flex;align-items:center;justify-content:center;color:#9aa1ab;font-size:13px;cursor:pointer;position:relative">+<input type="color" style="position:absolute;inset:0;opacity:0;cursor:pointer"></label>
+      </div>
+      <div style="display:flex;align-items:center;gap:9px;background:linear-gradient(90deg,#5b6cff,#8f6bff);border-radius:10px;padding:11px 13px;box-shadow:0 8px 20px rgba(91,108,255,.28);cursor:pointer">
+        <span style="font-size:13px">✦</span><span style="flex:1;font-size:12.5px;font-weight:700;color:#fff">Customise with AI</span><span style="font-size:9px;font-weight:700;background:rgba(255,255,255,.28);color:#fff;padding:2px 6px;border-radius:5px">PRO</span>
+      </div>
+      </sc-if>
+
+      <sc-if value="{{ onType }}" hint-placeholder-val="{{ false }}">
+      <label style="font-size:11px;color:#6b7280;display:block;margin-bottom:5px">Words</label>
+      <input value="{{ tText }}" onInput="{{ setText }}" style="width:100%;box-sizing:border-box;border:1px solid #d7dbe1;border-radius:8px;padding:9px 10px;font-size:13px;margin-bottom:12px">
+      <label style="font-size:11px;color:#6b7280;display:block;margin-bottom:5px">Font</label>
+      <select style="width:100%;box-sizing:border-box;border:1px solid #d7dbe1;border-radius:8px;padding:9px 10px;font-size:13px;margin-bottom:12px;background:#fff;cursor:pointer">
+        <option>Arial</option><option>Georgia</option><option>Verdana</option><option>Trebuchet MS</option><option>Courier New</option><option>Impact</option>
+      </select>
+      <div style="display:flex;gap:10px;margin-bottom:12px">
+        <div style="flex:1"><label style="font-size:11px;color:#6b7280;display:block;margin-bottom:5px">Size</label><input type="number" value="40" style="width:100%;box-sizing:border-box;border:1px solid #d7dbe1;border-radius:8px;padding:9px 10px;font-size:13px"></div>
+        <div style="flex:1"><label style="font-size:11px;color:#6b7280;display:block;margin-bottom:5px">Weight</label>
+          <select style="width:100%;box-sizing:border-box;border:1px solid #d7dbe1;border-radius:8px;padding:9px 10px;font-size:13px;background:#fff;cursor:pointer">
+            <option value="400">Regular</option><option value="500">Medium</option><option value="700">Bold</option><option value="800">Black</option>
+          </select>
+        </div>
+      </div>
+      <label style="font-size:11px;color:#6b7280;display:block;margin-bottom:6px">Colour</label>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px">
+        <sc-for list="{{ swatches }}" as="c" hint-placeholder-count="6"><span onClick="{{ c.onPick }}" style="{{ c.style }}"></span></sc-for>
+        <label title="Custom colour" style="width:24px;height:24px;border-radius:6px;border:1px dashed #c3c9d2;display:flex;align-items:center;justify-content:center;color:#9aa1ab;font-size:13px;cursor:pointer;position:relative">+<input type="color" style="position:absolute;inset:0;opacity:0;cursor:pointer"></label>
+      </div>
+      <button class="rowbtn" style="width:100%;background:#fff;border:1px solid #d7dbe1;color:#4b5563;font-size:12.5px;padding:9px;border-radius:8px;cursor:pointer">＋ Add text layer</button>
+      </sc-if>
+
+      <sc-if value="{{ onLayers }}" hint-placeholder-val="{{ false }}">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:9px">
+        <span style="font-size:10px;font-weight:700;letter-spacing:.5px;color:#9aa1ab">ELEMENTS · 3</span>
+        <span title="Add text layer" style="font-size:15px;color:#c3c9d2;cursor:pointer">＋</span>
+      </div>
+      <div style="display:flex;flex-direction:column;gap:2px">
+        <sc-for list="{{ layers }}" as="o" hint-placeholder-count="3">
+          <div style="{{ o.rowStyle }}" onClick="{{ o.onSelect }}">
+            <span style="color:#c3c9d2;font-size:12px;cursor:grab">⠿</span>
+            <span style="font-size:13px">{{ o.icon }}</span>
+            <span style="{{ o.nameStyle }}">{{ o.name }}</span>
+            <span style="display:flex;align-items:center;gap:7px">
+              <span title="Show / hide" style="{{ o.eyeStyle }}">{{ o.eye }}</span>
+              <span title="Duplicate" style="cursor:pointer;color:#8a93a3;font-size:12px">⧉</span>
+              <span title="Delete" style="cursor:pointer;color:#e0575b;font-size:12px">✕</span>
+            </span>
+          </div>
+        </sc-for>
+      </div>
+      </sc-if>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:320,&quot;height&quot;:700}}">
+const ACC = '#5b6cff';
+const PALETTE = ['#1f6fd6','#f2802e','#111111','#12b76a','#e0575b','#8f6bff'];
+const BGS = ['#ffffff','#111111','#eef0f3','#fff4e6','#0b2a4a'];
+
+class Component extends DCLogic {
+  state = { tab:'tools', selectedId:'art', text:'RocketJet', color:'#1f6fd6', bg:'#ffffff',
+    artColors:['#dfe6ef','#5b6cff','#f2802e'],
+    objects:[{id:'bg',type:'bg',name:'Background'},{id:'art',type:'art',name:'Logo mark'},{id:'t1',type:'text',name:'Text'}] };
+
+  renderVals(){
+    const s = this.state;
+    const mkSw = (list, cur, pick)=>list.map(c=>({ onPick:()=>pick(c),
+      style:`width:24px;height:24px;border-radius:6px;background:${c};box-sizing:border-box;cursor:pointer;${c==='#ffffff'?'border:1px solid #d7dbe1;':''}${cur===c?`outline:2px solid ${ACC};outline-offset:2px;`:''}` }));
+    return {
+      tabs: [['tools','Tools'],['text','Text'],['layers','Layers']].map(([k,label])=>{ const on=s.tab===k; return { label, onPick:()=>this.setState({tab:k}),
+        style:`flex:1;background:${on?'#fff':'transparent'};border:1px solid ${on?'#e6e8eb':'transparent'};border-bottom-color:${on?'#fff':'transparent'};border-radius:8px 8px 0 0;padding:9px 4px;font-size:12px;font-weight:${on?700:500};color:${on?'#1b1f24':'#9aa1ab'};cursor:pointer;position:relative;z-index:1` }; }),
+      onTools:s.tab==='tools', onType:s.tab==='text', onLayers:s.tab==='layers',
+      tText:s.text, setText:(e)=>this.setState({text:e.target.value}),
+      swatches: mkSw(PALETTE, s.color, (c)=>this.setState({color:c})),
+      bgSwatches: mkSw(BGS, s.bg, (c)=>this.setState({bg:c})),
+      artColors: s.artColors.map((c,i)=>({ hex:c,
+        onChange:(e)=>this.setState(st=>{ const a=st.artColors.slice(); a[i]=e.target.value; return { artColors:a }; }),
+        swStyle:`width:22px;height:22px;border-radius:6px;background:${c};box-sizing:border-box;flex:none;${c.toLowerCase()==='#ffffff'?'border:1px solid #d7dbe1;':''}` })),
+      layers: s.objects.slice().reverse().map(o=>({
+        name:o.name, icon:o.type==='text'?'🅣':(o.type==='art'?'◆':'▨'), eye:'◉',
+        eyeStyle:`cursor:pointer;font-size:12px;color:${ACC}`,
+        nameStyle:`flex:1;font-size:13px;${o.id===s.selectedId?'font-weight:600;color:#1b1f24':'color:#4b5563'}`,
+        rowStyle:`display:flex;align-items:center;gap:7px;padding:7px 8px;border-radius:8px;cursor:pointer;${o.id===s.selectedId?'background:#eef0ff;border:1px solid #d7dcff':'border:1px solid transparent'}`,
+        onSelect:()=>this.setState({selectedId:o.id}),
+      })),
+    };
+  }
+}
+</script>
+</body>
+</html>
