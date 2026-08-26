@@ -256,6 +256,12 @@ server takes effect on the next deploy without any extra step.
 
 ### Rebuilding without a pull
 
+**These two forms are alternatives — you never run both.** A plain run already exports and
+reloads when the pull moved HEAD, so following it with `--no-pull` just pays for a second
+cold export to ship the same commit. Use the plain form to deploy a pushed commit; use
+`--no-pull` only for a change git cannot see.
+
+
 A `git pull` is not the only thing that changes what's served — an edited `.env`, or a fix
 applied directly on the box to try before committing it, moves nothing that the default run
 would notice, and it exits with "No changes." and rebuilds nothing.
@@ -268,6 +274,23 @@ Same export, swap, reload and health check, minus the pull, and it rebuilds unco
 Prefer this over a hand-rolled rebuild script: the risky part is the swap, and a second copy of
 it is a second chance to get it wrong. Output tees to the terminal as well as the log when run
 by hand.
+
+### Metro's cache and `--clear`
+
+The export passes `--clear` (a cold Metro cache) only when it might matter, rather than on
+every deploy as it used to. Measured locally, that is 26s cold vs 7s warm — a 73% saving on
+a normal deploy; both figures are larger on the server, the ratio similar.
+
+It clears when **`.env` is newer than the current `dist/`**, and on `--no-pull` always. The
+test is on `.env`'s mtime, not on which path you took, and that distinction is the whole
+point: Metro keys its cache on module *source*, but `EXPO_PUBLIC_*` values are substituted
+into the *transformed* output. So a commit landing after a hand-edited `.env` moves HEAD
+without touching `src/lib/env.ts` — unchanged source, cache hit, and the `.env` edit
+silently never ships. Right commit, healthy `/health`, stale flags. Keying on the pull path
+would have reintroduced exactly that.
+
+`/api/version` reports `buildEnv` for this reason — read it back after any `.env` change
+and confirm the values actually moved.
 
 For an `EXPO_PUBLIC_*` change a rebuild is the only thing that works — those are inlined into
 the client bundle at export time, and no amount of reloading will change them.

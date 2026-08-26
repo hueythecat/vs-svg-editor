@@ -119,15 +119,39 @@ rm -rf "$STAGE"
 # on PATH even when node is installed, and npx would silently try to fetch a package
 # instead of failing outright.
 #
-# --clear is not optional here. Metro keys its transform cache on module source, but
-# EXPO_PUBLIC_* values are substituted into that transformed output — so editing .env
+# --clear wipes Metro's transform cache. Metro keys that cache on module SOURCE, but
+# EXPO_PUBLIC_* values are substituted into the transformed output — so editing .env
 # without touching any .ts leaves every cached module eligible for reuse and the export
 # re-emits the previous bundle, byte for byte, with the old values still inlined. It
 # exits 0 and swaps in a "new" build that is the old one. That failure is invisible from
-# the outside: right commit, healthy /health, stale behaviour. Since --no-pull exists
-# precisely for "an edited .env", the cost of a cold bundle every deploy is worth paying
-# to make the script actually do what it promises.
-if ! ./node_modules/.bin/expo export --platform web --clear --output-dir "$STAGE"; then
+# the outside: right commit, healthy /health, stale behaviour.
+#
+# It used to be passed unconditionally, which made every deploy pay for a cold bundle.
+# The condition it actually guards is narrower than that: only four modules carry
+# EXPO_PUBLIC_* substitutions (src/lib/env.ts, src/lib/paddle.ts, src/i18n/index.ts,
+# src/app/api/version+api.ts), and .env is gitignored — so a pull can never change it.
+# It changes only by hand-editing on the box.
+#
+# So the cache is only dangerous when .env has moved since the build currently in dist/.
+# Note this is NOT the same as "the pull path is safe": a commit landing after a hand-
+# edited .env moves HEAD without touching env.ts, so its source is unchanged, it comes
+# back from cache, and the edit silently never ships. That is why the test below is on
+# .env's mtime rather than on which path we are in.
+#
+# --no-pull always clears: it exists precisely for the changes git cannot see, so there
+# is nothing to compare against and no reason to gamble.
+#
+# dist/'s mtime is set when the previous run mv'd staging into place, so it stands in for
+# "when was the last export". No dist/ (first deploy) also clears.
+CLEAR=(--clear)
+if [ "$PULL" = 1 ] && [ -d "$REPO_DIR/dist" ] && [ ! "$REPO_DIR/.env" -nt "$REPO_DIR/dist" ]; then
+  CLEAR=()
+  log "warm cache — .env is no newer than dist/"
+else
+  log "cold cache (--clear)"
+fi
+
+if ! ./node_modules/.bin/expo export --platform web "${CLEAR[@]+"${CLEAR[@]}"}" --output-dir "$STAGE"; then
   log "expo export failed — aborting, previous build still serving"
   rm -rf "$STAGE"
   exit 1
