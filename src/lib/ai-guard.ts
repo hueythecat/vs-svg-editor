@@ -35,9 +35,28 @@ const MAX_TOKENS_CAP = 12_000;
 // `expo start`.
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 
-// The prompts are built client-side and the longest (the customise pass) runs to a few
-// thousand characters. Generous, but not a channel for arbitrary text.
-const MAX_TEXT_CHARS = 32_000;
+// The prompts are built client-side, and the two that matter — the customise and
+// strip-text passes — embed the ENTIRE SVG source in the prompt (`contentXml` /
+// `markedSvgString` in svg-drop-zone.web.tsx). So this is not bounded by prompt wording;
+// it is bounded by how big a vector file can be.
+//
+// Measured, not guessed. Across public/samples the largest is vectorstock_956069.svg at
+// 757,363 characters of source, giving a ~759KB prompt. An earlier 32,000 here was set
+// from an assumption that the prompts "run to a few thousand characters" and rejected
+// every real customise pass on artwork of any size.
+//
+// 2MB is ~2.6x the largest sample, leaving room for artwork bigger than anything bundled.
+// Be honest about what it is worth at this size: it is a sanity bound, not a meaningful
+// restriction on abuse. What actually keeps this endpoint narrow is the model allowlist,
+// the single user turn, the refusal of caller-supplied `system`, and the max_tokens cap —
+// plus MAX_BODY_BYTES in server/index.mjs, which bounds image and text together and is
+// the real outer limit on any one request.
+//
+// Note the upstream ceiling this does NOT replace: a 757KB XML prompt is roughly 200k+
+// tokens, at or past the model's context window, so the largest files may fail at
+// Anthropic with a context-length error rather than here. That is a pre-existing property
+// of sending whole SVG source to a vision model, not something this guard introduces.
+const MAX_TEXT_CHARS = 2_000_000;
 
 const ALLOWED_IMAGE_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp']);
 

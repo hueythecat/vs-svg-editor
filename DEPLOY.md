@@ -158,6 +158,13 @@ do — it stops the endpoint being a free general-purpose Claude, which is what 
 it forwarded the request body verbatim. Adding a new model or call shape means adding it
 there on purpose.
 
+Its text-length cap is deliberately large (2MB) and is a sanity bound rather than a
+restriction. The customise and strip-text passes embed the **entire SVG source** in the
+prompt, so prompt size tracks artwork size, not wording — the largest file in
+`public/samples/` produces a ~759KB prompt. A cap sized for "a prompt" rejects every real
+customise pass. `MAX_BODY_BYTES` bounds image and text together and is the real outer
+limit on any one request.
+
 ### Dev-only API routes
 
 Expo Router exports every `+api.ts` regardless of the build's UI flags, so a production
