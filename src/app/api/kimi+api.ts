@@ -7,25 +7,26 @@
 // `data.content[0].text` parsing keeps working. The key lives in KIMI_API_KEY
 // (no EXPO_PUBLIC_ prefix), so only this server route can read it.
 
+// The same request guard as /api/claude, for the same reason: this route also spends
+// real money on an unauthenticated call, so the body has to be worth little rather than
+// trusted. Sharing the guard is the point — the two routes advertise one contract, and a
+// limit tightened for one cannot quietly stay loose on the other. See src/lib/ai-guard.ts.
+import { guardAiRequest, isCrossSite, type GuardedBlock } from '@/lib/ai-guard';
+
 // The client hardcodes Claude model ids at each call site; this route ignores the
 // incoming model and pins the Kimi model, keeping one source of truth here.
 const KIMI_MODEL = 'kimi-k2.6';
 const KIMI_URL = 'https://api.moonshot.ai/v1/chat/completions';
 
-type AnthropicBlock =
-  | { type: 'text'; text: string }
-  | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } };
-
-type AnthropicBody = {
-  max_tokens?: number;
-  system?: string;
-  messages: Array<{ role: string; content: string | AnthropicBlock[] }>;
-};
-
 // Every caller's prompt ends by demanding strict JSON, and Kimi honours that far
 // more reliably when it is also stated as a system message. Anthropic puts `system`
 // at the top level of the body; OpenAI makes it the first message.
-const DEFAULT_SYSTEM = 'You are a precise SVG analyzer. Return only valid JSON.';
+//
+// Always this string now. The route used to fall back to it only when the caller sent no
+// `system` of its own — but a caller-supplied system prompt is the whole of what turns a
+// narrow SVG-analysis endpoint into a general-purpose one, so the guard rejects the field
+// outright and this is the only system message there is.
+const SYSTEM = 'You are a precise SVG analyzer. Return only valid JSON.';
 
 // K2.6 reasons before answering and bills that thinking against max_tokens, so the
 // callers' budgets — sized for Claude, which does not reason — get spent entirely on
@@ -34,14 +35,14 @@ const DEFAULT_SYSTEM = 'You are a precise SVG analyzer. Return only valid JSON.'
 const KIMI_REASONING_HEADROOM = 16384;
 
 // Anthropic content blocks → OpenAI content parts. Base64 images become data URIs.
-const toOpenAiContent = (content: string | AnthropicBlock[]) => {
-  if (typeof content === 'string') return content;
-  return content.map((block) =>
+// The guard has already narrowed these to text and base64-image blocks, so there is no
+// string-content case left to handle.
+const toOpenAiContent = (content: GuardedBlock[]) =>
+  content.map((block) =>
     block.type === 'image'
       ? { type: 'image_url', image_url: { url: `data:${block.source.media_type};base64,${block.source.data}` } }
       : { type: 'text', text: block.text },
   );
-};
 
 export async function POST(request: Request): Promise<Response> {
   const apiKey = process.env.KIMI_API_KEY;
@@ -52,7 +53,23 @@ export async function POST(request: Request): Promise<Response> {
     );
   }
 
-  const body = await request.json() as AnthropicBody;
+  if (isCrossSite(request)) {
+    return Response.json({ error: { message: 'Cross-site requests are not accepted' } }, { status: 403 });
+  }
+
+  let raw: unknown;
+  try {
+    raw = await request.json();
+  } catch {
+    return Response.json({ error: { message: 'Expected a JSON body' } }, { status: 400 });
+  }
+
+  const guarded = guardAiRequest(raw);
+  if (!guarded.ok) {
+    console.log('[kimi] rejected:', guarded.message);
+    return Response.json({ error: { message: guarded.message } }, { status: 400 });
+  }
+  const body = guarded.body;
 
   const upstream = await fetch(KIMI_URL, {
     method: 'POST',
@@ -62,7 +79,8 @@ export async function POST(request: Request): Promise<Response> {
     },
     body: JSON.stringify({
       model: KIMI_MODEL,
-      max_tokens: (body.max_tokens ?? 1024) + KIMI_REASONING_HEADROOM,
+      // The guard requires max_tokens, so there is no absent case to default.
+      max_tokens: body.max_tokens + KIMI_REASONING_HEADROOM,
       // Streamed because K2.6 reasons before it answers: a non-streamed call leaves the
       // socket idle for the whole think, and the dev server kills an idle outbound
       // request at 30s ("Request timed out" from node:_http_client). Streaming keeps
@@ -70,7 +88,7 @@ export async function POST(request: Request): Promise<Response> {
       // callers still receive one plain JSON body.
       stream: true,
       messages: [
-        { role: 'system', content: body.system ?? DEFAULT_SYSTEM },
+        { role: 'system', content: SYSTEM },
         ...body.messages.map((m) => ({ role: m.role, content: toOpenAiContent(m.content) })),
       ],
     }),

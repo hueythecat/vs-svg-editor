@@ -1,3 +1,5 @@
+import DOMPurify from 'dompurify';
+
 import { t } from '@/i18n';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -19,10 +21,87 @@ export interface ActiveSvg {
 
 // ─── SVG processing ───────────────────────────────────────────────────────────
 
+// Imported SVG is rendered through dangerouslySetInnerHTML in editor-canvas.tsx, so this
+// is the only thing between an artwork file and script execution on our origin.
+//
+// It used to be two regexes — strip <script>…</script>, strip on*="…". Both are trivially
+// evaded: an unquoted or single-quoted handler (`onload=alert(1)`, `onload='…'`) doesn't
+// match the second pattern at all, and neither touches `<a xlink:href="javascript:…">`,
+// `<use href="data:…">`, `<foreignObject>` with arbitrary HTML in it, `<animate
+// attributeName="href" to="javascript:…">`, or an `<iframe>` smuggled through
+// foreignObject. A regex cannot do this job: it is parsing HTML with a pattern, and the
+// browser that renders the result parses it very differently.
+//
+// DOMPurify parses it the way the browser will and rebuilds a document from what it
+// allows. Configured for the SVG profile — SVG, SVG filters and MathML, no HTML — which
+// also removes foreignObject's escape hatch into arbitrary markup.
+//
+// The name is kept: every call site means "make this safe to inject", and renaming it
+// would churn them to say the same thing.
+
+// <use> is not in DOMPurify's SVG profile, and that omission is deliberate on their part:
+// `<use href="https://elsewhere/x.svg#y">` pulls in another document, and `<use
+// href="data:…">` injects one, so the element is a genuine injection and SSRF vector.
+//
+// It cannot simply be left out here, though. Stock vector artwork uses <use> constantly
+// to repeat a symbol, and DOMPurify does not neuter it — it deletes the element, so parts
+// of the drawing silently vanish with nothing to indicate why. That was measured against
+// real files, not assumed.
+//
+// So it is allowed back with only the safe half: a reference to an id in this same
+// document. That is the only form artwork needs and the only one that cannot reach off
+// origin. Anything else — an absolute URL, a data: URI, a protocol-relative reference —
+// takes the element with it, because a <use> that resolves to nothing renders nothing
+// anyway and keeping an inert one would only make the result harder to read.
+//
+// Registered once, at module scope: DOMPurify hooks live on the instance, so adding one
+// per call would stack up a new copy on every import.
+let useHookInstalled = false;
+
+const installUseHook = (): void => {
+  if (useHookInstalled) return;
+  useHookInstalled = true;
+  DOMPurify.addHook('afterSanitizeAttributes', (node) => {
+    if (node.nodeName?.toLowerCase() !== 'use') return;
+    const el = node as unknown as Element;
+    // Both spellings: SVG 2 uses `href`, and the great majority of real files still
+    // carry SVG 1.1's namespaced `xlink:href`. Reading only one would let the other
+    // through unchecked.
+    const ref =
+      el.getAttribute('href') ??
+      el.getAttributeNS('http://www.w3.org/1999/xlink', 'href') ??
+      el.getAttribute('xlink:href') ??
+      '';
+    if (!ref.startsWith('#')) el.remove();
+  });
+};
+
+// `output: "server"` means this module can be evaluated during SSR, where DOMPurify has
+// no `window` to bind to and its `sanitize` is a no-op that returns the input unchanged.
+// Failing loudly there is better than silently passing artwork through unsanitised — but
+// this is only ever reached from a user gesture in the browser, so it should not happen.
 export function stripScripts(raw: string): string {
-  return raw
-    .replace(/<script[\s\S]*?<\/script>/gi, '')
-    .replace(/\son\w+="[^"]*"/gi, '');
+  if (typeof window === 'undefined') {
+    throw new Error('stripScripts requires a DOM — it must not run during SSR');
+  }
+  installUseHook();
+  return DOMPurify.sanitize(raw, {
+    USE_PROFILES: { svg: true, svgFilters: true },
+    // See the hook above — allowed back, then narrowed to same-document references.
+    ADD_TAGS: ['use'],
+    // The layer machinery addresses elements by id and rewrites them by id, so ids must
+    // survive sanitising verbatim. DOMPurify namespaces them by default to stop one
+    // fragment clobbering another's, which would break every layer lookup in this file —
+    // and would break <use href="#id"> along with them, since the reference and the id
+    // would be rewritten inconsistently.
+    SANITIZE_NAMED_PROPS: false,
+    // Return the markup, not a DOM node — callers hold SVG as a string throughout.
+    RETURN_DOM: false,
+    RETURN_DOM_FRAGMENT: false,
+    // foreignObject is the one SVG element that reintroduces arbitrary HTML, and no
+    // artwork this editor handles uses it.
+    FORBID_TAGS: ['foreignObject'],
+  });
 }
 
 // Tags that are metadata/definitions, not visual layers

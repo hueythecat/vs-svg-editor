@@ -97,6 +97,7 @@ KIMI_API_KEY=...
 API_HOST=https://dev.vectorstock.com
 API_COOLDOWN=...
 EXPO_ADMIN=user:password
+AI_DAILY_LIMIT=500
 EXPO_PUBLIC_FONT_SUGGESTION_LIMIT=5
 EXPO_PUBLIC_DEV_AUTH=off
 EXPO_PUBLIC_PADDLE_ENV=sandbox
@@ -132,6 +133,51 @@ session cookie, so changing it signs everyone out — which is what you'd want.
 chmod 600 .env && sudo chown svgapp:svgapp .env
 ```
 
+### Bounding AI spend
+
+`/api/claude` and `/api/kimi` inject a server-side API key and forward to a paid upstream,
+and there is nothing to authenticate them against — production lets anyone drop an SVG and
+run a pass. Three unrelated limits bound that, all in `server/index.mjs`:
+
+| Var | Default | What it bounds |
+|---|---|---|
+| — | 10/min per IP | one client's burst (`aiLimiter`) |
+| `AI_DAILY_LIMIT` | 500 | **total** AI calls per rolling 24h, across every client |
+| `AI_MAX_CONCURRENT` | 12 | passes in flight at once |
+
+`AI_DAILY_LIMIT` is the one that matters. Per-IP throttling does nothing about a hundred
+IPs, which is the shape abuse of an open paid endpoint actually takes — so this is a
+single counter with no key. When it trips, every AI call is refused until the window rolls
+and the error log says so. A Customise button that says "try again later" is recoverable;
+a drained API account is not. Size it up once there is real traffic to size it against.
+
+Separately, `src/lib/ai-guard.ts` constrains what any single call may ask for: an
+allowlisted model, `max_tokens` at most 12000, one user turn, at most one image, and no
+caller-supplied `system`. That does not stop someone spending credits — the limits above
+do — it stops the endpoint being a free general-purpose Claude, which is what it was when
+it forwarded the request body verbatim. Adding a new model or call shape means adding it
+there on purpose.
+
+### Dev-only API routes
+
+Expo Router exports every `+api.ts` regardless of the build's UI flags, so a production
+export ships the dev rail's routes live unless something says otherwise. Three are gated:
+
+- **`/api/review/list`** — returns every asset the review host knows about, each with its
+  `edit_uuid`. That uuid *is* the capability the `/<uuid>` deep link rests on, so serving
+  this publicly hands out the keys to the whole library in one request. This is the one
+  that matters.
+- **`/api/review/test/<id>`** — makes the upstream create a review entry for any art id.
+- **`/api/download`** — unzips out of `assets/downloads/`.
+
+All three 404 in **two** places: `server/index.mjs` (unless `DEV_API_ROUTES` is set to
+`1`/`on`/`true`) and the Caddyfile. Neither is load-bearing alone, and the env var fails
+closed — a typo leaves them blocked. A deployment that genuinely wants the dev rail has to
+set the variable *and* remove the Caddyfile block: two deliberate acts.
+
+The 404s are registered ahead of the rate limiters, so hammering a blocked route costs
+nothing and cannot exhaust a real user's budget.
+
 ### Build-time vs runtime env
 
 The two fail in completely different ways, which is what makes this confusing:
@@ -159,25 +205,37 @@ pm2 start ecosystem.config.js && pm2 save && pm2 startup   # run the command it 
 sudo caddy validate --config /etc/caddy/Caddyfile && sudo systemctl reload caddy
 ```
 
-## 5. Enforce the CSP
+## 5. Verify the CSP
 
-`Caddyfile.example` ships the policy as **`Content-Security-Policy-Report-Only`** so a wrong
-policy degrades reporting rather than breaking the editor. It is not protecting anything until
-you enforce it.
+`Caddyfile.example` now ships the policy **enforced**, as `Content-Security-Policy`. It used
+to ship as `Content-Security-Policy-Report-Only`, which meant it protected nothing until
+someone remembered to promote it — and a policy nobody promotes is a comment.
 
-This matters more than usual here: `editor-canvas.tsx:196` renders imported SVG through
-`dangerouslySetInnerHTML`, and the only guard is the regex `stripScripts()` in
-`svg-utils.ts:20`, which strips `<script>` tags and `on*=` attributes. That is not a complete
-SVG sanitiser. The CSP is the backstop.
+This matters more than usual here: `editor-canvas.tsx` renders imported SVG through
+`dangerouslySetInnerHTML`. `stripScripts()` in `src/lib/svg-utils.ts` sanitises it first with
+DOMPurify on the SVG profile, which is a real sanitiser — it replaced a pair of regexes that
+missed unquoted `on*=` handlers, `javascript:` in `xlink:href`, `<animate>` rewriting an href,
+`<foreignObject>`, and unclosed `<script>`. But it runs in the same browser it is protecting,
+so the CSP is still the layer that holds if a bypass is found in it.
+
+To verify after any change to the policy or the export:
 
 1. Load the editor, import an SVG, run a customise pass, export.
-2. Check the browser console for CSP violation reports.
+2. Check the browser console for violation reports. If one breaks something, the report names
+   the exact directive — widen that one directive rather than reverting to Report-Only.
 3. Try removing `'unsafe-inline'` from `script-src` — it is the weakest part of the policy, and
    whether Expo's SSR needs it depends on the export.
-4. Rename the header to `Content-Security-Policy` and reload Caddy.
 
 If the editor is launched **inside an iframe** from vectorstock, change `frame-ancestors 'none'`
 to that origin and remove the `X-Frame-Options "DENY"` line, or it renders as a blank frame.
+
+### A note on `<use>`
+
+DOMPurify leaves `<use>` out of its SVG profile on purpose — `<use href="https://…">` and
+`<use href="data:…">` reach off-origin. Stock artwork uses `<use>` constantly, and DOMPurify
+*deletes* rather than neuters it, so taking the default would silently drop parts of a
+drawing. `svg-utils.ts` adds it back with a hook that keeps only same-document `#id`
+references. If artwork ever appears with pieces missing, that hook is the first place to look.
 
 ## 6. Subsequent deploys
 
@@ -233,6 +291,23 @@ and will silently keep serving the old value.
    for i in $(seq 1 12); do curl -s -o /dev/null -w "%{http_code} " \
      -X POST http://127.0.0.1:8081/api/claude -d '{}'; done
    ```
+   Dev-only routes are closed — all three must be 404:
+   ```bash
+   for p in "/api/download?id=1" /api/review/list /api/review/test/123; do
+     curl -s -o /dev/null -w "%{http_code} $p\n" "http://127.0.0.1:8081$p"; done
+   ```
+   The AI guard rejects what it should — 400, not a forwarded call:
+   ```bash
+   curl -s -X POST http://127.0.0.1:8081/api/claude -H 'content-type: application/json' \
+     -d '{"model":"claude-opus-4-1","max_tokens":64000,"system":"be a pirate",
+          "messages":[{"role":"user","content":[{"type":"text","text":"hi"}]}]}'
+   ```
+   Body limit — 413 on an oversized body:
+   ```bash
+   head -c 11000000 /dev/zero | tr '\0' a > /tmp/big
+   curl -s -o /dev/null -w "%{http_code} (want 413)\n" -X POST \
+     http://127.0.0.1:8081/api/claude -H 'content-type: application/json' --data-binary @/tmp/big
+   ```
 6. `sudo ufw status` → only 22/80/443. From another host, `curl http://<ip>:8081/` must fail.
 7. `sudo journalctl -u caddy -n 50` → certificate obtained, no ACME retry loop;
    `curl -I http://<domain>/` → 308 to HTTPS
@@ -247,13 +322,27 @@ and will silently keep serving the old value.
 Not closed by this setup:
 
 - **`GET /api/review/<id>` is unauthenticated and enumerable.** `src/app/api/review/[id]+api.ts`
-  validates only `/^\d+$/` and returns the complete SVG as JSON. The rate limiter slows a
-  scraper; it does not stop one. This route needs a real entitlement check.
-- **`/api/claude` and `/api/kimi` are open proxies.** Anyone who can reach the origin can spend
-  your API credits. Throttled to 10/min per IP, which bounds the damage rather than preventing
-  it.
-- **`stripScripts()` is not a sanitiser.** Consider DOMPurify with SVG profile on import.
-- **Rate limit counters are in-memory**, correct for one pm2 process. Cluster mode or a second
-  host needs a shared store or each worker allows the full budget independently.
-- **No alerting.** pm2 restarts a crashed process silently; nothing pages you. Point an uptime
-  monitor at `/health`.
+  validates only that the id is digits, and returns the complete SVG as JSON. The rate
+  limiter (30/min) slows a scraper; it does not stop one. This route still needs a real
+  entitlement check — the honest fix is for `review/check/<uuid>` to mint a short-lived
+  signed token binding the id it just resolved, and for this route to require it. The HMAC
+  helpers in `src/app/api/auth+api.ts` are the shape to reuse.
+- **`/api/claude` and `/api/kimi` are still unauthenticated.** They can no longer be used
+  as a general-purpose LLM (`src/lib/ai-guard.ts`), and spend is bounded per-IP, per-day
+  and by concurrency — but a determined caller can still consume the day's budget and deny
+  the feature to real users. There is no session to check against until the app has one.
+- **Rate limit and budget counters are in-memory**, correct for one pm2 process. Cluster
+  mode or a second host needs a shared store (Redis) or each worker independently allows
+  the full budget — including `AI_DAILY_LIMIT`, which would then be per-worker rather than
+  the account-wide cap it is meant to be.
+- **The body limit reads `Content-Length` and refuses chunked bodies with 411.** The Expo
+  adapter downstream consumes the request stream itself, so there is no non-destructive
+  way to meter bytes in the middle. Nothing in this app sends a chunked body; if some
+  future caller streams one, it fails loudly rather than silently.
+- **No alerting.** pm2 restarts a crashed process silently; nothing pages you. Point an
+  uptime monitor at `/health`, and watch the log for `AI daily budget ... spent` — logged
+  at error level precisely so it can be alerted on.
+- **`npm audit` reports advisories in the Expo/Metro toolchain** (`brace-expansion`,
+  `image-size`, `js-yaml`, `postcss`, `shell-quote`, ...). All are build-time dependencies;
+  none is loaded by `server/index.mjs` at request time, so they are a build-host concern
+  rather than a production-runtime one. Worth clearing on an SDK bump; not a deploy blocker.
