@@ -2,36 +2,38 @@
   "toolbar": {
     "loading": "Wird geladen…",
     "unsavedChanges": "Nicht gespeicherte Änderungen",
-    "undo": "Rückgängig (⌘Z)",
-    "redo": "Wiederherstellen (⇧⌘Z)",
+    "undo": "Rückgängig",
+    "undoTitle": "Rückgängig (⌘Z)",
+    "redo": "Wiederholen",
+    "redoTitle": "Wiederholen (⇧⌘Z)",
     "center": "Zentrieren",
     "centerTitle": "Alle Ebenen auf der Arbeitsfläche zentrieren",
+    "rotate90": "90° drehen",
     "rotate90Title": "Auswahl um 90° drehen",
+    "matchRotation": "Drehung angleichen",
     "matchRotationTitle": "Alle Ebenen an die Drehung der ausgewählten Ebene angleichen",
+    "tidy": "Ausrichten",
+    "tidyTitle": "Vertikale Abstände zwischen den ausgewählten Ebenen angleichen (ab 3)",
+    "revert": "Zurücksetzen",
     "revertTitle": "Auf die Originaldatei zurücksetzen",
     "export": "Exportieren",
     "exportPartial": "Exportieren (%{shown}/%{total})"
   },
-
   "panel": {
     "tabTools": "Werkzeuge",
     "tabText": "Text",
     "tabLayers": "Ebenen",
-    "selection": "Auswahl · %{name}",
-    "arrange": "Anordnen"
+    "history": "Verlauf",
+    "arrange": "Anordnen",
+    "colours": "Farben"
   },
-
   "inspector": {
     "titleText": "Text bearbeiten",
     "titleBackground": "Hintergrund",
     "titleColours": "Vektorfarben",
     "titleEmpty": "Nichts ausgewählt",
-    "deselect": "Auswahl aufheben",
     "customColour": "Eigene Farbe",
-    "canvasColor": "Farbe der Arbeitsfläche",
     "noBackgroundFill": "Dieser Hintergrund hat keine Füllfarbe, die geändert werden kann.",
-    "findReplace": "Farben suchen & ersetzen",
-    "findReplaceHint": "Klicke auf eine Farbe, um jede Form im Motiv umzufärben, die sie verwendet.",
     "noColours": "Auf dieser Ebene wurden keine Farben erkannt.",
     "emptyBefore": "Wähle eine ",
     "emptyText": "Text",
@@ -39,7 +41,6 @@
     "emptyArtwork": "Motiv",
     "emptyAfter": ", um seine Farben zu tauschen, oder ziehe ein Element, um es zu verschieben, zu skalieren und zu drehen."
   },
-
   "text": {
     "words": "Text",
     "wordsPlaceholder": "Etwas eingeben…",
@@ -62,7 +63,6 @@
     "defaultContent": "Text",
     "addLayer": "Textebene hinzufügen"
   },
-
   "layers": {
     "heading": "Elemente · %{count}",
     "addText": "Textebene hinzufügen",
@@ -90,20 +90,17 @@
     "numberedLabel": "Ebene %{index}",
     "copySuffix": "%{label} Kopie"
   },
-
   "canvas": {
     "beta": "Beta",
     "rotateHandle": "Zum Drehen ziehen (Umschalt halten für 15°-Schritte)",
     "moveHandle": "Zum Verschieben ziehen",
     "resizeHandle": "Zum Skalieren ziehen"
   },
-
   "dropzone": {
     "release": "Zum Öffnen loslassen",
     "prompt": "SVG-Datei hier ablegen",
     "browse": "oder klicken zum Auswählen"
   },
-
   "ai": {
     "customise": "Anpassen",
     "customising": "Wird angepasst…",
@@ -139,14 +136,12 @@
     "analyseStructure": "Struktur analysieren →",
     "taxonomyFailed": "Struktur konnte nicht analysiert werden"
   },
-
   "fonts": {
     "title": "Schriftvorschläge",
     "analysing": "Design wird analysiert…",
     "add": "Zur Schriftenliste hinzufügen",
     "close": "Schließen"
   },
-
   "status": {
     "thinking": "Denkt nach…",
     "analysingImage": "Bild wird analysiert…",
@@ -155,7 +150,6 @@
     "readingText": "Text wird gelesen…",
     "findingText": "Text wird gesucht…"
   },
-
   "errors": {
     "unreadableResponse": "Die KI hat eine unlesbare Antwort zurückgegeben",
     "noTextDetected": "In diesem Motiv wurde kein Text erkannt — es wurde nichts geändert.",
@@ -164,7 +158,6 @@
     "layerNotFound": "Ebene nicht gefunden",
     "api": "API-Fehler %{status}"
   },
-
   "upsell": {
     "title": "KI-Bearbeitung freischalten",
     "close": "Schließen",
@@ -177,7 +170,6 @@
     "later": "Vielleicht später",
     "upgrade": "Zum Freischalten upgraden"
   },
-
   "cooldown": {
     "title": "Bereits angepasst",
     "close": "Schließen",
@@ -193,14 +185,12 @@
     },
     "gotIt": "Verstanden"
   },
-
   "confirm": {
     "cancel": "Abbrechen",
     "resetTitle": "Alle Änderungen verwerfen?",
     "resetBody": "Dadurch wird die Datei so wiederhergestellt, wie sie importiert wurde. Alles, was du seitdem bearbeitet hast — einschließlich ausgeblendeter Ebenen — geht verloren.",
     "resetConfirm": "Änderungen verwerfen"
   },
-
   "rating": {
     "title": "Wie war der Export?",
     "body": "Bewerte ihn und wir starten deinen Download.",
@@ -210,7 +200,6 @@
     "cancel": "Abbrechen",
     "submit": "Bewertung senden & herunterladen"
   },
-
   "abort": {
     "title": "Warum brichst du diesen Export ab?",
     "body": "Wähle alles Zutreffende aus. Es geht direkt an das Team.",

@@ -17,7 +17,7 @@ export const LayersTab = React.memo(function LayersTab({
   layers, hiddenLayers, selectedLayers, backgroundLayerId, textLayerIds, expandableLayerIds,
   hiddenInsideCounts,
   drillLabel, drillMarks, onBackOut, onAddTextLayer, onReorderLayers, onSetSelectedLayers, onSetSelectedLayer, onSelectOne,
-  onToggleLayer, onDuplicateLayer, onDeleteLayer, onExpandLayer,
+  onToggleLayer, onDuplicateLayer, onDeleteLayer, onExpandLayer, onPeekLayer,
 }: {
   layers: SvgLayer[];
   hiddenLayers: Set<string>;
@@ -37,6 +37,7 @@ export const LayersTab = React.memo(function LayersTab({
   onSetSelectedLayer: Dispatch<SetStateAction<string | null>>;
   onSelectOne: (id: string | null) => void;
   onToggleLayer: (id: string) => void;
+  onPeekLayer: (id: string | null) => void;
   onDuplicateLayer: (id: string) => void;
   onDeleteLayer: (id: string) => void;
   onExpandLayer: (id: string) => void;
@@ -120,6 +121,7 @@ export const LayersTab = React.memo(function LayersTab({
         onToggleLayer={onToggleLayer}
         onDuplicateLayer={onDuplicateLayer}
         onDeleteLayer={onDeleteLayer}
+        onPeekLayer={onPeekLayer}
       />
     </div>
   );

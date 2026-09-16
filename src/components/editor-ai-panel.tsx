@@ -9,9 +9,12 @@ import type {
 } from './editor-types';
 import { ChevronIcon, CloseIcon, SparklesIcon } from './svg-icons';
 
-// The AI surface of the design (handoff §1.8): a gradient pill bottom-right.
+// The AI surface of the design (handoff §1.8). Customise was a gradient pill floating
+// bottom-right of the canvas; it now sits in the Tools tab under Arrange, and Export has
+// that corner instead. It keeps the gradient — it is still the one AI action, and it
+// should not read as another outlined tool button.
 //
-// In the prototype the pill only ever opens the upsell. Here it keeps that behaviour
+// In the prototype the button only ever opens the upsell. Here it keeps that behaviour
 // for gated assets (edit === 0) and otherwise opens this panel, which holds the AI
 // tools that already exist in the app — model choice, whole-image Customise, per-layer
 // actions and the taxonomy pass — restyled onto the light palette.
@@ -52,13 +55,13 @@ const spinner = (
   />
 );
 
-// ── Pill ─────────────────────────────────────────────────────────────────────
+// ── Customise button ─────────────────────────────────────────────────────────
 
-// The pill runs the customise pass itself — it is the action, not a menu. The caret on
-// its right edge is the way into the AI tools panel (model, per-layer actions,
-// taxonomy), which would otherwise have no trigger. That panel is dev-only, so with
-// showTools false the caret and its divider go and the pill is simply a button.
-export const AiPill = React.memo(function AiPill({
+// It runs the customise pass itself — it is the action, not a menu. The caret on its
+// right edge is the way into the AI tools panel (model, per-layer actions, taxonomy),
+// which would otherwise have no trigger. That panel is dev-only, so with showTools
+// false the caret and its divider go and this is simply a button.
+export const CustomiseButton = React.memo(function CustomiseButton({
   onCustomise, onOpenTools, loading, done, toolsOpen, showTools,
   gated = false, ready = true, cooldown = false,
 }: {
@@ -79,7 +82,7 @@ export const AiPill = React.memo(function AiPill({
   // Disabling either would swallow the click and leave the user with no explanation.
   //
   // `ready` is the one thing that overrides them: until the SVG is on the canvas there
-  // is nothing to customise and nothing to explain, so the pill starts inert.
+  // is nothing to customise and nothing to explain, so it starts inert.
   const diverted = gated || cooldown;
   const spent = done && !diverted;
   const busy = loading && !diverted;
@@ -88,14 +91,12 @@ export const AiPill = React.memo(function AiPill({
   return (
     <div
       style={{
-        position: 'absolute', right: 16, bottom: 16, zIndex: 15,
-        display: 'flex', alignItems: 'center',
-        // Once the pass has run, the pill is spent for this artwork — drop the accent
-        // gradient for flat grey and lose the lift, so it reads as disabled rather than
-        // as a button that's simply been relabelled.
+        display: 'flex', alignItems: 'center', width: '100%',
+        // Once the pass has run, it is spent for this artwork — drop the accent gradient
+        // for flat grey, so it reads as disabled rather than as a button that's simply
+        // been relabelled.
         background: inert && !busy ? C.disabled : C.accentGrad,
-        borderRadius: 11,
-        boxShadow: inert && !busy ? 'none' : SHADOW.aiPill,
+        borderRadius: 8,
         fontFamily: FONT_STACK,
         opacity: busy ? 0.85 : inert ? 0.75 : 1,
       }}
@@ -112,10 +113,10 @@ export const AiPill = React.memo(function AiPill({
             : 'ai.titleRun',
         )}
         style={{
-          display: 'flex', alignItems: 'center', gap: 8,
+          flex: 1, minWidth: 0,
+          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
           background: 'transparent', border: 'none',
-          // Tighter on the right when the caret follows it, even padding when it doesn't.
-          padding: showTools ? '11px 13px 11px 15px' : '11px 15px',
+          padding: 10,
           cursor: inert ? 'default' : 'pointer',
           fontFamily: FONT_STACK,
         }}
@@ -131,7 +132,7 @@ export const AiPill = React.memo(function AiPill({
         ) : (
           <span style={{ color: '#fff', display: 'flex' }}><SparklesIcon size={13} /></span>
         )}
-        <span style={{ color: '#fff', fontSize: 12.5, fontWeight: 700 }}>{label}</span>
+        <span style={{ color: '#fff', fontSize: 12.5, fontWeight: 600 }}>{label}</span>
       </button>
 
       {showTools && (
@@ -143,9 +144,9 @@ export const AiPill = React.memo(function AiPill({
             onClick={onOpenTools}
             title={t('ai.tools')}
             style={{
-              display: 'flex', alignItems: 'center',
+              display: 'flex', flex: 'none', alignItems: 'center',
               background: 'transparent', border: 'none',
-              padding: '11px 12px', cursor: 'pointer', color: '#fff',
+              padding: '10px 11px', cursor: 'pointer', color: '#fff',
             }}
           >
             <ChevronIcon size={12} direction={toolsOpen ? 'down' : 'up'} />

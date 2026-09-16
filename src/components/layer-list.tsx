@@ -23,7 +23,7 @@ export const LayerList = React.memo(function LayerList({
   layers, hiddenLayers, selectedLayers, backgroundLayerId, textLayerIds,
   expandableLayerIds, hiddenInsideCounts, marks,
   onReorderLayers, onSetSelectedLayers, onSetSelectedLayer, onSelectOne,
-  onToggleLayer, onDuplicateLayer, onDeleteLayer, onExpandLayer,
+  onToggleLayer, onDuplicateLayer, onDeleteLayer, onExpandLayer, onPeekLayer,
 }: {
   layers: SvgLayer[];
   hiddenLayers: Set<string>;
@@ -46,6 +46,10 @@ export const LayerList = React.memo(function LayerList({
   onDuplicateLayer: (id: string) => void;
   onDeleteLayer: (id: string) => void;
   onExpandLayer: (id: string) => void;
+  // Hovering a switched-off row shows what it is holding, for as long as the pointer is
+  // on it. The eye says a row is off but not what is missing, and on artwork whose rows
+  // are "g 8" and "path 14" that is the whole question the list cannot answer.
+  onPeekLayer: (id: string | null) => void;
 }) {
   const t = useT();
   const [dragLayerId, setDragLayerId]   = useState<string | null>(null);
@@ -277,6 +281,11 @@ export const LayerList = React.memo(function LayerList({
               onClick={() => {
                 if (panelReorderDoneRef.current) panelReorderDoneRef.current = false;
               }}
+              // Only switched-off rows peek: a visible row has nothing to reveal, and
+              // wiring every row would churn the parent's state across an ordinary sweep
+              // down the list. Suppressed mid-drag — a reorder is not a look.
+              onMouseEnter={hidden && !dragLayerId ? () => onPeekLayer(layer.id) : undefined}
+              onMouseLeave={hidden ? () => onPeekLayer(null) : undefined}
               style={{
                 position: 'relative',
                 display: 'flex', alignItems: 'center', gap: 7,

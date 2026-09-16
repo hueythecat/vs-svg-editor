@@ -2,14 +2,15 @@ import React, { RefObject, useCallback, useState } from 'react';
 
 import type { SelectedTextProps } from '@/lib/svg-utils';
 import {
-  BG_PALETTE, C, FONT_STACK, MONO_STACK, labelStyle, sectionLabelStyle,
+  BG_PALETTE, C, FONT_STACK, MONO_STACK, sectionLabelStyle,
 } from '@/lib/design-tokens';
 import { useT } from '@/i18n/provider';
-import type { DocBundle, TextLayerAttrs } from './editor-types';
+import type { CustomiseBundle, DocBundle, TextLayerAttrs } from './editor-types';
 import { ColorSwatchRow } from './color-swatches';
+import { CustomiseButton } from './editor-ai-panel';
 import {
-  CenterIcon, CloseIcon, DownloadIcon, PencilIcon, PlusIcon,
-  RedoIcon, RevertIcon, RotateIcon, UndoIcon,
+  CenterIcon, MatchRotationIcon, PencilIcon, PlusIcon,
+  RedoIcon, RevertIcon, RotateIcon, TidyIcon, UndoIcon,
 } from './svg-icons';
 import { TextControls } from './text-controls';
 
@@ -18,9 +19,10 @@ import { TextControls } from './text-controls';
 // tabbed handoff splits that switch across two tabs, so the same bodies now render
 // side by side and the user picks which one they are looking at:
 //
-//   Tools → the document head (file, history, Export), the arrange actions, and the
-//           colour surface: canvas colour for the background, find & replace for any
-//           other layer, helper copy when nothing is selected.
+//   Tools → History, the arrange actions, Customise, and the Colours surface: the canvas
+//           colour for the background, every colour on the layer otherwise, helper copy
+//           when nothing is selected. Export is not here — it floats over the canvas
+//           (editor-export-pill.tsx), in the corner Customise used to hold.
 //   Text  → the type form (text-controls.tsx), plus Add text layer, which stays
 //           available with nothing selected.
 //
@@ -72,15 +74,17 @@ function TabHint({ children }: { children: React.ReactNode }) {
 
 // ── Tools tab ────────────────────────────────────────────────────────────────
 
-// 14px icon button for the file row — full colour when live, the disabled grey when its
-// stack is empty. Same treatment the floating toolbar used.
-function IconButton({
-  onClick, disabled, title, color, children,
+// Every action in this tab is an outlined button carrying its own name — icon alone
+// left too much of the panel to guesswork. They size to their label rather than to a
+// share of the row, so a longer translation widens the button and wraps the row instead
+// of truncating; `title` still carries the full sentence, shortcut included.
+function ActionButton({
+  onClick, disabled, title, label, children,
 }: {
   onClick: () => void;
   disabled?: boolean;
   title: string;
-  color?: string;
+  label: string;
   children: React.ReactNode;
 }) {
   return (
@@ -91,44 +95,39 @@ function IconButton({
       disabled={disabled}
       title={title}
       style={{
-        display: 'flex', flex: 'none', alignItems: 'center',
-        border: 'none', background: 'transparent',
-        padding: 4, borderRadius: 6,
-        color: disabled ? C.disabledIcon : (color ?? C.textSecondary),
+        display: 'flex', alignItems: 'center', gap: 5,
+        border: `1px solid ${C.borderInput}`,
+        background: C.surface,
+        color: disabled ? C.disabled : C.textSecondary,
+        fontSize: 12.5, fontFamily: FONT_STACK,
+        padding: '8px 10px', borderRadius: 8,
         cursor: disabled ? 'default' : 'pointer',
+        whiteSpace: 'nowrap',
       }}
     >
       {children}
+      {label}
     </button>
   );
 }
 
-// Outlined action button for the arrange row.
-const arrangeButton = (disabled: boolean): React.CSSProperties => ({
-  flex: 1,
-  minWidth: 0,
-  display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 5,
-  border: `1px solid ${C.borderInput}`,
-  background: C.surface,
-  color: disabled ? C.disabled : C.textSecondary,
-  fontSize: 12.5, fontFamily: FONT_STACK,
-  padding: '9px 8px', borderRadius: 8,
-  cursor: disabled ? 'default' : 'pointer',
-  whiteSpace: 'nowrap',
-});
+// Both action rows wrap: six buttons at their natural width do not fit one 272px column
+// in every language.
+const actionRow: React.CSSProperties = {
+  display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 12,
+};
 
 export const ToolsTab = React.memo(function ToolsTab({
-  doc, selectedLayer, selectedLayerName, isBackground, layerColors,
-  onReplaceColor, onEndColorEdit, onDeselect,
+  doc, customise, selectedLayer, isBackground, layerColors,
+  onReplaceColor, onEndColorEdit,
 }: {
   doc: DocBundle;
+  customise: CustomiseBundle;
   selectedLayer: string | null;
-  selectedLayerName: string;
   isBackground: boolean;
   layerColors: string[];
   onReplaceColor: (from: string, to: string) => void;
   onEndColorEdit: () => void;
-  onDeselect: () => void;
 }) {
   const t = useT();
   const { rows, shown, begin, change, end } = useColorEdit(layerColors, onReplaceColor, onEndColorEdit);
@@ -136,78 +135,91 @@ export const ToolsTab = React.memo(function ToolsTab({
 
   return (
     <div>
-      {/* History. Document-level rather than selection-level, so it heads the tab above
-          Export. The unsaved-changes state still reads off revert, which is live only
-          when there is something to revert. */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 2, marginBottom: 14 }}>
-        <IconButton onClick={doc.onUndo} disabled={doc.undoCount === 0} title={t('toolbar.undo')}>
-          <UndoIcon size={14} />
-        </IconButton>
-        <IconButton onClick={doc.onRedo} disabled={doc.redoCount === 0} title={t('toolbar.redo')}>
-          <RedoIcon size={14} />
-        </IconButton>
-        <IconButton onClick={doc.onReset} disabled={!doc.isDirty} title={t('toolbar.revertTitle')}>
-          <RevertIcon size={14} />
-        </IconButton>
+      {/* ── History ────────────────────────────────────────────────────────
+          Document-level rather than selection-level, so it heads the tab. The
+          unsaved-changes state still reads off revert, which is live only when there is
+          something to revert. */}
+      <div style={{ ...sectionLabelStyle, marginBottom: 9 }}>{t('panel.history')}</div>
+      <div style={actionRow}>
+        <ActionButton
+          onClick={doc.onUndo}
+          disabled={doc.undoCount === 0}
+          title={t('toolbar.undoTitle')}
+          label={t('toolbar.undo')}
+        >
+          <UndoIcon size={13} />
+        </ActionButton>
+        <ActionButton
+          onClick={doc.onRedo}
+          disabled={doc.redoCount === 0}
+          title={t('toolbar.redoTitle')}
+          label={t('toolbar.redo')}
+        >
+          <RedoIcon size={13} />
+        </ActionButton>
+        <ActionButton
+          onClick={doc.onReset}
+          disabled={!doc.isDirty}
+          title={t('toolbar.revertTitle')}
+          label={t('toolbar.revert')}
+        >
+          <RevertIcon size={13} />
+        </ActionButton>
       </div>
 
-      {/* ── Export ─────────────────────────────────────────────────────────── */}
-      <button
-        type="button"
-        onClick={doc.onExport}
-        style={{
-          width: '100%',
-          display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
-          border: 'none', background: C.accent, color: '#fff',
-          fontSize: 12.5, fontWeight: 600, fontFamily: FONT_STACK,
-          padding: 10, borderRadius: 8, cursor: 'pointer', marginBottom: 18,
-        }}
-      >
-        <DownloadIcon size={13} />
-        {doc.exportLabel}
-      </button>
-
       {/* ── Arrange ────────────────────────────────────────────────────────
-          Its own section rather than part of the selection block below, because
-          Center is the one action here that works with nothing selected — it
-          centres every layer. The other two need something to act on. */}
+          Its own section above Colours, because Center is the one action here that
+          works with nothing selected — it centres every layer. The other two need
+          something to act on, so they grey out until there is a selection. */}
       <div style={{ ...sectionLabelStyle, marginBottom: 9 }}>{t('panel.arrange')}</div>
-      <div style={{ display: 'flex', gap: 7, marginBottom: 18 }}>
-        <button
-          type="button"
-          className="ed-ghost"
+      <div style={actionRow}>
+        <ActionButton
           onClick={doc.onCenter}
           title={t('toolbar.centerTitle')}
-          style={arrangeButton(false)}
+          label={t('toolbar.center')}
         >
           <CenterIcon size={13} />
-          {t('toolbar.center')}
-        </button>
-        <button
-          type="button"
-          className="ed-ghost"
+        </ActionButton>
+        <ActionButton
           onClick={doc.onRotate90}
           disabled={doc.transformDisabled}
           title={t('toolbar.rotate90Title')}
-          style={arrangeButton(doc.transformDisabled)}
+          label={t('toolbar.rotate90')}
         >
           <RotateIcon size={13} />
-          90°
-        </button>
-        <IconButton
+        </ActionButton>
+        <ActionButton
           onClick={doc.onMatchRotation}
           disabled={doc.matchRotationDisabled}
           title={t('toolbar.matchRotationTitle')}
+          label={t('toolbar.matchRotation')}
         >
-          <RotateIcon size={15} />
-        </IconButton>
+          <MatchRotationIcon size={13} />
+        </ActionButton>
+        <ActionButton
+          onClick={doc.onTidy}
+          disabled={doc.tidyDisabled}
+          title={t('toolbar.tidyTitle')}
+          label={t('toolbar.tidy')}
+        >
+          <TidyIcon size={13} />
+        </ActionButton>
       </div>
 
-      {/* ── Selection ──────────────────────────────────────────────────────
-          Nothing selected: the same helper copy the inspector showed. Split across
-          five keys rather than one, because two words inside it are emphasised — and
-          where those words sit in the sentence is a property of the language, not of
-          the layout. */}
+      {/* The one AI action, directly under Arrange — it acts on the whole artwork, like
+          Center does, rather than on the selection the Colours block below edits. */}
+      <div style={{ marginBottom: 18 }}>
+        <CustomiseButton {...customise} />
+      </div>
+
+      {/* ── Colours ────────────────────────────────────────────────────────
+          One headline over the whole colour surface: which layer it acts on is the
+          Layers tab's job to show, and what clicking a swatch does is evident from
+          doing it. Nothing selected: the same helper copy the inspector showed. Split
+          across five keys rather than one, because two words inside it are emphasised —
+          and where those words sit in the sentence is a property of the language, not
+          of the layout. */}
+      <div style={{ ...sectionLabelStyle, marginBottom: 9 }}>{t('panel.colours')}</div>
       {!selectedLayer ? (
         <TabHint>
           {t('inspector.emptyBefore')}
@@ -216,38 +228,9 @@ export const ToolsTab = React.memo(function ToolsTab({
           <strong style={{ color: C.textSecondary, fontWeight: 600 }}>{t('inspector.emptyArtwork')}</strong>
           {t('inspector.emptyAfter')}
         </TabHint>
-      ) : (
-      <div>
-      {/* What the colours below act on, and the way to stop acting on it. The ✕
-          deselects rather than closing anything — the panel itself is permanent now. */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 9 }}>
-        <span
-          style={{
-            ...sectionLabelStyle, flex: 1, minWidth: 0,
-            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-          }}
-          title={selectedLayerName}
-        >
-          {t('panel.selection', { name: selectedLayerName })}
-        </span>
-        <button
-          type="button"
-          className="ed-ghost"
-          onClick={onDeselect}
-          title={t('inspector.deselect')}
-          style={{
-            border: 'none', background: 'transparent', color: C.textFaint,
-            padding: 2, borderRadius: 6, cursor: 'pointer', display: 'flex', flex: 'none',
-          }}
-        >
-          <CloseIcon size={12} />
-        </button>
-      </div>
-
-      {isBackground ? (
+      ) : isBackground ? (
         /* ── Canvas colour ───────────────────────────────────────────────── */
         <div>
-          <label style={labelStyle}>{t('inspector.canvasColor')}</label>
           {canvasColor ? (
             <ColorSwatchRow
               palette={BG_PALETTE}
@@ -264,12 +247,8 @@ export const ToolsTab = React.memo(function ToolsTab({
           )}
         </div>
       ) : (
-        /* ── Find & replace colours ──────────────────────────────────────── */
+        /* ── Replace a colour everywhere it is used ──────────────────────── */
         <div>
-          <label style={labelStyle}>{t('inspector.findReplace')}</label>
-          <p style={{ fontSize: 11, color: C.textFaint, margin: '0 0 8px', lineHeight: 1.5 }}>
-            {t('inspector.findReplaceHint')}
-          </p>
           {rows.length === 0 ? (
             <p style={{ fontSize: 12, lineHeight: 1.6, color: C.textFaint, margin: 0 }}>
               {t('inspector.noColours')}
@@ -318,8 +297,6 @@ export const ToolsTab = React.memo(function ToolsTab({
             </div>
           )}
         </div>
-      )}
-      </div>
       )}
     </div>
   );

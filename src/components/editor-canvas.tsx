@@ -45,8 +45,8 @@ const handleBase: React.CSSProperties = {
 };
 
 export const CanvasStage = React.memo(function CanvasStage({
-  svgCanvasRef, overlayRef, sizeBadgeRef,
-  onCanvasClick, onCanvasMouseDown,
+  svgCanvasRef, overlayRef, sizeBadgeRef, showSizeBadge, hoverBadgeRef,
+  onCanvasClick, onCanvasMouseDown, onCanvasMouseMove, onCanvasMouseLeave,
   aiLoading, aiStatusMsg,
   isLoading, activeSvg,
   hiddenLayers, previewIds, previewOutlineId, backgroundLayerId,
@@ -58,8 +58,12 @@ export const CanvasStage = React.memo(function CanvasStage({
   svgCanvasRef: React.RefObject<HTMLDivElement | null>;
   overlayRef: React.RefObject<HTMLDivElement | null>;
   sizeBadgeRef: React.RefObject<HTMLSpanElement | null>;
+  showSizeBadge: boolean;
+  hoverBadgeRef: React.RefObject<HTMLSpanElement | null>;
   onCanvasClick: (e: React.MouseEvent<HTMLDivElement>) => void;
   onCanvasMouseDown: (e: React.MouseEvent<HTMLDivElement>) => void;
+  onCanvasMouseMove: (e: React.MouseEvent<HTMLDivElement>) => void;
+  onCanvasMouseLeave: () => void;
   aiLoading: boolean;
   aiStatusMsg: string;
   isLoading: boolean;
@@ -98,6 +102,8 @@ export const CanvasStage = React.memo(function CanvasStage({
     <div
       ref={svgCanvasRef}
       onClick={onCanvasClick}
+      onMouseMove={onCanvasMouseMove}
+      onMouseLeave={onCanvasMouseLeave}
       // Shift+click is the browser's "extend the text selection to here" gesture, and
       // SVG <text> is selectable like any other text — so shift-clicking a text layer
       // used to highlight everything between the last anchor and the click, and then
@@ -217,6 +223,24 @@ export const CanvasStage = React.memo(function CanvasStage({
               dangerouslySetInnerHTML={{ __html: activeSvg.content }}
             />
           </div>
+
+          {/* Hover readout — the same x/y + w/h the selection badge shows, for whatever
+              layer the pointer is over, so the numbers can be read without selecting
+              anything first. A sibling of the overlay rather than a child of it: it
+              follows the pointer's layer, not the selection, and the two are usually
+              different elements. Existence is React's, position and display are the
+              parent's layout effect (which is also what keeps it off screen until there
+              is something under the pointer). */}
+          <span
+            ref={hoverBadgeRef}
+            style={{
+              position: 'absolute', display: 'none', zIndex: 6,
+              background: C.textSecondary, color: '#fff',
+              fontFamily: MONO_STACK, fontSize: 10, lineHeight: 1.45,
+              padding: '3px 6px', borderRadius: 4,
+              pointerEvents: 'none', whiteSpace: 'pre',
+            }}
+          />
 
           {/* Selection overlay — React controls existence, the parent's layout effect
               controls position. No display/left/top/width/height in JSX so React never
@@ -345,9 +369,11 @@ export const CanvasStage = React.memo(function CanvasStage({
               {/* Position + size badge — two lines, x/y over w/h, both written by the
                   parent's positioning pass as one newline-separated string (hence `pre`).
                   Anchored to the frame's bottom edge rather than offset up from it, so
-                  the second line extends downwards instead of over the artwork. It exists
-                  only while this overlay does — i.e. only for a selected or dragged
-                  layer. */}
+                  the second line extends downwards instead of over the artwork.
+                  Shown only while the mouse is held down on the artwork or a handle:
+                  hidden rather than unmounted, so the numbers the parent already wrote
+                  are on screen from the first frame of the gesture instead of an empty
+                  chip waiting for the first mousemove. */}
               <span
                 ref={sizeBadgeRef}
                 style={{
@@ -356,6 +382,7 @@ export const CanvasStage = React.memo(function CanvasStage({
                   fontFamily: MONO_STACK, fontSize: 10, lineHeight: 1.45,
                   padding: '3px 6px', borderRadius: 4,
                   pointerEvents: 'none', whiteSpace: 'pre',
+                  visibility: showSizeBadge ? 'visible' : 'hidden',
                 }}
               />
             </div>

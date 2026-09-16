@@ -28,6 +28,23 @@ export type DocBundle = {
   transformDisabled: boolean;
   onMatchRotation: () => void;
   matchRotationDisabled: boolean;
+  onTidy: () => void;
+  tidyDisabled: boolean;
+};
+
+// The Customise pass, as the Tools tab needs it. The pass itself lives in the AI code;
+// what the button has to know is only whether it can run and what it should say — the
+// same set the floating pill carried before Export took that corner of the canvas.
+export type CustomiseBundle = {
+  onCustomise: () => void;
+  onOpenTools: () => void;
+  loading: boolean;
+  done: boolean;
+  toolsOpen: boolean;
+  showTools: boolean;
+  gated: boolean;
+  ready: boolean;
+  cooldown: boolean;
 };
 
 export type AiActionType = 'strip-text' | 'suggest-font' | 'remove-specific-text' | 'check-text';

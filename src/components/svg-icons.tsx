@@ -110,6 +110,30 @@ export function RotateIcon({ className, size }: IconProps) {
   );
 }
 
+// Rotate-90 is one arrow; matching every layer to the selection is that same arrow
+// acting on a stack, so this one carries a tilted second shape behind the square.
+export function MatchRotationIcon({ className, size }: IconProps) {
+  return (
+    <svg {...stroked(size, className)}>
+      <rect x="4.5" y="10.5" width="9" height="9" rx="1.5" />
+      <path strokeLinecap="round" strokeLinejoin="round" d="M14.4 15.8 19 11.2a1.5 1.5 0 0 0 0-2.1l-4.6-4.6a1.5 1.5 0 0 0-2.1 0L7.7 9.1" />
+    </svg>
+  );
+}
+
+// Three bars with equal air between them — the gaps are the subject, so they are drawn
+// as the two arrowed spans rather than left as whitespace between the shapes.
+export function TidyIcon({ className, size }: IconProps) {
+  return (
+    <svg {...stroked(size, className)}>
+      <rect x="3.5" y="3" width="17" height="3" rx="1" />
+      <rect x="3.5" y="10.5" width="17" height="3" rx="1" />
+      <rect x="3.5" y="18" width="17" height="3" rx="1" />
+      <path strokeLinecap="round" d="M12 6.6v3.3M12 14.1v3.3" />
+    </svg>
+  );
+}
+
 export function DownloadIcon({ className, size }: IconProps) {
   return (
     <svg {...stroked(size, className, 2)}>

@@ -3,7 +3,7 @@ import React, { Dispatch, RefObject, SetStateAction } from 'react';
 import type { SelectedTextProps, SvgLayer } from '@/lib/svg-utils';
 import { C, FONT_STACK, SHADOW } from '@/lib/design-tokens';
 import { useT } from '@/i18n/provider';
-import type { DocBundle, TextLayerAttrs } from './editor-types';
+import type { CustomiseBundle, DocBundle, TextLayerAttrs } from './editor-types';
 import { ToolsTab, TextTab } from './editor-inspector';
 import { LayersTab } from './editor-layers-panel';
 
@@ -48,27 +48,26 @@ function tabStyle(active: boolean): React.CSSProperties {
 export const EditorControlPanel = React.memo(function EditorControlPanel({
   tab, onSelectTab,
   // Tools
-  doc, selectedLayer, selectedLayerName, isBackground, layerColors,
-  onReplaceColor, onEndColorEdit, onDeselect,
+  doc, customise, selectedLayer, isBackground, layerColors,
+  onReplaceColor, onEndColorEdit,
   // Text
   textProps, textContentRef, usedFonts, extraFonts, onUpdateTextLayer, onAddTextLayer,
   // Layers
   layers, hiddenLayers, selectedLayers, backgroundLayerId, textLayerIds, expandableLayerIds,
   hiddenInsideCounts, drillLabel, drillMarks, onBackOut, onReorderLayers,
   onSetSelectedLayers, onSetSelectedLayer, onSelectOne,
-  onToggleLayer, onDuplicateLayer, onDeleteLayer, onExpandLayer,
+  onToggleLayer, onDuplicateLayer, onDeleteLayer, onExpandLayer, onPeekLayer,
 }: {
   tab: ControlTab;
   onSelectTab: (tab: ControlTab) => void;
 
   doc: DocBundle;
+  customise: CustomiseBundle;
   selectedLayer: string | null;
-  selectedLayerName: string;
   isBackground: boolean;
   layerColors: string[];
   onReplaceColor: (from: string, to: string) => void;
   onEndColorEdit: () => void;
-  onDeselect: () => void;
 
   // The selected text layer's attributes, or the draft for the next one — the Text tab
   // is always live, so this is never null.
@@ -94,6 +93,7 @@ export const EditorControlPanel = React.memo(function EditorControlPanel({
   onSetSelectedLayer: Dispatch<SetStateAction<string | null>>;
   onSelectOne: (id: string | null) => void;
   onToggleLayer: (id: string) => void;
+  onPeekLayer: (id: string | null) => void;
   onDuplicateLayer: (id: string) => void;
   onDeleteLayer: (id: string) => void;
   onExpandLayer: (id: string) => void;
@@ -161,6 +161,7 @@ export const EditorControlPanel = React.memo(function EditorControlPanel({
           onSetSelectedLayer={onSetSelectedLayer}
           onSelectOne={onSelectOne}
           onToggleLayer={onToggleLayer}
+          onPeekLayer={onPeekLayer}
           onDuplicateLayer={onDuplicateLayer}
           onDeleteLayer={onDeleteLayer}
           onExpandLayer={onExpandLayer}
@@ -181,13 +182,12 @@ export const EditorControlPanel = React.memo(function EditorControlPanel({
           {tab === 'tools' ? (
             <ToolsTab
               doc={doc}
+              customise={customise}
               selectedLayer={selectedLayer}
-              selectedLayerName={selectedLayerName}
               isBackground={isBackground}
               layerColors={layerColors}
               onReplaceColor={onReplaceColor}
               onEndColorEdit={onEndColorEdit}
-              onDeselect={onDeselect}
             />
           ) : (
             <TextTab

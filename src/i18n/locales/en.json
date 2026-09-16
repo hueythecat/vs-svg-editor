@@ -2,36 +2,38 @@
   "toolbar": {
     "loading": "Loading…",
     "unsavedChanges": "Unsaved changes",
-    "undo": "Undo (⌘Z)",
-    "redo": "Redo (⇧⌘Z)",
+    "undo": "Undo",
+    "undoTitle": "Undo (⌘Z)",
+    "redo": "Redo",
+    "redoTitle": "Redo (⇧⌘Z)",
     "center": "Center",
     "centerTitle": "Centre every layer on the canvas",
+    "rotate90": "Rotate 90°",
     "rotate90Title": "Rotate the selection 90°",
+    "matchRotation": "Match rotation",
     "matchRotationTitle": "Match every layer to the selected layer's rotation",
+    "tidy": "Tidy",
+    "tidyTitle": "Even out the vertical gaps between the selected layers (3 or more)",
+    "revert": "Revert",
     "revertTitle": "Revert to the original file",
     "export": "Export",
     "exportPartial": "Export (%{shown}/%{total})"
   },
-
   "panel": {
     "tabTools": "Tools",
     "tabText": "Text",
     "tabLayers": "Layers",
-    "selection": "Selection · %{name}",
-    "arrange": "Arrange"
+    "history": "History",
+    "arrange": "Arrange",
+    "colours": "Colours"
   },
-
   "inspector": {
     "titleText": "Editing text",
     "titleBackground": "Background",
     "titleColours": "Vector colours",
     "titleEmpty": "Nothing selected",
-    "deselect": "Deselect",
     "customColour": "Custom colour",
-    "canvasColor": "Canvas color",
     "noBackgroundFill": "This background has no fill colour to change.",
-    "findReplace": "Find & replace colours",
-    "findReplaceHint": "Click a colour to recolour every shape in the artwork that uses it.",
     "noColours": "No colours detected on this layer.",
     "emptyBefore": "Select a ",
     "emptyText": "text",
@@ -39,7 +41,6 @@
     "emptyArtwork": "artwork",
     "emptyAfter": " to swap its colours, or drag anything to move, resize and rotate it."
   },
-
   "text": {
     "words": "Words",
     "wordsPlaceholder": "Type something…",
@@ -62,7 +63,6 @@
     "defaultContent": "Text",
     "addLayer": "Add text layer"
   },
-
   "layers": {
     "heading": "Elements · %{count}",
     "addText": "Add a text layer",
@@ -90,20 +90,17 @@
     "numberedLabel": "Layer %{index}",
     "copySuffix": "%{label} copy"
   },
-
   "canvas": {
     "beta": "Beta",
     "rotateHandle": "Drag to rotate (hold Shift to snap to 15°)",
     "moveHandle": "Drag to move",
     "resizeHandle": "Drag to resize"
   },
-
   "dropzone": {
     "release": "Release to open",
     "prompt": "Drop an SVG file",
     "browse": "or click to browse"
   },
-
   "ai": {
     "customise": "Customise",
     "customising": "Customising…",
@@ -139,14 +136,12 @@
     "analyseStructure": "Analyse structure →",
     "taxonomyFailed": "Could not analyse structure"
   },
-
   "fonts": {
     "title": "Font suggestions",
     "analysing": "Analysing design…",
     "add": "Add to the font list",
     "close": "Close"
   },
-
   "status": {
     "thinking": "Thinking…",
     "analysingImage": "Analysing image…",
@@ -155,7 +150,6 @@
     "readingText": "Reading text…",
     "findingText": "Finding text…"
   },
-
   "errors": {
     "unreadableResponse": "AI returned an unreadable response",
     "noTextDetected": "No text was detected in this artwork — nothing was changed.",
@@ -164,7 +158,6 @@
     "layerNotFound": "Layer not found",
     "api": "API error %{status}"
   },
-
   "upsell": {
     "title": "Unlock AI editing",
     "close": "Close",
@@ -177,7 +170,6 @@
     "later": "Maybe later",
     "upgrade": "Upgrade to unlock"
   },
-
   "cooldown": {
     "title": "Already customised",
     "close": "Close",
@@ -193,14 +185,12 @@
     },
     "gotIt": "Got it"
   },
-
   "confirm": {
     "cancel": "Cancel",
     "resetTitle": "Revert all changes?",
     "resetBody": "This restores the file as it was imported. Everything you've edited since — including hidden layers — is discarded.",
     "resetConfirm": "Revert changes"
   },
-
   "rating": {
     "title": "How did that export go?",
     "body": "Rate it and we’ll start your download.",
@@ -210,7 +200,6 @@
     "cancel": "Cancel",
     "submit": "Send rating & download"
   },
-
   "abort": {
     "title": "Why are you abandoning this export?",
     "body": "Pick anything that applies. It goes straight to the team.",
