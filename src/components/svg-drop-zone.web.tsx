@@ -26,7 +26,6 @@ import {
   resolveGradient,
   stripScripts,
   svgToBase64Png,
-  sampleRowInkColors,
   sampleElementInkColors,
   backgroundFillColor,
   declaresOwnFill,
@@ -221,7 +220,7 @@ const TEXT_PARSING_PROMPT = `TASK 1 — Text detection: Examine the image carefu
 - font: the Google Font that most closely matches THIS row's own lettering. Judge each row separately — one design routinely mixes families, and picking a single family for the whole image is a wrong answer for every row that does not use it. Match the letterforms actually visible in this row: script or handwritten lettering needs a script face (Dancing Script, Great Vibes, Pacifico, Sacramento), a serif needs a serif (Playfair Display, Cormorant Garamond, Cinzel), condensed lettering needs a condensed face (Barlow Condensed, Oswald), geometric sans needs a geometric sans (Montserrat, Poppins). Only give two rows the same family when their letterforms really are the same
 - sizeFraction: font cap-height as a fraction of image height (e.g. 0.08 if text height ≈ 8% of image)
 - weight: CSS font-weight integer (100, 200, 300, 400, 500, 600, 700, 800, or 900)
-- color: THIS row's own colour as CSS hex. READ IT FROM THE SOURCE: every element in the SVG below carries data-fill, the colour that element appears as in the image, already composited — blend modes and opacity included. The elements that draw this row are the ones you name in its removeIds, so read their data-fill and report that value. Do not judge colour by eye off the image when data-fill states it; only fall back to the image for a row whose elements you cannot identify. Judge each row on its own either way — a card routinely sets a heading in one colour and its body text in another. Read it off the pixels of this row's lettering, not from the rows around it — a card routinely sets a heading in one colour and its body text in another, and a light heading over a mid-tone panel sits directly above dark body text on the same panel. Do NOT give every row the same colour unless every row really is that colour, and do NOT assume text is white because other text on the image is. Where lettering is composited over a coloured panel, report the colour it ENDS UP, not the colour it would be on white.
+- color: THIS row's own colour as CSS hex, as it appears in the image — composited over whatever sits behind it, not the colour it would be on white. Where an element in the SVG below carries data-fill, that is the colour it renders as, already composited (blend modes and opacity included): read the data-fill of the elements you name in this row's removeIds and report that value, and only judge colour by eye for a row whose elements you cannot identify. Judge each row on its own — a card routinely sets a heading in one colour and its body text in another, and a light heading over a mid-tone panel can sit directly above dark body text on the same panel. Do NOT give every row the same colour unless every row really is that colour, and do NOT assume text is white because other text on the image is.
 - content: the exact text string if legible, else ""
 - letterSpacing: CSS letter-spacing in em units. Default to 0.0 (normal) if you are not certain — only use a non-zero value when you can clearly see unusually wide or condensed tracking (e.g. 0.1 slightly wide, 0.3 very wide, -0.05 condensed)
 
@@ -527,35 +526,25 @@ const removedSubtree = (records: RemovedRecord[], rootId: string): Set<string> =
   return out;
 };
 
-// How many rows the model tagged with outlines that were actually measured.
-//
-// This no longer says anything about where a row will be PLACED: appendTextRowLayers
-// links rows to lettering by reading order over the measured geometry and does not use
-// removeIds at all, precisely because the model returns them shifted. It stays as a
-// read on the vision answer itself — a low count means the pass stopped pointing at the
-// artwork it was describing, which is worth seeing even though placement now survives it.
-// `[text-rows] linked …` is the line to read for placement.
 // Writes onto every marked element the colour it APPEARS as in the image, so the source
 // the model reads states the answer instead of hiding it.
 //
-// The source it is sent is contentXml — the content elements alone. The <style> block those
-// elements' classes resolve against lives in defs, which goes into the RASTER but was never
-// sent as text. So the model saw class="uuid-4b5ffa49-…" and no stylesheet, and had no way
-// to answer a question about colour except by eye, off a raster where this card's contact
-// type is 7px tall and mostly antialiasing. It reported the panel colour, twice, which is
-// what squinting at that produces.
+// The model is sent the content elements alone. The <style> block their classes resolve
+// against lives in defs, which goes into the RASTER but not the text, so a class-styled
+// element gives no colour in the source at all — and judging small lettering by eye off a
+// raster mostly reads antialiasing, or the panel behind it.
 //
-// Sampled rather than read off the fill, because the fill is not what you see: these glyphs
-// declare #6d6e71 under mix-blend-mode:multiply, which over the panel composites to the
-// #353754 on screen. data-fill carries the composited value, so the model reports the
+// Sampled rather than read off the fill, because the fill is not what you see: a glyph
+// declaring a mid grey under mix-blend-mode:multiply composites to something much darker
+// over a coloured panel. data-fill carries the composited value, so the model reports the
 // colour of the text in the image and it can be applied as-is.
 const annotateRenderedPaint = async (
   svgRoot: Element,
   marked: Map<string, Element>,
   vb: { x: number; y: number; w: number; h: number },
+  tag: string,
 ): Promise<void> => {
   const ids = [...marked.keys()];
-  console.log(`[customise] sampling rendered colour for ${ids.length} marked element(s)`);
   if (ids.length === 0) return;
   try {
     const boxes = measureRemovedTextBoxes(svgRoot, ids);
@@ -571,78 +560,23 @@ const annotateRenderedPaint = async (
       marked.get(id)!.setAttribute('data-fill', ink);
       n++;
     });
-    console.log(`[customise] annotated ${n}/${ids.length} element(s) with the colour they render as`);
+    if (__DEV__) console.log(`[${tag}] annotated ${n}/${ids.length} element(s) with the colour they render as`);
   } catch (err) {
     // The pass still works without it — the model falls back to reading the image — but a
     // silent failure here looks exactly like the model ignoring data-fill, so it says so.
-    console.warn('[customise] could not sample rendered colours:', err);
+    console.warn(`[${tag}] could not sample rendered colours:`, err);
   }
 };
 
-// Checks each row's reported colour against the one its lettering actually renders as, and
-// says so when they differ. It does NOT change the row.
+
+// How many rows the model tagged with outlines that were actually measured.
 //
-// The colour a row is drawn in is the vision pass's answer to give — that is what it is
-// being asked for, and code quietly substituting its own reading makes the pass look
-// correct when it is not. This exists so that the disagreement is visible instead: if the
-// log fills with mismatches, the prompt is not doing its job and that is the thing to fix.
-const reportRowColorMismatches = async (
-  svgRoot: Element,
-  rows: TextRow[],
-  anchors: Map<string, DOMRect>,
-  vb: { x: number; y: number; w: number; h: number },
-): Promise<void> => {
-  const boxes = rows.map((row) => {
-    const mine = (row.removeIds ?? []).map((sid) => anchors.get(sid)).filter((b): b is DOMRect => !!b);
-    if (mine.length === 0) return null;
-    const x = Math.min(...mine.map((b) => b.x));
-    const y = Math.min(...mine.map((b) => b.y));
-    const r = Math.max(...mine.map((b) => b.x + b.width));
-    const bt = Math.max(...mine.map((b) => b.y + b.height));
-    return new DOMRect(x, y, r - x, bt - y);
-  });
-  if (!boxes.some(Boolean)) return;
-
-  let sampled: (string | null)[];
-  try {
-    sampled = await sampleRowInkColors(
-      new XMLSerializer().serializeToString(svgRoot), boxes, vb,
-    );
-  } catch {
-    return;   // never let a colour reading stop the pass
-  }
-
-  // Only a real difference is worth reporting: antialiasing and the bucket averaging put a
-  // few units between any sample and the value it came from.
-  const off: string[] = [];
-  rows.forEach((row, i) => {
-    const ink = sampled[i];
-    if (!ink) return;
-    const a = hexToRgb(normalizeColor(ink) ?? '');
-    const b = hexToRgb(normalizeColor(row.color ?? '') ?? '');
-    if (!a || !b) return;
-    if (Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) < COLOR_MISMATCH_DISTANCE) return;
-    off.push(`"${row.content}" said ${row.color}, artwork reads ${ink}`);
-  });
-  if (off.length > 0) {
-    console.warn(
-      `[customise] ${off.length}/${rows.length} row(s) disagree with the artwork on colour — ` +
-      `the text is drawn in what the pass reported: ${off.join('; ')}`,
-    );
-  }
-};
-
-// How far apart a reported and a sampled colour must be before it is a disagreement rather
-// than the noise of sampling one.
-const COLOR_MISMATCH_DISTANCE = 60;
-
-const hexToRgb = (hex: string): [number, number, number] | null => {
-  const m = /^#([0-9a-f]{6})$/i.exec(hex.trim());
-  if (!m) return null;
-  const n = parseInt(m[1], 16);
-  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
-};
-
+// This no longer says anything about where a row will be PLACED: appendTextRowLayers
+// links rows to lettering by reading order over the measured geometry and does not use
+// removeIds at all, precisely because the model returns them shifted. It stays as a
+// read on the vision answer itself — a low count means the pass stopped pointing at the
+// artwork it was describing, which is worth seeing even though placement now survives it.
+// `[text-rows] linked …` is the line to read for placement.
 const countTaggedRows = (rows: TextRow[], anchors: Map<string, DOMRect>): number =>
   rows.filter((r) => (r.removeIds ?? []).some((sid) => anchors.has(sid))).length;
 
@@ -2773,7 +2707,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     // moved the heading below the contact block. Evening out gaps that do not exist is not
     // a thing the button can do, so it declines rather than inventing an answer.
     if (gap < 0) {
-      console.log(
+      if (__DEV__) console.log(
         `[tidy] declined — the ${items.length} selected layer(s) overlap ` +
         `(${inked.toFixed(0)} of ink in a ${span.toFixed(0)} run), so there are no gaps to even`,
       );
@@ -2800,7 +2734,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     });
     if (!changed) return;
 
-    console.log(`[tidy] evened ${items.length} layer(s) to a ${gap.toFixed(1)} gap`);
+    if (__DEV__) console.log(`[tidy] evened ${items.length} layer(s) to a ${gap.toFixed(1)} gap`);
     snapshotForUndo(activeSvg.content, activeSvg.layers);
     const content = new XMLSerializer().serializeToString(doc.documentElement);
     setActiveSvg((prev) => (prev ? { ...prev, content } : null));
@@ -3094,7 +3028,7 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
       };
       contentEls.forEach((el) => markContent(el));
       // Before serialising: the colours have to be on the elements the model is shown.
-      await annotateRenderedPaint(doc.documentElement, aiIdMap, { x: vbX, y: vbY, w: vw, h: vh });
+      await annotateRenderedPaint(doc.documentElement, aiIdMap, { x: vbX, y: vbY, w: vw, h: vh }, 'customise');
       const contentXml = contentEls.map((el) => new XMLSerializer().serializeToString(el)).join('');
       // Scoped raster: defs + content layers only (no background) at the full viewBox.
       const contentSvg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="${viewBox}">${defsXml}${contentXml}</svg>`;
@@ -3120,7 +3054,7 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
       // The suggestion limit is part of the key rather than a version bump: raising it
       // asks a different question, and a cached answer would otherwise keep returning
       // the old count and make the setting look like it does nothing.
-      const cacheKey = `customise-v11:${TEXT_PARSE_MODEL}:f${FONT_SUGGESTION_LIMIT}:${bgColor ?? 'none'}:${hashString(contentXml)}`;
+      const cacheKey = `customise-v12:${TEXT_PARSE_MODEL}:f${FONT_SUGGESTION_LIMIT}:${bgColor ?? 'none'}:${hashString(contentXml)}`;
       let parsed: CustomiseResult;
       const cachedRaw = readAiCache(cacheKey);
 
@@ -3167,7 +3101,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
       // console.log of one string, not console.table: the dev server mirrors the browser
       // console into the terminal, and only log/warn/error survive that trip — a table
       // renders in devtools and leaves nothing in the log anyone is actually reading.
-      console.log('[customise] rows returned:\n' + parsed.rows.map((r, i) =>
+      if (__DEV__) console.log('[customise] rows returned:\n' + parsed.rows.map((r, i) =>
         `  ${String(i).padStart(2)} y=${Number(r.yFraction).toFixed(3)}` +
         ` x=${Number(r.xFraction).toFixed(3)}` +
         ` l=${r.leftFraction === undefined ? '  -  ' : r.leftFraction.toFixed(3)}` +
@@ -3203,11 +3137,6 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
       // Measured before anything is hidden. The boxes are what the replacement text is
       // placed from, and they also give the dev panel something to show per entry.
       const anchors = measureRemovedTextBoxes(doc.documentElement, removeIds);
-      // Colour, measured from the artwork while it is still standing — the pass reports it
-      // per row and is unreliable about it (four rows of this card came back #ffffff when
-      // three of them composite to #3a3b5a), and once the lettering is hidden there is
-      // nothing left to sample.
-      await reportRowColorMismatches(doc.documentElement, parsed.rows, anchors, { x: vbX, y: vbY, w: vw, h: vh });
       const hidden = hideRemovedElements(aiIdMap, removeIds, parsed.rows, anchors, hiddenLayers, 'customise');
       for (const [, el] of aiIdMap) { el.removeAttribute('data-ai-idx'); el.removeAttribute('data-fill'); }
 
@@ -3577,7 +3506,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences:
           [{ content: query, removeIds } as TextRow],
           rstAnchors, hiddenLayers, 'remove-specific-text',
         );
-        for (const [, el] of rstIdMap) { el.removeAttribute('data-ai-idx'); el.removeAttribute('data-fill'); }
+        for (const [, el] of rstIdMap) el.removeAttribute('data-ai-idx');
         const contentRST = new XMLSerializer().serializeToString(doc.documentElement);
         const keptRST = pruneMissingLayers(doc, activeSvg.layers);
         setActiveSvg((prev) => prev ? { ...prev, content: contentRST, layers: keptRST } : null);
@@ -3612,6 +3541,8 @@ Respond with ONLY a valid JSON object — no markdown, no code fences:
         }
       };
       markEls(layerEl);
+      // Before serialising, as in customise: the prompt reads colour off data-fill.
+      await annotateRenderedPaint(doc.documentElement, aiIdMap, { x: vbX, y: vbY, w: vw, h: vh }, 'strip-text');
       const markedSvgString = new XMLSerializer().serializeToString(layerEl);
 
       // v7 retired every v6 answer: those predate the per-row removeIds linking, so
@@ -3620,7 +3551,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences:
       // partition ("every index appears in exactly one row"), which made the model answer
       // with one row per stacked copy of a word, and those answers re-add each field
       // three times over.
-      const cacheKey = `strip-text-v14:${TEXT_PARSE_MODEL}:${hashString(svgString)}`;
+      const cacheKey = `strip-text-v15:${TEXT_PARSE_MODEL}:${hashString(svgString)}`;
       let parsed: StripResult;
 
       const cachedRaw = readAiCache(cacheKey);

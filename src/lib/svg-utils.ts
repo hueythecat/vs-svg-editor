@@ -903,7 +903,7 @@ function measureTextWidths(root: Element, ids: string[]): Map<string, number> {
 
 // Bounds on what counts as one line of lettering when resolveAnchors grows a row's anchor
 // out from a single box. Glyphs on one line vary in height (cap height against an
-// x-height — 6.2 to 9.4 on this artwork, a ratio of 1.5); whole shapes that merely cross
+// x-height — typically a ratio of about 1.5); whole shapes that merely cross
 // the line do not, which is what the ratio excludes.
 const SAME_LINE_HEIGHT_RATIO = 2.0;
 // How much of the shorter box's height must overlap the line's span to join it.
@@ -930,9 +930,8 @@ const ALIGN_SKIP_COST = 0.15;
 // How far apart in size a band and a line may be and still be the same lettering.
 const ALIGN_MAX_SIZE_RATIO = 3.0;
 
-// Detecting the edge a block of lines was set against. It takes at least this many lines
-// to be a block at all; the winning edge must agree to within this fraction of a line
-// height, and must beat the next best by this margin before anything is claimed.
+// Detecting the edge a block of lines was set against: it takes at least this many rows
+// with a known edge to be a block at all.
 const BLOCK_MIN_LINES = 3;
 
 // Collapsing a row that is part of another row on the same line: how much of the shorter
@@ -963,6 +962,11 @@ const MIN_SNAPPED_SIZE = 8;
 // believed either. Generous — the estimate is what needs correcting — but not unbounded.
 const SNAP_MAX_GROWTH = 3.0;
 
+// Placement diagnostics: detailed enough to debug a run from the log, too chatty to ship.
+const devLog = (message: string): void => {
+  if (__DEV__) console.log(message);
+};
+
 // ─── Anchor boxes → lines of lettering ───────────────────────────────────────
 
 type AnchorLine = { ids: string[]; box: DOMRect };
@@ -970,24 +974,24 @@ type AnchorLine = { ids: string[]; box: DOMRect };
 // Groups the anchor boxes into the lines of lettering they actually form.
 //
 // Every anchor box is one LEAF shape. In artwork whose type has been converted to
-// outlines that is one glyph — "MICHAEL DOE" is ten separate paths on this card — so a
+// outlines that is one glyph — "MICHAEL DOE" set in outlines is ten separate paths — so a
 // box on its own is never a unit a row can be anchored to. The line is.
 //
 // Seeded shortest-box-first, which is what keeps this a clustering of lettering rather
 // than of the canvas: glyphs are the small shapes, so they find each other before
 // anything large is considered, and a big shape is left to form its own cluster. Seeding
-// topmost-first instead starts on the back card's background rect, and since that rect
-// overlaps every line in the stack the whole card comes back as one "line".
+// topmost-first instead can start on a panel's background rect, and since that rect
+// overlaps every line on the panel the whole panel comes back as one "line".
 //
 // Growth is by vertical OVERLAP, not by distance between centres: a line mixes x-height
 // with cap height and descenders, so "o" and "l" on one line have centres well apart
 // while their spans overlap almost completely.
 //
 // Two bounds keep a line from becoming a region:
-//   - height, because a shape that merely crosses the line is not on it. The back card's
-//     background rect is 144 units tall against a 9-unit glyph and overlaps every line it
-//     contains. It also passes filterOutBackgroundIds — 27% of the canvas, under that
-//     guard's 50% limit — so this is the only thing that rejects it.
+//   - height, because a shape that merely crosses the line is not on it. A panel's
+//     background rect can be many times a glyph's height and overlap every line it
+//     contains, while covering too little of the canvas for filterOutBackgroundIds to
+//     catch it — so this is the only thing that rejects it.
 //   - horizontal gap, so two separate blocks that happen to share a y do not merge. It is
 //     deliberately coarse (multiples of the line's own height): it only has to tell a run
 //     of words from a block half a canvas away, never a word space from the gap to an
@@ -1054,8 +1058,7 @@ function groupRowsIntoBands(
 // skip. Returns the line index for each band, or null.
 //
 // This is the linking. The model is asked which outlines spell which row and routinely
-// gets it shifted — on this artwork every row came back tagged with the NEXT line's
-// outlines, so "DOE" carried MICHAEL's paths and "1234-5678" carried the web address's.
+// gets it shifted — every row tagged with the NEXT line's outlines is a common failure.
 // Nothing downstream can detect that from the boxes alone: they are real, the measurement
 // is exact, only the pairing is wrong. But both sequences are in reading order, and that
 // is a property the model cannot get wrong, because it never chose it — so the pairing is
@@ -1065,9 +1068,8 @@ function groupRowsIntoBands(
 // own span. Rescaling looks like the right way to cancel the compression in the estimates
 // — they are not merely noisy but systematically squeezed against the real geometry — and
 // it would, if the two sequences covered the same ground. They do not: the lines include
-// every shape the pass flagged, logo and card panels among them, so on this artwork 4
-// bands confined to the back card were stretched across 12 lines spanning both cards and
-// the first row was matched to the front card's logo.
+// every shape the pass flagged, logos and panels among them, so rows confined to one part
+// of the canvas get stretched across lines spanning all of it and match the wrong shapes.
 //
 // Order carries the correspondence here, and the distances only have to be good enough to
 // reject a bad pairing, which canvas-relative ones are.
@@ -1092,10 +1094,10 @@ function alignBandsToLines(
   // factor of six — so a row estimating an 11-unit font has no business anchoring to a
   // 120-unit-tall cluster, whatever the reading order says.
   //
-  // This is what stops a logo from being treated as a line of type. On this card the
-  // pass named the M logo as lettering, which is a fair reading — it IS a letter — and
-  // the alignment then put "DOE" and "MICHAEL" on the front card at 60px. The removal is
-  // the model's call to make; anchoring a contact line to it is not.
+  // This is what stops a logo from being treated as a line of type. The pass may name a
+  // monogram logo as lettering, which is a fair reading — it IS a letter — but without
+  // this the alignment will anchor a heading onto it at several times its size. The
+  // removal is the model's call to make; anchoring a contact line to it is not.
   const fits = (i: number, j: number): boolean => {
     const size = Math.max(MIN_SNAPPED_SIZE, bands[i].size);
     const ratio = lines[j].box.height / size;
@@ -1140,11 +1142,12 @@ function alignBandsToLines(
 // Divides one line's boxes between the rows that share it.
 //
 // A line holding several rows is a line the model split by styling — "MICHAEL" light and
-// "DOE" bold is two rows on one line, which the prompt asks for explicitly. The split
+// "DOE" bold returned as two rows on one line. The prompt now asks for one row with spans,
+// but cached answers and runs that ignore it still arrive split. The split
 // falls at the widest gaps in the line: for k rows, the k-1 widest. That is a RELATIVE
 // judgement and needs no threshold, which matters because the absolute one is not
-// supportable — a word space measures 0.60 of glyph height on this artwork against 0.89
-// for the gap to an adjacent icon, and nothing says that margin holds elsewhere.
+// supportable — a word space and the gap to an adjacent icon can differ by well under a
+// glyph height, and nothing says any fixed margin holds across artwork.
 //
 // It returns ONE BOX PER ROW, always. Handing the whole line back to each row instead is
 // what put text on top of text: rows sharing a band were centred on the identical
@@ -1233,7 +1236,7 @@ function resolveAnchors(
     });
   });
 
-  console.log(
+  devLog(
     `[text-rows] linked ${matched}/${rows.length} row(s) to ${lines.length} line(s) of lettering ` +
     `by reading order (${bands.length} band(s))`,
   );
@@ -1292,9 +1295,9 @@ const isFragmentOf = (part: string, whole: string): boolean => {
 
 // Drops a band of rows that says the same thing as another band, wherever the pass put it.
 //
-// The heading on this card came back twice in one answer: rows 0 and 1 as "MICHAEL" and
-// "DOE" at y=0.555 and 14px, and row 5 as "MICHAEL DOE" at y=0.490 and 8px — one line of
-// text read twice, 24 units and three line-heights apart, so both were drawn. The
+// A heading can come back twice in one answer: "MICHAEL" and "DOE" as two rows at one
+// position and size, and "MICHAEL DOE" as a third row several line-heights away at
+// another — one line of text read twice, so both were drawn. The
 // same-line tests below cannot see it, because the two readings are not on the same line;
 // that disagreement IS the duplication.
 //
@@ -1306,10 +1309,11 @@ const isFragmentOf = (part: string, whole: string): boolean => {
 function dropRepeatedBands(
   rows: TextRow[],
   targets: (DOMRect | null)[],
+  lines: (AnchorLine | null)[],
   vb: { x: number; y: number; w: number; h: number },
-): { rows: TextRow[]; targets: (DOMRect | null)[] } {
+): { rows: TextRow[]; targets: (DOMRect | null)[]; lines: (AnchorLine | null)[] } {
   const bands = groupRowsIntoBands(rows, vb);
-  if (bands.length < 2) return { rows, targets };
+  if (bands.length < 2) return { rows, targets, lines };
 
   const said = bands.map((b) => asWords(b.rows.map((i) => rows[i].content ?? '').join(' ')));
   const idCount = bands.map((b) => b.rows.reduce((n, i) => n + (rows[i].removeIds?.length ?? 0), 0));
@@ -1321,7 +1325,7 @@ function dropRepeatedBands(
       if (b <= a || dropped.has(b) || said[b] !== said[a]) return;
       const loser = idCount[b] > idCount[a] ? a : b;
       dropped.add(loser);
-      console.log(
+      devLog(
         `[text-rows] dropping a repeated reading of "${rows[bands[loser].rows[0]].content}" — ` +
         `the same text came back as ${bands[a].rows.length} row(s) at y=${bands[a].y.toFixed(0)} ` +
         `and ${bands[b].rows.length} row(s) at y=${bands[b].y.toFixed(0)}; keeping the one ` +
@@ -1329,13 +1333,14 @@ function dropRepeatedBands(
       );
     });
   });
-  if (dropped.size === 0) return { rows, targets };
+  if (dropped.size === 0) return { rows, targets, lines };
 
   const keep = new Set<number>();
   bands.forEach((band, i) => { if (!dropped.has(i)) band.rows.forEach((r) => keep.add(r)); });
   return {
     rows: rows.filter((_, i) => keep.has(i)),
     targets: targets.filter((_, i) => keep.has(i)),
+    lines: lines.filter((_, i) => keep.has(i)),
   };
 }
 
@@ -1351,17 +1356,23 @@ function dropRepeatedBands(
 //
 // Merging unions the removeIds and the anchor boxes, which is precisely what would have
 // happened had the model returned the one row it should have.
+//
+// `lines` is parallel to `rows` and comes back parallel to the survivors. It has to be
+// carried through rather than looked up afterwards: a merge builds a new row object, so
+// finding the survivor in the input by identity fails and the merged row loses its line.
 function mergeDuplicateRows(
   rows: TextRow[],
   targets: (DOMRect | null)[],
+  lines: (AnchorLine | null)[],
   vb: { x: number; y: number; w: number; h: number },
-): { rows: TextRow[]; targets: (DOMRect | null)[] } {
+): { rows: TextRow[]; targets: (DOMRect | null)[]; lines: (AnchorLine | null)[] } {
   // First the coarsest duplication — one line of text read twice in two different places.
   // It has to go before the same-line tests, which by construction cannot see it.
-  ({ rows, targets } = dropRepeatedBands(rows, targets, vb));
+  ({ rows, targets, lines } = dropRepeatedBands(rows, targets, lines, vb));
 
   const keptRows: TextRow[] = [];
   const keptTargets: (DOMRect | null)[] = [];
+  const keptLines: (AnchorLine | null)[] = [];
   const keptExtents: RowExtent[] = [];
   let merged = 0;
   let fragments = 0;
@@ -1388,6 +1399,7 @@ function mergeDuplicateRows(
     if (at === -1) {
       keptRows.push(row);
       keptTargets.push(target);
+      keptLines.push(lines[i]);
       keptExtents.push(extent);
       return;
     }
@@ -1399,36 +1411,26 @@ function mergeDuplicateRows(
       ...(keepIncoming ? row : keptRows[at]),
       removeIds: [...new Set([...(keptRows[at].removeIds ?? []), ...(row.removeIds ?? [])])],
     };
+    keptLines[at] = (keepIncoming ? lines[i] ?? keptLines[at] : keptLines[at] ?? lines[i]) ?? null;
     const combined = unionBox([keptTargets[at], target].filter((b): b is DOMRect => !!b));
     keptTargets[at] = combined;
     keptExtents[at] = rowExtent(keptRows[at], combined, vb);
   });
 
   if (merged > 0) {
-    console.log(`[text-rows] merged ${merged} duplicate row(s) — same content, same place`);
+    devLog(`[text-rows] merged ${merged} duplicate row(s) — same content, same place`);
   }
   if (fragments > 0) {
-    console.log(`[text-rows] merged ${fragments} row(s) that were part of another row on the same line`);
+    devLog(`[text-rows] merged ${fragments} row(s) that were part of another row on the same line`);
   }
-  return { rows: keptRows, targets: keptTargets };
+  return { rows: keptRows, targets: keptTargets, lines: keptLines };
 }
 
-// The placed rows grouped by the line they sit on, same test as groupRowsIntoBands.
-function bandsOf<T extends { row: TextRow; fontSize: number }>(
+// The placed rows grouped by the line they sit on.
+const bandsOf = <T extends { row: TextRow }>(
   placed: T[],
   vb: { x: number; y: number; w: number; h: number },
-): T[][] {
-  const bands: T[][] = [];
-  for (const p of placed) {
-    const y = vb.y + p.row.yFraction * vb.h;
-    const last = bands[bands.length - 1];
-    const lastY = last ? vb.y + last[0].row.yFraction * vb.h : 0;
-    const size = Math.max(MIN_SNAPPED_SIZE, p.row.sizeFraction * vb.h);
-    if (last && Math.abs(y - lastY) <= BAND_SAME_LINE_EM * size) last.push(p);
-    else bands.push([p]);
-  }
-  return bands;
-}
+): T[][] => groupRowsIntoBands(placed.map((p) => p.row), vb).map((band) => band.rows.map((i) => placed[i]));
 
 // Brings rows placed from the model's estimate onto the scale the measured rows proved.
 //
@@ -1481,7 +1483,7 @@ function calibrateEstimatedSizes(
       }
     }
     if (levelled > 0) {
-      console.log(`[text-rows] no measured row to calibrate against — levelled ${levelled} row(s) to their line's size`);
+      devLog(`[text-rows] no measured row to calibrate against — levelled ${levelled} row(s) to their line's size`);
     }
     return;
   }
@@ -1499,12 +1501,12 @@ function calibrateEstimatedSizes(
         SAME_SIZE_TOLERANCE * Math.max(a.row.sizeFraction, p.row.sizeFraction),
     );
     const size = twin ? twin.fontSize : estimate(p.row) * k;
-    const next = Math.round(Math.min(Math.max(size, 8), MAX_SNAPPED_SIZE * vb.h));
+    const next = Math.round(Math.min(Math.max(size, MIN_SNAPPED_SIZE), MAX_SNAPPED_SIZE * vb.h));
     if (next === p.fontSize) continue;
     p.fontSize = next;
     p.el.setAttribute('font-size', String(next));
   }
-  console.log(
+  devLog(
     `[text-rows] rescaled ${estimated.length} estimated row(s) by ${k.toFixed(2)}x, ` +
     `from ${anchored.length} measured row(s)`,
   );
@@ -1520,26 +1522,19 @@ function calibrateEstimatedSizes(
 //
 // The alignment is not in the model's answer but it is in the geometry already measured.
 // Which edge — left, centre or right — is decided by whichever agrees best once the rows
-// are grouped into COLUMNS. A card is rarely one column: this one has two, the heading at
-// 89.9 and the contact block at 105.4, and forcing every row onto a single edge laid the
-// contact strings straight over the icons at 90. Columns are what "aligned" means here.
+// are grouped into COLUMNS. A card is rarely one column: a heading flush with the icons
+// and a contact block indented past them is two, and forcing every row onto a single edge
+// lays the contact strings straight over the icons. Columns are what "aligned" means here.
 function alignRowsToColumns(
   placed: { id: string; row: TextRow; el: Element; cx: number; cy: number; fontSize: number;
             target: DOMRect | null; line: AnchorLine | null }[],
   anchors: Map<string, DOMRect>,
   vb: { x: number; y: number; w: number; h: number },
 ): void {
-  // Where a row's edges come from: the measured geometry when it has any, otherwise the
-  // pass's own leftFraction/rightFraction.
-  //
-  // Reported edges are what let this work at all on a run where nothing anchored — which
-  // is the run that needs it most, since those rows are placed from estimates and have
-  // nothing else keeping them in line with each other. Measured still wins where both
-  // exist: it is the artwork rather than a reading of it.
   // A row sharing its line with another is a heading split by styling — "MICHAEL" light
   // and "DOE" bold — positioned against its neighbour by the band pass. A column rule
   // fights that: given the two of them it reads two columns and snaps each to one, which
-  // on this card put DOE to the LEFT of MICHAEL.
+  // can put the second word to the LEFT of the first.
   //
   // Membership is decided on the band, not on whether two rows were linked to the same
   // measured line. Those are the same question only when there is geometry to link to;
@@ -1550,6 +1545,13 @@ function alignRowsToColumns(
     if (band.length > 1) band.forEach((p) => shared.add(p));
   }
 
+  // Where a row's edges come from: the measured geometry when it has any, otherwise the
+  // pass's own leftFraction/rightFraction.
+  //
+  // Reported edges are what let this work at all on a run where nothing anchored — which
+  // is the run that needs it most, since those rows are placed from estimates and have
+  // nothing else keeping them in line with each other. Measured still wins where both
+  // exist: it is the artwork rather than a reading of it.
   const extentOf = (p: typeof placed[number]) => {
     if (shared.has(p)) return null;
     if (p.line) return textExtent(p.line, anchors);
@@ -1586,9 +1588,9 @@ function alignRowsToColumns(
 
   // Ranked on how FEW columns the edge needs first, and only then on how tightly they
   // agree. Tightness alone is not a measure of anything: every edge can be made to agree
-  // perfectly by splitting it into one column per row, so on this card the right edges
-  // scored 0.9 across three columns against the left's 0.4 across two, and a spread-only
-  // comparison came within a rounding error of picking them. The edge that explains the
+  // perfectly by splitting it into one column per row, so a ragged edge split into three
+  // columns can score as tightly as a flush edge in two, and a spread-only comparison
+  // can pick it. The edge that explains the
   // layout is the one that accounts for the same rows with fewer columns.
   const ranked = (Object.keys(byEdge) as (keyof typeof byEdge)[])
     .map((edge) => {
@@ -1622,7 +1624,7 @@ function alignRowsToColumns(
   });
   if (moved > 0) {
     const measured = withExtent.filter((x) => x.p.line).length;
-    console.log(
+    devLog(
       `[text-rows] ${best.edge === 'start' ? 'left' : 'right'}-aligned ${moved} row(s) onto ` +
       `${cols.length} column(s) at ${cols.map((c) => median(c).toFixed(1)).join(', ')} ` +
       `(agree to ${best.spread.toFixed(1)}; ${measured} edge(s) measured, ` +
@@ -1642,8 +1644,8 @@ const median = (vals: number[]): number =>
 //
 // An ornament is told from a first word by two ratios, no absolute sizes: it is one or two
 // shapes where the rest of the line is many, and the gap after it dwarfs the gaps within
-// the text. On this artwork the contact lines read 1 box against 9 with a gap 10x the
-// median, while the heading's widest gap — the space in "MICHAEL DOE" — has 7 boxes before
+// the text. A contact line typically reads 1 box against 9 with a gap many times the
+// median, while a heading's widest gap — the space in "MICHAEL DOE" — has 7 boxes before
 // it and 3 after, so it is never mistaken for one. Both tests must hold.
 function textExtent(line: AnchorLine, anchors: Map<string, DOMRect>): { left: number; right: number; height: number } {
   const boxes = line.ids.map((sid) => anchors.get(sid)!).filter(Boolean).sort((a, b) => a.x - b.x);
@@ -1673,8 +1675,8 @@ function textExtent(line: AnchorLine, anchors: Map<string, DOMRect>): { left: nu
 //
 // The band pass above resolves collisions ALONG a line and only ever rewrites x; nothing
 // has ever adjusted y, so a stack of rows placed from estimates could and did land on top
-// of one another. Two lines of a contact block sit ~13 units apart on this artwork while
-// the estimate routinely gives them a 20-unit line box, and the band pass does not fire
+// of one another. Lines of a contact block can sit closer together than the line box the
+// estimate gives them, and the band pass does not fire
 // because they are correctly judged to be different lines.
 //
 // Collisions are measured on the font's LINE box — getBBox's own height for a <text> —
@@ -1722,7 +1724,7 @@ function deOverlapRowsVertically(
     }
     laid.push({ x0, x1, bottom: item.cy + half });
   }
-  if (moved > 0) console.log(`[text-rows] pushed ${moved} overlapping row(s) apart vertically`);
+  if (moved > 0) devLog(`[text-rows] pushed ${moved} overlapping row(s) apart vertically`);
 }
 
 // Appends one top-level <text> element per detected row and returns the matching layer
@@ -1763,15 +1765,13 @@ export function appendTextRowLayers(
   // Anchor first, then de-duplicate: measured geometry is what makes two rows provably
   // the same line, so the estimates are only ever the fallback comparison.
   const { targets: anchored, lines: rowLines } = resolveAnchors(sorted, vb, anchors);
-  const { rows: deduped, targets } = mergeDuplicateRows(sorted, anchored, vb);
-  // mergeDuplicateRows can drop rows; the lines follow the rows that survive.
-  const keptLines = deduped.map((row) => rowLines[sorted.indexOf(row)] ?? null);
+  const { rows: deduped, targets, lines: keptLines } = mergeDuplicateRows(sorted, anchored, rowLines, vb);
 
   const placed = deduped.map((row, i) => {
     const id = `${idPrefix}_${i}`;
     const label = row.content.trim() || t('text.defaultContent');
     const target = targets[i];
-    const fontSize = Math.max(8, Math.round(row.sizeFraction * vb.h));
+    const fontSize = Math.max(MIN_SNAPPED_SIZE, Math.round(row.sizeFraction * vb.h));
     // An anchored row is centred on the ink it replaces; an unanchored one on the model's
     // guess. Both are refined below — the first by measurement, the second by de-overlap.
     const cx = target ? target.x + target.width / 2 : vb.x + row.xFraction * vb.w;
@@ -1880,18 +1880,14 @@ function snapAnchoredRows(
     if (!measured) continue;
     const scaled = p.fontSize * (p.target!.width / measured.box.width);
     if (!Number.isFinite(scaled)) continue;
-    // A target the string cannot be shrunk far enough to fit is not this row's extent.
-    // It happens when the vision pass names ONE outline for a line instead of all of
-    // them: the box is a single glyph, and scaling a whole address onto it bottoms out
-    // at the floor. Every such row then renders at 8px, which is how a line of type
-    // disappears under its neighbour. The estimate is the better answer — imprecise, but
-    // about the right size — so the anchor is given up and the row rejoins the rows that
-    // are placed, calibrated and de-overlapped from the model's own numbers.
-    // Too small to fit, or so much bigger than the row was estimated that the target
-    // cannot be this row's lettering. The second case is the M logo: a contact line
-    // anchored to it measures a scale of six or more, and the row renders across the
-    // whole card. Both are the same judgement — the box is not this row's extent — and
-    // both are better served by the estimate.
+    // A target the string has to shrink below the floor to fit, or grow far past its own
+    // estimate to fill, is not this row's extent. The first is a line anchored to a single
+    // glyph — the pass named one outline instead of all of them — and would render at the
+    // floor, vanishing under its neighbour. The second is a line anchored to a logo or
+    // other large shape, and would render across the canvas. Either way the estimate is
+    // the better answer — imprecise, but about the right size — so the anchor is given up
+    // and the row rejoins the rows placed, calibrated and de-overlapped from the model's
+    // own numbers.
     const estimated = Math.max(MIN_SNAPPED_SIZE, p.row.sizeFraction * vb.h);
     if (scaled < MIN_SNAPPED_SIZE || scaled > estimated * SNAP_MAX_GROWTH) {
       p.target = null;
@@ -1906,7 +1902,7 @@ function snapAnchoredRows(
     p.el.setAttribute('font-size', String(p.fontSize));
   }
   if (released.length > 0) {
-    console.log(
+    devLog(
       `[text-rows] gave up ${released.length} anchor(s) that did not fit their text ` +
       `(${released.map((p) => `"${p.row.content}"`).join(', ')}) — placing from the estimate`,
     );
@@ -2099,19 +2095,20 @@ export function backgroundFillColor(content: string, layerId: string | null): st
   return colors.length === 1 ? colors[0] : null;
 }
 
-// `background` fills the canvas before the artwork is drawn. It matters when the raster
-// is going to a vision model: a PNG with an alpha channel gets flattened onto white
-// somewhere downstream, so white artwork on a transparent canvas arrives invisible. That
-// is exactly what the customise pass produces, since it deliberately leaves the
-// background layer out of the image — pass the colour that layer was painting and the
-// artwork stays legible against it. Omit it to keep the transparent canvas.
+// Sampling an element's ink. The raster is capped rather than rendered 1:1 so a large canvas
+// does not cost a full-size readback, and floored at 1x so small artwork is not blown up
+// into its own antialiasing.
+const SAMPLE_MAX_PX = 1400;
+const SAMPLE_MAX_SCALE = 3;
+// How far a colour must sit from the backdrop before the difference means anything.
+const SAMPLE_MIN_DISTANCE = 24;
+
 // The colour each element ACTUALLY APPEARS as in the image, sampled per element.
 //
-// Not its declared fill. These glyphs declare #6d6e71 inside a mix-blend-mode:multiply
-// group, and over the #7d7fbd panel that composites to #353754 — the arithmetic is exact
-// (0x6d*0x7d/255 = 0x35, and so on for the other two channels). Reporting #6d6e71 would
-// describe the file rather than the artwork, and painting replacement text with it gives
-// flat grey where the original reads near-navy.
+// Not its declared fill. A glyph declaring #6d6e71 inside a mix-blend-mode:multiply group
+// over a #7d7fbd panel composites to #353754 (0x6d*0x7d/255 = 0x35, and so on per
+// channel). Reporting #6d6e71 would describe the file rather than the artwork, and
+// painting replacement text with it gives flat grey where the original reads near-navy.
 //
 // The backdrop is taken from a ring just OUTSIDE each element's box, not from the box
 // itself. A tight glyph box is mostly glyph, so "the commonest colour is the background"
@@ -2209,107 +2206,12 @@ export async function sampleElementInkColors(
   return out;
 }
 
-// The colour each row's lettering actually renders as, sampled from the artwork.
-//
-// Asking the vision pass for it does not work: on this card it returned #ffffff for all
-// four rows, when the heading is white and the three contact lines composite to #3a3b5a.
-// It got the heading right and generalised the rest — and no prompt makes it measure.
-//
-// Reading the declared fill is not enough either. Those glyphs declare #6d6e71, a mid
-// grey, inside a group with mix-blend-mode:multiply; over the purple card that composites
-// to the near-navy you see. Neither the answer nor the source says what the colour IS,
-// so it is taken from pixels, where the blend has already happened.
-//
-// The ink is found by contrast, not by position: the most common colour in a row's box is
-// its backdrop, and the ink is whatever sits furthest from that while covering enough of
-// the box to be lettering rather than an antialiasing fringe.
-export async function sampleRowInkColors(
-  svgString: string,
-  boxes: (DOMRect | null)[],
-  vb: { x: number; y: number; w: number; h: number },
-): Promise<(string | null)[]> {
-  const out: (string | null)[] = boxes.map(() => null);
-  if (!boxes.some(Boolean)) return out;
-
-  const scale = Math.min(SAMPLE_MAX_PX / Math.max(vb.w, vb.h, 1), SAMPLE_MAX_SCALE);
-  const w = Math.max(1, Math.round(vb.w * scale));
-  const h = Math.max(1, Math.round(vb.h * scale));
-
-  const ctx = await new Promise<CanvasRenderingContext2D | null>((resolve) => {
-    const blob = new Blob([svgString], { type: 'image/svg+xml' });
-    const url = URL.createObjectURL(blob);
-    const img = new Image();
-    img.onload = () => {
-      const canvas = document.createElement('canvas');
-      canvas.width = w; canvas.height = h;
-      const c = canvas.getContext('2d', { willReadFrequently: true });
-      if (c) c.drawImage(img, 0, 0, w, h);
-      URL.revokeObjectURL(url);
-      resolve(c);
-    };
-    img.onerror = () => { URL.revokeObjectURL(url); resolve(null); };
-    img.src = url;
-  });
-  if (!ctx) return out;
-
-  const hex = (r: number, g: number, b: number) =>
-    '#' + [r, g, b].map((v) => Math.round(v).toString(16).padStart(2, '0')).join('');
-
-  boxes.forEach((box, i) => {
-    if (!box) return;
-    const x0 = Math.max(0, Math.floor((box.x - vb.x) * scale));
-    const y0 = Math.max(0, Math.floor((box.y - vb.y) * scale));
-    const bw = Math.min(w - x0, Math.ceil(box.width * scale));
-    const bh = Math.min(h - y0, Math.ceil(box.height * scale));
-    if (bw < 1 || bh < 1) return;
-
-    let data: Uint8ClampedArray;
-    try { data = ctx.getImageData(x0, y0, bw, bh).data; } catch { return; }
-
-    // Quantised histogram — exact colours never repeat once antialiasing is involved.
-    const bucket = new Map<number, { n: number; r: number; g: number; b: number }>();
-    for (let p = 0; p < data.length; p += 4) {
-      if (data[p + 3] < 128) continue;
-      const [r, g, b] = [data[p], data[p + 1], data[p + 2]];
-      const key = ((r >> 4) << 8) | ((g >> 4) << 4) | (b >> 4);
-      const cur = bucket.get(key);
-      if (cur) { cur.n++; cur.r += r; cur.g += g; cur.b += b; }
-      else bucket.set(key, { n: 1, r, g, b });
-    }
-    if (bucket.size === 0) return;
-
-    const all = [...bucket.values()].sort((a, b) => b.n - a.n);
-    const total = all.reduce((n, c) => n + c.n, 0);
-    const back = all[0];
-    const backRgb = [back.r / back.n, back.g / back.n, back.b / back.n];
-
-    let ink: typeof back | null = null;
-    let best = -1;
-    for (const c of all) {
-      if (c === back) continue;
-      // Enough of the box to be a stroke rather than the soft edge of one.
-      if (c.n / total < SAMPLE_MIN_COVERAGE) continue;
-      const rgb = [c.r / c.n, c.g / c.n, c.b / c.n];
-      const d = Math.hypot(rgb[0] - backRgb[0], rgb[1] - backRgb[1], rgb[2] - backRgb[2]);
-      if (d > best) { best = d; ink = c; }
-    }
-    if (!ink || best < SAMPLE_MIN_DISTANCE) return;
-    out[i] = hex(ink.r / ink.n, ink.g / ink.n, ink.b / ink.n);
-  });
-
-  return out;
-}
-
-// Sampling a row's ink. The raster is capped rather than rendered 1:1 so a large canvas
-// does not cost a full-size readback, and floored at 1x so small artwork is not blown up
-// into its own antialiasing.
-const SAMPLE_MAX_PX = 1400;
-const SAMPLE_MAX_SCALE = 3;
-// How much of a row's box a colour must cover to be its lettering, and how far it must sit
-// from the backdrop before the difference means anything.
-const SAMPLE_MIN_COVERAGE = 0.02;
-const SAMPLE_MIN_DISTANCE = 24;
-
+// `background` fills the canvas before the artwork is drawn. It matters when the raster
+// is going to a vision model: a PNG with an alpha channel gets flattened onto white
+// somewhere downstream, so white artwork on a transparent canvas arrives invisible. That
+// is exactly what the customise pass produces, since it deliberately leaves the
+// background layer out of the image — pass the colour that layer was painting and the
+// artwork stays legible against it. Omit it to keep the transparent canvas.
 export function svgToBase64Png(
   svgString: string, width: number, height: number, background?: string | null,
 ): Promise<string> {
