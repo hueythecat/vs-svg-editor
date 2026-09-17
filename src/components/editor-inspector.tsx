@@ -9,8 +9,8 @@ import type { CustomiseBundle, DocBundle, TextLayerAttrs } from './editor-types'
 import { ColorSwatchRow } from './color-swatches';
 import { CustomiseButton } from './editor-ai-panel';
 import {
-  CenterIcon, MatchRotationIcon, PencilIcon, PlusIcon,
-  RedoIcon, RevertIcon, RotateIcon, TidyIcon, UndoIcon,
+  CenterIcon, MatchRotationIcon, NewDesignIcon, PencilIcon, PlusIcon,
+  RedoIcon, RevertIcon, RotateIcon, TidyHorizontalIcon, TidyIcon, UndoIcon,
 } from './svg-icons';
 import { TextControls } from './text-controls';
 
@@ -203,6 +203,22 @@ export const ToolsTab = React.memo(function ToolsTab({
           label={t('toolbar.tidy')}
         >
           <TidyIcon size={13} />
+        </ActionButton>
+        <ActionButton
+          onClick={doc.onTidyHorizontal}
+          disabled={doc.tidyDisabled}
+          title={t('toolbar.tidyHorizontalTitle')}
+          label={t('toolbar.tidyHorizontal')}
+        >
+          <TidyHorizontalIcon size={13} />
+        </ActionButton>
+        <ActionButton
+          onClick={doc.onNewDesign}
+          disabled={doc.newDesignDisabled}
+          title={t('toolbar.newDesignTitle')}
+          label={t('toolbar.newDesign')}
+        >
+          <NewDesignIcon size={13} />
         </ActionButton>
       </div>
 

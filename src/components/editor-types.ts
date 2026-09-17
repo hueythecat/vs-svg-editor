@@ -29,6 +29,9 @@ export type DocBundle = {
   onMatchRotation: () => void;
   matchRotationDisabled: boolean;
   onTidy: () => void;
+  onTidyHorizontal: () => void;
+  onNewDesign: () => void;
+  newDesignDisabled: boolean;
   tidyDisabled: boolean;
 };
 

@@ -46,7 +46,7 @@ const handleBase: React.CSSProperties = {
 
 export const CanvasStage = React.memo(function CanvasStage({
   svgCanvasRef, overlayRef, sizeBadgeRef, showSizeBadge, hoverBadgeRef,
-  onCanvasClick, onCanvasMouseDown, onCanvasMouseMove, onCanvasMouseLeave,
+  onCanvasClick, onCanvasMouseDown, onCanvasDoubleClick, onCanvasMouseMove, onCanvasMouseLeave,
   aiLoading, aiStatusMsg,
   isLoading, activeSvg,
   hiddenLayers, previewIds, previewOutlineId, backgroundLayerId,
@@ -62,6 +62,7 @@ export const CanvasStage = React.memo(function CanvasStage({
   hoverBadgeRef: React.RefObject<HTMLSpanElement | null>;
   onCanvasClick: (e: React.MouseEvent<HTMLDivElement>) => void;
   onCanvasMouseDown: (e: React.MouseEvent<HTMLDivElement>) => void;
+  onCanvasDoubleClick: (e: React.MouseEvent<HTMLDivElement>) => void;
   onCanvasMouseMove: (e: React.MouseEvent<HTMLDivElement>) => void;
   onCanvasMouseLeave: () => void;
   aiLoading: boolean;
@@ -97,6 +98,12 @@ export const CanvasStage = React.memo(function CanvasStage({
   // No full-canvas background layer — or it's hidden — means the artwork exports with
   // transparency, so the board shows a checkerboard rather than implying a white fill.
   const isTransparent = !backgroundLayerId || hiddenLayers.has(backgroundLayerId);
+  // One object per document, not per render. React 19 re-applies dangerouslySetInnerHTML
+  // whenever the prop object is new, even when the HTML is identical — and replacing the
+  // artwork's DOM between mousedown and mouseup means the browser fires no click and no
+  // dblclick, because the element that was pressed no longer exists. Every selection
+  // change re-renders this component, so an inline {__html} did exactly that.
+  const svgHtml = useMemo(() => ({ __html: activeSvg?.content ?? '' }), [activeSvg?.content]);
 
   return (
     <div
@@ -104,6 +111,7 @@ export const CanvasStage = React.memo(function CanvasStage({
       onClick={onCanvasClick}
       onMouseMove={onCanvasMouseMove}
       onMouseLeave={onCanvasMouseLeave}
+      onDoubleClick={onCanvasDoubleClick}
       // Shift+click is the browser's "extend the text selection to here" gesture, and
       // SVG <text> is selectable like any other text — so shift-clicking a text layer
       // used to highlight everything between the last anchor and the click, and then
@@ -220,7 +228,19 @@ export const CanvasStage = React.memo(function CanvasStage({
             <div
               className="svg-canvas"
               style={{ width: '100%' }}
-              dangerouslySetInnerHTML={{ __html: activeSvg.content }}
+              dangerouslySetInnerHTML={svgHtml}
+            />
+            {/* Veil over everything OUTSIDE the board. Artwork dragged past the edge is
+                still drawn (see .svg-canvas svg in EDITOR_CSS) so it can be found and
+                dragged back, but faded so it reads as off the canvas and not exported.
+                A spread shadow is the whole mask: the stage's overflow:hidden bounds it,
+                and it paints before the selection overlay and badges, which follow. */}
+            <div
+              aria-hidden
+              style={{
+                position: 'absolute', inset: 0, pointerEvents: 'none',
+                boxShadow: `0 0 0 100vmax ${C.offCanvasVeil}`,
+              }}
             />
           </div>
 

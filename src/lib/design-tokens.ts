@@ -55,6 +55,8 @@ export const C = {
   devTextDim:   '#5b616d',
   devAccent:    '#f2b03e',
 
+  // Laid over artwork that sits outside the board, so it reads as off the canvas.
+  offCanvasVeil: 'rgba(238,240,243,.6)',
   backdropRating: 'rgba(16,19,24,.42)',
   backdropAi:     'rgba(16,19,24,.46)',
   backdropReasons:'rgba(16,19,24,.5)',
@@ -223,6 +225,9 @@ export const EDITOR_CSS = `
   /* The imported artwork fills the board's width — width:100% is what makes SVGs with
      no intrinsic dimensions scale at all — and its height follows the aspect ratio.
      Deliberately uncapped: the board width is already derived from the viewport height
-     and the document's aspect (see editor-canvas.tsx), so nothing gets truncated. */
-  .svg-canvas svg { display: block; width: 100%; height: auto; }
+     and the document's aspect (see editor-canvas.tsx), so nothing gets truncated.
+     overflow:visible so artwork dragged past the edge stays on screen to be found and
+     dragged back; an SVG root clips to its viewport by default, and the file can say so
+     itself, hence !important. The exported file still clips — it is the same markup. */
+  .svg-canvas svg { display: block; width: 100%; height: auto; overflow: visible !important; }
 `;

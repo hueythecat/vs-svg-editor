@@ -22,6 +22,7 @@ import {
   normalizeColor,
   parseSvg,
   parseViewBox,
+  extractDesign,
   pruneMissingLayers,
   resolveGradient,
   stripScripts,
@@ -652,6 +653,10 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   // back-out was offered before anything had been opened. Taking it folded the list the
   // file opened with into a single row.
   const [expandDepth, setExpandDepth] = useState(0);
+  // True for a design made with New Design. Its layers are whatever was selected, so
+  // none of them is the canvas — even a panel that happens to fill the crop — and the
+  // board shows the transparency pattern rather than locking that panel as a background.
+  const [noCanvasLayer, setNoCanvasLayer] = useState(false);
   const [removedRecords, setRemovedRecords] = useState<RemovedRecord[]>([]);
   // Same ids as `removedRecords`, readable synchronously — see dropSelectionOutside.
   const removedIdsRef = useRef<Set<string>>(new Set());
@@ -789,6 +794,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     hidden: Set<string>;
     removed: RemovedRecord[];
     depth: number;
+    noCanvas: boolean;
   };
   // The name each row had when it was opened into its parts, keyed by the id of every
   // element that opening it could later fold back into — the row's own element and any
@@ -838,10 +844,12 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   const hiddenLayersRef   = useRef(hiddenLayers);
   const removedRecordsRef = useRef(removedRecords);
   const expandDepthRef    = useRef(expandDepth);
+  const noCanvasLayerRef  = useRef(noCanvasLayer);
   useEffect(() => {
     hiddenLayersRef.current = hiddenLayers;
     removedRecordsRef.current = removedRecords;
     expandDepthRef.current = expandDepth;
+    noCanvasLayerRef.current = noCanvasLayer;
   });
 
   const restoreHistory = useCallback((entry: HistoryEntry) => {
@@ -852,6 +860,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     // Undoing an expand puts the rows back; the depth has to come back with them or
     // back-out stays offered at a level that no longer exists.
     setExpandDepth(entry.depth);
+    setNoCanvasLayer(entry.noCanvas);
     setPreviewRemovedId(null);
   }, []);
 
@@ -862,6 +871,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       hidden: new Set(hiddenLayersRef.current),
       removed: removedRecordsRef.current,
       depth: expandDepthRef.current,
+      noCanvas: noCanvasLayerRef.current,
     };
     undoStackRef.current = [...undoStackRef.current.slice(-9), entry];
     redoStackRef.current = [];
@@ -875,6 +885,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     hidden: new Set(hiddenLayersRef.current),
     removed: removedRecordsRef.current,
     depth: expandDepthRef.current,
+    noCanvas: noCanvasLayerRef.current,
   }), [activeSvg]);
 
   const undo = useCallback(() => {
@@ -921,6 +932,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       setRemovedRecords([]);
       removedIdsRef.current = new Set();
       setExpandDepth(0);
+      setNoCanvasLayer(false);
       setPreviewRemovedId(null);
       setIsLoading(false);
       setCustomiseDone(false);
@@ -1205,6 +1217,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     removedIdsRef.current = new Set();
     expandedLabelsRef.current = new Map();
     setExpandDepth(0);
+    setNoCanvasLayer(false);
     setPreviewRemovedId(null);
   }, [revokePrev]);
 
@@ -1652,10 +1665,11 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   // ── Background layer detection ────────────────────────────────────────────
 
   const backgroundLayerId = useMemo(
-    () => (activeSvg ? detectBackgroundLayerId(activeSvg.content, activeSvg.layers) : null),
+    () => (activeSvg && !noCanvasLayer ? detectBackgroundLayerId(activeSvg.content, activeSvg.layers) : null),
     // Per document, not per edit — the background layer doesn't change as you edit.
+    // New Design swaps the document without changing src, so it keys this too.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [activeSvg?.src],
+    [activeSvg?.src, noCanvasLayer],
   );
 
   // Every layer the overlay frames and the handles act on. The background layer is
@@ -2673,72 +2687,112 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     setActiveSvg((prev) => (prev ? { ...prev, content } : null));
   }, [activeSvg, selectionIds, backgroundLayerId, snapshotForUndo]);
 
-  // ── Tidy: even out the vertical gaps across the selection ─────────────────
+  // ── Tidy: even out the gaps across the selection, down or across ─────────
 
-  const tidySelection = useCallback(() => {
+  const tidySelectionAlong = useCallback((axis: 'x' | 'y') => {
     if (!activeSvg || selectionIds.length < 3) return;
     const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
     if (!svgEl) return;
 
-    // Each selected layer's own box, top to bottom.
+    // Position and extent along the axis being tidied.
+    const at = (b: DOMRect) => (axis === 'y' ? b.y : b.x);
+    const extent = (b: DOMRect) => (axis === 'y' ? b.height : b.width);
+
+    // Each selected layer's own box, in order along the axis.
     const items = selectionIds
       .map((id) => ({ id, box: unionBoxInRootSpace(svgEl, [id]) }))
       .filter((it): it is { id: string; box: DOMRect } => !!it.box)
-      .sort((a, b) => a.box.y - b.box.y);
+      .sort((a, b) => at(a.box) - at(b.box));
     if (items.length < 3) return;
 
     // Distribute SPACING, not centres. Equalising the distance between centres is the
     // other thing this button could mean and it is the wrong one for type: rows of
-    // different cap heights end up with visibly uneven whitespace between them even
-    // though their centres are evenly spread. What reads as tidy is equal GAPS.
+    // different cap heights (or words of different lengths, across) end up with visibly
+    // uneven whitespace between them even though their centres are evenly spread. What
+    // reads as tidy is equal GAPS.
     //
     // The outermost two stay put — they are what the run is measured between, and moving
-    // them would drift the whole block up or down the canvas.
+    // them would drift the whole block across the canvas.
     const first = items[0];
     const last = items[items.length - 1];
-    const span = (last.box.y + last.box.height) - first.box.y;
-    const inked = items.reduce((sum, it) => sum + it.box.height, 0);
+    const span = (at(last.box) + extent(last.box)) - at(first.box);
+    const inked = items.reduce((sum, it) => sum + extent(it.box), 0);
     const gap = (span - inked) / (items.length - 1);
 
-    // A negative gap means the selection overlaps: the layers are taller, added up, than
-    // the run they sit in, so there is no spacing to even out and the arithmetic answers
-    // with overlap instead. Acting on that shuffles artwork into a worse position than it
-    // started in — selecting this card's three full-height groups produced a -50 gap and
-    // moved the heading below the contact block. Evening out gaps that do not exist is not
-    // a thing the button can do, so it declines rather than inventing an answer.
+    // A negative gap means the selection overlaps along the axis: the layers are bigger,
+    // added up, than the run they sit in, so there is no spacing to even out and the
+    // arithmetic answers with overlap instead. Acting on that shuffles artwork into a
+    // worse position than it started in — three full-height groups produced a -50 gap and
+    // moved a heading below its contact block. Evening out gaps that do not exist is not a
+    // thing the button can do, so it declines rather than inventing an answer.
     if (gap < 0) {
       if (__DEV__) console.log(
-        `[tidy] declined — the ${items.length} selected layer(s) overlap ` +
+        `[tidy ${axis}] declined — the ${items.length} selected layer(s) overlap ` +
         `(${inked.toFixed(0)} of ink in a ${span.toFixed(0)} run), so there are no gaps to even`,
       );
       return;
     }
 
-    const shifts: { id: string; dy: number }[] = [];
-    let cursor = first.box.y + first.box.height + gap;
+    const shifts: { id: string; delta: number }[] = [];
+    let cursor = at(first.box) + extent(first.box) + gap;
     for (let i = 1; i < items.length - 1; i++) {
-      shifts.push({ id: items[i].id, dy: cursor - items[i].box.y });
-      cursor += items[i].box.height + gap;
+      shifts.push({ id: items[i].id, delta: cursor - at(items[i].box) });
+      cursor += extent(items[i].box) + gap;
     }
-    if (shifts.every(({ dy }) => Math.abs(dy) < 0.5)) return;
+    if (shifts.every(({ delta }) => Math.abs(delta) < 0.5)) return;
 
     const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
     let changed = false;
-    shifts.forEach(({ id, dy }) => {
-      if (Math.abs(dy) < 0.5) return;
+    shifts.forEach(({ id, delta }) => {
+      if (Math.abs(delta) < 0.5) return;
       const docEl = doc.getElementById(id);
       if (!docEl) return;
       const existing = docEl.getAttribute('transform') ?? '';
-      docEl.setAttribute('transform', `translate(0,${dy.toFixed(2)}) ${existing}`.trim());
+      const move = axis === 'y' ? `translate(0,${delta.toFixed(2)})` : `translate(${delta.toFixed(2)},0)`;
+      docEl.setAttribute('transform', `${move} ${existing}`.trim());
       changed = true;
     });
     if (!changed) return;
 
-    if (__DEV__) console.log(`[tidy] evened ${items.length} layer(s) to a ${gap.toFixed(1)} gap`);
+    if (__DEV__) console.log(`[tidy ${axis}] evened ${items.length} layer(s) to a ${gap.toFixed(1)} gap`);
     snapshotForUndo(activeSvg.content, activeSvg.layers);
     const content = new XMLSerializer().serializeToString(doc.documentElement);
     setActiveSvg((prev) => (prev ? { ...prev, content } : null));
   }, [activeSvg, selectionIds, snapshotForUndo]);
+
+  // ── New design: open the selection as a document of its own ───────────────
+
+  // Replaces the open document with just the selected layers, cropped to them and scaled
+  // up to the size of the design they came from (see extractDesign). It is one undo step,
+  // not a fresh load: undo brings the whole design back with its hidden layers intact.
+  // The imported file stays the Revert target, and the open review asset stays attached,
+  // so the crop cannot be used to sidestep the customise cooldown.
+  const newDesignFromSelection = useCallback(() => {
+    if (!activeSvg || selectionIds.length === 0) return;
+    const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
+    if (!svgEl) return;
+    const box = unionBoxInRootSpace(svgEl, selectionIds);
+    if (!box) return;
+    const extracted = extractDesign(activeSvg.content, selectionIds, hiddenLayers, box);
+    if (!extracted) return;
+    const { content, layers } = parseSvg(extracted);
+
+    snapshotForUndo(activeSvg.content, activeSvg.layers);
+    if (__DEV__) console.log(`[new-design] ${selectionIds.length} layer(s) → ${layers.length} layer(s), ${Math.round(box.width)}×${Math.round(box.height)}`);
+    setActiveSvg((prev) => (prev ? { ...prev, content, layers } : null));
+    // Hidden elements were left out of the new document, so nothing is hidden in it and
+    // nothing is on the removed list.
+    setHiddenLayers(new Set());
+    setRemovedRecords([]);
+    removedIdsRef.current = new Set();
+    setExpandDepth(0);
+    setNoCanvasLayer(true);
+    setPreviewRemovedId(null);
+    selectOne(null);
+  }, [activeSvg, selectionIds, hiddenLayers, snapshotForUndo, selectOne]);
+
+  const tidySelection = useCallback(() => tidySelectionAlong('y'), [tidySelectionAlong]);
+  const tidySelectionHorizontal = useCallback(() => tidySelectionAlong('x'), [tidySelectionAlong]);
 
   // ── Match every layer's rotation to the selected layer ────────────────────
   // Reads the selected layer's rotation (relative to the SVG root) and rotates
@@ -3132,7 +3186,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
 
       const removeIds = contradictory
         ? []
-        : filterOutBackgroundIds(doc.documentElement, requested, vw, vh, 'customise');
+        : filterOutBackgroundIds(doc.documentElement, requested, vw, vh, 'customise', parsed.rows);
       console.log(`[customise] taking ${removeIds.length}/${requested.length} element(s) after guard`);
       // Measured before anything is hidden. The boxes are what the replacement text is
       // placed from, and they also give the dev panel something to show per entry.
@@ -3593,7 +3647,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
         removeIds: parsed.removeIds,
       });
       const stripRequested = allRemoveIds(parsed);
-      const stripRemoveIds = filterOutBackgroundIds(doc.documentElement, stripRequested, vw, vh, 'strip-text');
+      const stripRemoveIds = filterOutBackgroundIds(doc.documentElement, stripRequested, vw, vh, 'strip-text', parsed.hasText ? parsed.rows ?? [] : []);
       // Ground truth for placement: the boxes are read off the live geometry, and the
       // elements stay in the document, so this is measuring rather than salvaging.
       const stripAnchors = measureRemovedTextBoxes(doc.documentElement, stripRemoveIds);
@@ -3648,6 +3702,8 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     if (!activeSvg) return;
     const { content, layers } = parseSvg(activeSvg.originalContent);
     setActiveSvg((prev) => (prev ? { ...prev, content, layers } : null));
+    // The original file has its own canvas again, whatever New Design did since.
+    setNoCanvasLayer(false);
     setHiddenLayers(new Set(defaultHiddenLayers));
     setSelectedLayer(null); setSelectedLayers(new Set());
     // The revert undoes the customise pass, so the pill has to go back to being
@@ -3810,7 +3866,10 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
   // The DOM is not restructured — the children stay inside their parent, so transforms,
   // classes and inherited paint go on applying. Only the layer list changes, which is
   // also why this is one-way: undo puts the single row back.
-  const expandLayer = useCallback((layerId: string) => {
+  //
+  // `focusIndex` picks which of the new rows to select — the part a canvas double-click
+  // landed on. Without one nothing is selected, since the expanded row no longer exists.
+  const expandLayer = useCallback((layerId: string, focusIndex?: number) => {
     if (!activeSvg) return;
     const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
     const el = doc.getElementById(layerId);
@@ -3864,8 +3923,37 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
       return { ...prev, content, layers };
     });
     // The expanded layer no longer exists as a row, so selecting it would dangle.
-    selectOne(null);
+    selectOne(focusIndex !== undefined ? newLayers[focusIndex]?.id ?? null : null);
   }, [activeSvg, snapshotForUndo, selectOne]);
+
+  // Double-click on the canvas: go to the Layers tab and open the layer under the pointer
+  // into its parts, selecting the part that was clicked — so repeated double-clicks walk
+  // down into a group the way they do in a design tool. A layer with no parts still
+  // brings up the Layers tab, with its row already selected by the first click.
+  //
+  // Text never gets here: its first click opens the inline editor, which stops the
+  // double-click from propagating, so double-click-to-type is unaffected.
+  const handleCanvasDoubleClick = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    if (!activeSvg?.layers.length) return;
+    if ((e.target as Element).closest?.('[data-sel-overlay]')) return;
+    const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
+    if (!svgEl) return;
+
+    const layerIds = new Set(activeSvg.layers.map((l) => l.id));
+    let hit: Element | null = null;
+    for (let el = e.target as Element | null; el && el !== (svgEl as Element); el = el.parentElement) {
+      if (layerIds.has(el.id)) { hit = el; break; }
+    }
+    if (!hit || hit.id === backgroundLayerId) return;
+
+    setControlTab('layers');
+    if (!expandableLayerIds.has(hit.id)) return;
+    // The live element has the same structure as the parsed one expandLayer walks, so the
+    // index of the child holding the pointer is the index of its new row.
+    const target = e.target as Node;
+    const focus = expansionTarget(hit).findIndex((kid) => kid.contains(target));
+    expandLayer(hit.id, focus >= 0 ? focus : undefined);
+  }, [activeSvg, backgroundLayerId, expandableLayerIds, expandLayer]);
 
   // The way back out of a group that was drilled into: fold this row and every sibling
   // row taken from the same group back into one row for the group itself. The inverse of
@@ -4114,6 +4202,9 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     onMatchRotation: matchRotationToSelected,
     matchRotationDisabled: selectedLayers.size !== 1 || selectionIsBackground,
     onTidy: tidySelection,
+    onTidyHorizontal: tidySelectionHorizontal,
+    onNewDesign: newDesignFromSelection,
+    newDesignDisabled: selectionIds.length === 0,
     // Three is the smallest selection the idea means anything for: with two there is one
     // gap and nothing to even it against.
     tidyDisabled: selectionIds.length < 3,
@@ -4121,6 +4212,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     activeSvg, isDirty, undoCount, undo, redoCount, redo, requestReset,
     hiddenRowCount, openRating, centerLayersToCanvas, rotateSelected90,
     selectedLayers.size, selectionIsBackground, matchRotationToSelected, tidySelection,
+    tidySelectionHorizontal, newDesignFromSelection,
     selectionIds.length, tr,
   ]);
 
@@ -4223,6 +4315,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
             hoverBadgeRef={hoverBadgeRef}
             onCanvasClick={handleCanvasClick}
             onCanvasMouseDown={handleCanvasMouseDown}
+            onCanvasDoubleClick={handleCanvasDoubleClick}
             onCanvasMouseMove={handleCanvasMouseMove}
             onCanvasMouseLeave={handleCanvasMouseLeave}
             aiLoading={aiLoading}

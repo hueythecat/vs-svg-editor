@@ -111,6 +111,64 @@ export const SKIP_TAGS = new Set([
   'clippath', 'mask', 'filter', 'marker',
 ]);
 
+// Margin around the artwork when a selection is opened as its own design, as a fraction
+// of the selection's longer side.
+const NEW_DESIGN_MARGIN = 0.04;
+
+// A new document holding only `ids`, cropped to them and sized up to the source canvas.
+//
+// Everything that is not a selected element, an ancestor of one, or a definition is
+// removed. Ancestors stay because their transforms, classes, clip-paths and inherited
+// paint are part of how the selection looks; definitions (the <style> block, gradients,
+// filters) stay because anything kept may reference them. Elements in `hiddenIds` go too,
+// even inside the selection — they are artwork a pass took out, hidden by the editor's
+// CSS rather than in the file, and they would reappear in a document that has no record
+// of having hidden them.
+//
+// `box` is the selection in root user space. The viewBox is set to it plus a margin, so
+// the coordinates of everything kept are unchanged — only the window onto them moves —
+// and width/height are scaled so the longer side matches the source's longer side: the
+// crop exports at the size the whole design did, not at the selection's small size.
+export function extractDesign(
+  content: string,
+  ids: string[],
+  hiddenIds: Set<string>,
+  box: { x: number; y: number; width: number; height: number },
+): string | null {
+  const doc = new DOMParser().parseFromString(content, 'image/svg+xml');
+  if (doc.querySelector('parsererror')) return null;
+  const root = doc.documentElement;
+  const selected = ids.map((id) => doc.getElementById(id)).filter((el): el is HTMLElement => !!el);
+  if (selected.length === 0 || box.width <= 0 || box.height <= 0) return null;
+  const keep = new Set<Element>(selected);
+
+  const prune = (parent: Element) => {
+    for (const child of Array.from(parent.children)) {
+      if (SKIP_TAGS.has(child.tagName.toLowerCase())) continue;
+      if (keep.has(child)) continue;
+      if (selected.some((el) => child.contains(el))) prune(child);
+      else child.remove();
+    }
+  };
+  prune(root);
+  for (const el of selected) {
+    for (const inner of Array.from(el.querySelectorAll('[id]'))) {
+      if (hiddenIds.has(inner.id)) inner.remove();
+    }
+  }
+
+  const source = parseViewBox(root);
+  const margin = NEW_DESIGN_MARGIN * Math.max(box.width, box.height);
+  const w = box.width + 2 * margin;
+  const h = box.height + 2 * margin;
+  const scale = Math.max(source.w, source.h) / Math.max(w, h);
+  const r = (v: number) => Math.round(v * 100) / 100;
+  root.setAttribute('viewBox', `${r(box.x - margin)} ${r(box.y - margin)} ${r(w)} ${r(h)}`);
+  root.setAttribute('width', String(Math.round(w * scale)));
+  root.setAttribute('height', String(Math.round(h * scale)));
+  return new XMLSerializer().serializeToString(root);
+}
+
 // Visual children of an element, in document order.
 export const layerChildren = (el: Element): Element[] =>
   Array.from(el.children).filter((c) => !SKIP_TAGS.has(c.tagName.toLowerCase()));
@@ -785,6 +843,17 @@ const snapLetterSpacing = (v: number) =>
 const BAND_SAME_LINE_EM = 0.5;
 // Space kept between two fields in the same band, as a fraction of the larger font size.
 const BAND_GAP_EM = 0.25;
+// How far apart along a line two rows may sit and still be one line, as a multiple of the
+// larger font size. Runs of one styled line sit a word space apart; rows that merely share
+// a height on a layout of side-by-side panels sit a panel gutter apart, many ems wide.
+// Generous, because an edge estimated from the raster can be out by an em or more.
+const BAND_MAX_GAP_EM = 3;
+// The same judgement one level up: how far apart two rows' extents may be and still belong
+// to one panel of the layout, as a multiple of the larger font size.
+const PANEL_MAX_GAP_EM = 3;
+// Average advance of a character as a fraction of font size, for estimating a row's width
+// when the pass reported no edges.
+const EST_CHAR_WIDTH_EM = 0.55;
 // How close two rows' sizeFractions must be before the model is taken to be saying they
 // are the same size, so a measured one can lend its size to an estimated one.
 const SAME_SIZE_TOLERANCE = 0.1;
@@ -1032,26 +1101,92 @@ function clusterAnchorsIntoLines(anchors: Map<string, DOMRect>): AnchorLine[] {
   return lines.sort((a, b) => a.box.y - b.box.y || a.box.x - b.box.x);
 }
 
-// The rows that share one visible line, in reading order, as index runs into `rows`.
-// Same test the de-overlap pass uses: rows on a line share a baseline, so their estimated
-// centres differ by almost nothing, while separate lines are a line-height apart.
+// A row's horizontal extent in root space: the edges the pass reported, or failing those
+// a width estimated from the string's length around its reported centre.
+function rowSpan(row: TextRow, vb: { x: number; y: number; w: number; h: number }): { left: number; right: number } {
+  const { leftFraction: lf, rightFraction: rf } = row;
+  if (lf !== undefined && rf !== undefined && rf > lf) {
+    return { left: vb.x + lf * vb.w, right: vb.x + rf * vb.w };
+  }
+  const size = Math.max(MIN_SNAPPED_SIZE, row.sizeFraction * vb.h);
+  const half = ((row.content ?? '').trim().length * size * EST_CHAR_WIDTH_EM) / 2;
+  const cx = vb.x + row.xFraction * vb.w;
+  return { left: cx - half, right: cx + half };
+}
+
+// Horizontal distance between two extents; zero or negative when they overlap.
+const spanGap = (a: { left: number; right: number }, b: { left: number; right: number }): number =>
+  Math.max(a.left, b.left) - Math.min(a.right, b.right);
+
+type RowBand = { rows: number[]; y: number; size: number; left: number; right: number };
+
+// The rows that share one visible line, in reading order, as index lists into `rows`.
+//
+// Two rows are one line when they share a baseline AND sit next to each other. Height
+// alone is not enough: artwork laid out as side-by-side panels — four posters on one
+// sheet — puts every panel's heading at the same height, and treating those as one line
+// laid four headings out as a single run of text in one panel. Rows on one line share a
+// baseline, so their estimated centres differ by almost nothing, while separate lines are
+// a line-height apart; and a line's runs sit a word space apart, while panels sit a
+// gutter apart.
+//
+// Every open band is considered, not just the latest, because rows sorted by height
+// interleave across panels.
 function groupRowsIntoBands(
   rows: TextRow[],
   vb: { x: number; y: number; w: number; h: number },
-): { rows: number[]; y: number; size: number }[] {
-  const bands: { rows: number[]; y: number; size: number }[] = [];
+): RowBand[] {
+  const bands: RowBand[] = [];
   rows.forEach((row, i) => {
     const y = vb.y + row.yFraction * vb.h;
     const size = Math.max(MIN_SNAPPED_SIZE, row.sizeFraction * vb.h);
-    const last = bands[bands.length - 1];
-    if (last && Math.abs(y - last.y) <= BAND_SAME_LINE_EM * size) {
-      last.rows.push(i);
-      last.size = Math.max(last.size, size);
+    const span = rowSpan(row, vb);
+    const band = bands.find((b) =>
+      Math.abs(y - b.y) <= BAND_SAME_LINE_EM * size &&
+      spanGap(b, span) <= BAND_MAX_GAP_EM * Math.max(size, b.size));
+    if (band) {
+      band.rows.push(i);
+      band.size = Math.max(band.size, size);
+      band.left = Math.min(band.left, span.left);
+      band.right = Math.max(band.right, span.right);
     } else {
-      bands.push({ rows: [i], y, size });
+      bands.push({ rows: [i], y, size, ...span });
     }
   });
   return bands;
+}
+
+// Groups rows into the panels of a layout: sets of rows whose extents overlap or nearly
+// touch, transitively. A card, a poster or a logo is one panel; a sheet of four posters is
+// four. Returns index lists into `rows`, each in the order given, plus the panel's extent.
+function groupRowsIntoPanels(
+  rows: TextRow[],
+  vb: { x: number; y: number; w: number; h: number },
+): { rows: number[]; left: number; right: number }[] {
+  const spans = rows.map((r) => rowSpan(r, vb));
+  const sizes = rows.map((r) => Math.max(MIN_SNAPPED_SIZE, r.sizeFraction * vb.h));
+  const parent = rows.map((_, i) => i);
+  const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+  for (let i = 0; i < rows.length; i++) {
+    for (let j = i + 1; j < rows.length; j++) {
+      if (spanGap(spans[i], spans[j]) <= PANEL_MAX_GAP_EM * Math.max(sizes[i], sizes[j])) {
+        parent[find(i)] = find(j);
+      }
+    }
+  }
+  const panels = new Map<number, { rows: number[]; left: number; right: number }>();
+  rows.forEach((_, i) => {
+    const root = find(i);
+    const panel = panels.get(root);
+    if (panel) {
+      panel.rows.push(i);
+      panel.left = Math.min(panel.left, spans[i].left);
+      panel.right = Math.max(panel.right, spans[i].right);
+    } else {
+      panels.set(root, { rows: [i], ...spans[i] });
+    }
+  });
+  return [...panels.values()];
 }
 
 // Aligns the bands of rows to the lines of lettering, in order, allowing either side to
@@ -1079,7 +1214,7 @@ function groupRowsIntoBands(
 // flagged for removal), and the pass reports rows whose lettering it could not point at.
 // A pairing worse than SKIP_COST is taken to be no pairing at all.
 function alignBandsToLines(
-  bands: { rows: number[]; y: number; size: number }[],
+  bands: RowBand[],
   lines: AnchorLine[],
   vb: { x: number; y: number; w: number; h: number },
 ): (number | null)[] {
@@ -1220,25 +1355,49 @@ function resolveAnchors(
   if (anchors.size === 0) return { targets, lines: rowLines };
 
   const lines = clusterAnchorsIntoLines(anchors);
-  const bands = groupRowsIntoBands(rows, vb);
-  const pairing = alignBandsToLines(bands, lines, vb);
+
+  // Reading order is only a one-dimensional sequence within a panel. Across side-by-side
+  // panels the headings all sit at one height and the order interleaves them, so each
+  // panel is aligned against the lettering that lies within its own extent. A layout with
+  // a single panel — the usual case — keeps every line, exactly as before panels existed.
+  const panels = groupRowsIntoPanels(rows, vb);
+  const linesFor = (panel: { left: number; right: number }): AnchorLine[] => {
+    if (panels.length === 1) return lines;
+    return lines.filter((line) => {
+      const cx = line.box.x + line.box.width / 2;
+      // Nearest panel by horizontal distance from the line's centre, so a line sitting
+      // in a gutter still belongs to exactly one panel.
+      const dist = (p: { left: number; right: number }) => Math.max(0, p.left - cx, cx - p.right);
+      const nearest = panels.reduce((best, p) => (dist(p) < dist(best) ? p : best));
+      return nearest === panel;
+    });
+  };
 
   let matched = 0;
-  bands.forEach((band, b) => {
-    const at = pairing[b];
-    if (at === null) return;
-    const line = lines[at];
-    const parts = splitLineAmongRows(line, band.rows.map((i) => rows[i].content ?? ''), anchors);
-    band.rows.forEach((rowIdx, k) => {
-      targets[rowIdx] = parts[k] ?? line.box;
-      rowLines[rowIdx] = line;
-      matched++;
+  let bandCount = 0;
+  for (const panel of panels) {
+    const panelRows = panel.rows.map((i) => rows[i]);
+    const panelLines = linesFor(panel);
+    const bands = groupRowsIntoBands(panelRows, vb);
+    bandCount += bands.length;
+    const pairing = alignBandsToLines(bands, panelLines, vb);
+    bands.forEach((band, b) => {
+      const at = pairing[b];
+      if (at === null) return;
+      const line = panelLines[at];
+      const parts = splitLineAmongRows(line, band.rows.map((i) => panelRows[i].content ?? ''), anchors);
+      band.rows.forEach((local, k) => {
+        const rowIdx = panel.rows[local];
+        targets[rowIdx] = parts[k] ?? line.box;
+        rowLines[rowIdx] = line;
+        matched++;
+      });
     });
-  });
+  }
 
   devLog(
     `[text-rows] linked ${matched}/${rows.length} row(s) to ${lines.length} line(s) of lettering ` +
-    `by reading order (${bands.length} band(s))`,
+    `by reading order (${bandCount} band(s) in ${panels.length} panel(s))`,
   );
   return { targets, lines: rowLines };
 }
@@ -1301,8 +1460,12 @@ const isFragmentOf = (part: string, whole: string): boolean => {
 // same-line tests below cannot see it, because the two readings are not on the same line;
 // that disagreement IS the duplication.
 //
-// Matched on the exact joined string, normalised for case and spacing, so it fires only
-// when two bands spell out precisely the same text. Artwork that genuinely repeats a line
+// Matched on the exact joined string, normalised for case and spacing, and only between
+// bands that overlap horizontally — a reading repeated in the SAME place at the wrong
+// height. The same words in side-by-side panels are genuine repeats: a sheet of posters
+// that says HAPPY VALENTINE'S DAY twice says it twice.
+//
+// It fires only when two bands spell out precisely the same text. Artwork that genuinely repeats a line
 // keeps both, because both bands would then carry the elements that draw them — which is
 // also the tiebreak: the band naming more removeIds is the one pointing at real lettering,
 // and the other is the loose reading of it.
@@ -1323,6 +1486,8 @@ function dropRepeatedBands(
     if (dropped.has(a) || !said[a]) return;
     bands.forEach((_other, b) => {
       if (b <= a || dropped.has(b) || said[b] !== said[a]) return;
+      const narrower = Math.min(bands[a].right - bands[a].left, bands[b].right - bands[b].left);
+      if (-spanGap(bands[a], bands[b]) < FRAGMENT_MIN_OVERLAP * narrower) return;
       const loser = idCount[b] > idCount[a] ? a : b;
       dropped.add(loser);
       devLog(
@@ -1801,17 +1966,24 @@ export function appendTextRowLayers(
   // Bands of rows sharing a y position, each already in left-to-right order. Anchored
   // rows are excluded outright rather than merely skipped: they must not influence a
   // neighbour's reflow either, since their position is the one thing already known good.
+  // Side by side as well as level: see groupRowsIntoBands for why height alone is not one
+  // line.
+  const widths = measureTextWidths(root, placed.filter((p) => !p.target).map((p) => p.id));
+  const extent = (p: typeof placed[number]) => {
+    const half = (widths.get(p.id) ?? 0) / 2;
+    return { left: p.cx - half, right: p.cx + half };
+  };
   const bands: (typeof placed)[] = [];
   for (const item of placed) {
     if (item.target) continue;
-    const last = bands[bands.length - 1];
-    const sameLine = last &&
-      Math.abs(item.cy - last[0].cy) <= BAND_SAME_LINE_EM * Math.min(item.fontSize, last[0].fontSize);
-    if (sameLine) last.push(item);
+    const band = bands.find((b) =>
+      Math.abs(item.cy - b[0].cy) <= BAND_SAME_LINE_EM * Math.min(item.fontSize, b[0].fontSize) &&
+      b.some((other) => spanGap(extent(other), extent(item)) <=
+        BAND_MAX_GAP_EM * Math.max(item.fontSize, other.fontSize)));
+    if (band) band.push(item);
     else bands.push([item]);
   }
 
-  const widths = measureTextWidths(root, placed.filter((p) => !p.target).map((p) => p.id));
   for (const band of bands) {
     if (band.length < 2) continue;
     const gap = BAND_GAP_EM * Math.max(...band.map((b) => b.fontSize));
@@ -1924,19 +2096,31 @@ function snapAnchoredRows(
   }
 }
 
-// Drops removeIds whose element covers ≥ BACKGROUND_AREA_LIMIT of the canvas — a
-// background or decoration the vision model mislabeled as text. Shared by the
-// strip-text and customise passes so both guard identically. svgRoot must already
-// carry the data-ai-idx marks.
+// Drops removeIds that cannot be text: an element covering ≥ BACKGROUND_AREA_LIMIT of the
+// canvas (a background), or one far taller than any line of text the pass reported (an
+// illustration). Both are artwork the vision model mislabeled as lettering. Shared by the
+// strip-text and customise passes so both guard identically. svgRoot must already carry
+// the data-ai-idx marks.
 const BACKGROUND_AREA_LIMIT = 0.5; // ≥50% of the canvas ⇒ background, never a text run
+// How many times the tallest reported row an element's ink may stand before it is not
+// text. Generous on purpose: sizeFraction is an estimate off the raster and can be out by
+// 3-4x on a wordmark, and one element can hold a few stacked lines. An illustration named
+// as lettering — a whole character on a poster — stands 10x or more.
+const OVERSIZED_TEXT_RATIO = 6;
 export const filterOutBackgroundIds = (
   svgRoot: Element,
   removeIds: string[],
   canvasW: number,
   canvasH: number,
   logTag: string,
+  rows: TextRow[] = [],
 ): string[] => {
   const canvasArea = Math.max(1, canvasW * canvasH);
+  // The tallest line the pass says there is. No rows, no bound: there is nothing to judge
+  // an element's size against.
+  const tallestRow = rows.length > 0
+    ? Math.max(...rows.map((r) => Math.max(MIN_SNAPPED_SIZE, (Number(r.sizeFraction) || 0) * canvasH)))
+    : 0;
   // Ink boxes, in root space. The question this asks is how much of the canvas the
   // element's visible mark covers, so a <text> has to be judged on its ink and not on the
   // font's line box — that box runs ascender to descender and is about 1.5x taller than
@@ -1950,6 +2134,13 @@ export const filterOutBackgroundIds = (
     const frac = (ink.width * ink.height) / canvasArea;
     if (frac >= BACKGROUND_AREA_LIMIT) {
       console.log(`[${logTag}] skipping removeId ${sid} — ink covers ${(frac * 100).toFixed(0)}% of canvas (background, not text)`);
+      return false;
+    }
+    if (tallestRow > 0 && ink.height > OVERSIZED_TEXT_RATIO * tallestRow) {
+      console.log(
+        `[${logTag}] skipping removeId ${sid} — ink is ${ink.height.toFixed(0)} tall, ` +
+        `${(ink.height / tallestRow).toFixed(1)}x the tallest text row (artwork, not text)`,
+      );
       return false;
     }
     return true;

@@ -134,6 +134,28 @@ export function TidyIcon({ className, size }: IconProps) {
   );
 }
 
+// TidyIcon turned on its side: three columns with the gaps between them marked.
+export function TidyHorizontalIcon({ className, size }: IconProps) {
+  return (
+    <svg {...stroked(size, className)}>
+      <rect x="3" y="3.5" width="3" height="17" rx="1" />
+      <rect x="10.5" y="3.5" width="3" height="17" rx="1" />
+      <rect x="18" y="3.5" width="3" height="17" rx="1" />
+      <path strokeLinecap="round" d="M6.6 12h3.3M14.1 12h3.3" />
+    </svg>
+  );
+}
+
+// A shape lifted out onto a canvas of its own: crop marks around a single square.
+export function NewDesignIcon({ className, size }: IconProps) {
+  return (
+    <svg {...stroked(size, className)}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M3.5 8V3.5H8M16 3.5h4.5V8M20.5 16v4.5H16M8 20.5H3.5V16" />
+      <rect x="8.5" y="8.5" width="7" height="7" rx="1" />
+    </svg>
+  );
+}
+
 export function DownloadIcon({ className, size }: IconProps) {
   return (
     <svg {...stroked(size, className, 2)}>
