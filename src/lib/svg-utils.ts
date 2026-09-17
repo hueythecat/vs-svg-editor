@@ -710,6 +710,10 @@ export type TextRow = {
   // <text>, and the only thing that has to be placed is the line.
   spans?: TextSpan[];
   letterSpacing: number;
+  // How far the row's baseline bends, on the Text tab's Curve scale: -100..100, 0 straight,
+  // positive arching up (∩), negative sagging (∪). Optional — cached answers and rows the
+  // pass judged straight carry none.
+  curve?: number;
   removeIds?: string[];
 };
 
@@ -1892,6 +1896,190 @@ function deOverlapRowsVertically(
   if (moved > 0) devLog(`[text-rows] pushed ${moved} overlapping row(s) apart vertically`);
 }
 
+// ─── Measured baseline curve ─────────────────────────────────────────────────
+
+type Point = { x: number; y: number };
+
+// Points along the outline of each element a pass is about to remove, in root space,
+// keyed like measureRemovedTextBoxes. Taken before removal for the same reason: it is the
+// only record of the shape the lettering actually had. Feeds appendTextRowLayers's
+// `outlines`, which measures from it how far each curved row bends.
+//
+// Outlines only — a live <text> has no path to walk, and its curve, if any, is already in
+// the file as a textPath rather than something to recover.
+const OUTLINE_SAMPLE_SPACING = 1.5;
+const OUTLINE_SAMPLES_MIN = 24;
+const OUTLINE_SAMPLES_MAX = 600;
+export const sampleRemovedLettering = (svgRoot: Element, removeIds: string[]): Map<string, Point[]> => {
+  const out = new Map<string, Point[]>();
+  if (removeIds.length === 0) return out;
+  try {
+    withOffscreenSvg(svgRoot, (measureSvg) => {
+      const toRoot = measureSvg.getScreenCTM()?.inverse();
+      if (!toRoot) return;
+      for (const sid of removeIds) {
+        const el = measureSvg.querySelector(`[data-ai-idx="${sid}"]`);
+        if (!el) continue;
+        const shapes = [el, ...Array.from(el.querySelectorAll('*'))]
+          .filter((g): g is SVGGeometryElement => typeof (g as SVGGeometryElement).getPointAtLength === 'function');
+        const points: Point[] = [];
+        for (const shape of shapes) {
+          const ctm = shape.getScreenCTM();
+          if (!ctm) continue;
+          const m = toRoot.multiply(ctm);
+          let len = 0;
+          try { len = shape.getTotalLength(); } catch { continue; }
+          if (!(len > 0)) continue;
+          const n = Math.round(Math.min(OUTLINE_SAMPLES_MAX, Math.max(OUTLINE_SAMPLES_MIN, len / OUTLINE_SAMPLE_SPACING)));
+          for (let i = 0; i < n; i++) {
+            const pt = shape.getPointAtLength((len * i) / n).matrixTransform(m);
+            points.push({ x: pt.x, y: pt.y });
+          }
+        }
+        if (points.length > 0) out.set(sid, points);
+      }
+    });
+  } catch { /* no live DOM — rows fall back to the curve the pass reported */ }
+  return out;
+};
+
+// How far a run of lettering bends, on the Curve slider's scale, measured from its outline.
+//
+// The run is cut into vertical strips and the lowest point in each is taken as the
+// baseline there; a parabola fitted through those is the baseline's shape, and the change
+// in its direction from the first strip to the last, as a share of a half-circle, is the
+// curve. That is the same quantity computeArcPath turns a curve value back into, so a
+// measured value reproduces the artwork's bend rather than approximating it.
+//
+// The fit is refitted once without its worst strips, so a descender or a stray flourish
+// does not drag the baseline down at one point. Null when there is too little to go on —
+// too few strips with ink in them — and the caller keeps the pass's own figure.
+const CURVE_STRIPS = 24;
+const CURVE_MIN_STRIPS = 8;
+const CURVE_OUTLIER_MADS = 3;
+// Fewer letters than this and a row keeps the curve the pass reported.
+const CURVE_MIN_LETTERS = 6;
+// A run must be at least this many times wider than it is tall to have a baseline worth
+// fitting. The lowest points of a single glyph — the foot of a P against its bowl — trace
+// the letter's shape, not a line it sits on; a word is several times wider than tall even
+// bent into a semicircle, where the ratio is 2.
+const CURVE_MIN_ASPECT = 2;
+export function measureBaselineCurve(points: Point[]): number | null {
+  if (points.length < CURVE_MIN_STRIPS * 2) return null;
+  const minX = Math.min(...points.map((p) => p.x));
+  const maxX = Math.max(...points.map((p) => p.x));
+  const width = maxX - minX;
+  if (!(width > 0)) return null;
+  const height = Math.max(...points.map((p) => p.y)) - Math.min(...points.map((p) => p.y));
+  if (width < CURVE_MIN_ASPECT * height) return null;
+
+  const bottoms = new Array<number>(CURVE_STRIPS).fill(-Infinity);
+  for (const p of points) {
+    const i = Math.min(CURVE_STRIPS - 1, Math.floor(((p.x - minX) / width) * CURVE_STRIPS));
+    if (p.y > bottoms[i]) bottoms[i] = p.y;
+  }
+  const half = width / 2;
+  const mid = minX + half;
+  let strips = bottoms
+    .map((y, i) => ({ u: (minX + ((i + 0.5) * width) / CURVE_STRIPS - mid) / half, y }))
+    .filter((s) => Number.isFinite(s.y));
+  if (strips.length < CURVE_MIN_STRIPS) return null;
+
+  // Least squares for y = a·u² + b·u + c.
+  const fit = (pts: { u: number; y: number }[]) => {
+    let s0 = 0, s1 = 0, s2 = 0, s3 = 0, s4 = 0, t0 = 0, t1 = 0, t2 = 0;
+    for (const { u, y } of pts) {
+      const u2 = u * u;
+      s0 += 1; s1 += u; s2 += u2; s3 += u2 * u; s4 += u2 * u2;
+      t0 += y; t1 += u * y; t2 += u2 * y;
+    }
+    const det = (m: number[][]) =>
+      m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) -
+      m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+      m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
+    const M = [[s4, s3, s2], [s3, s2, s1], [s2, s1, s0]];
+    const D = det(M);
+    if (Math.abs(D) < 1e-12) return null;
+    const col = (k: number) => M.map((row, r) => row.map((v, c) => (c === k ? [t2, t1, t0][r] : v)));
+    return { a: det(col(0)) / D, b: det(col(1)) / D, c: det(col(2)) / D };
+  };
+
+  let coef = fit(strips);
+  if (!coef) return null;
+  const residuals = strips.map((s) => Math.abs(s.y - (coef!.a * s.u * s.u + coef!.b * s.u + coef!.c)));
+  const mad = [...residuals].sort((p, q) => p - q)[Math.floor(residuals.length / 2)];
+  const kept = strips.filter((_, i) => residuals[i] <= CURVE_OUTLIER_MADS * mad + 1e-6);
+  if (kept.length >= CURVE_MIN_STRIPS && kept.length < strips.length) {
+    const refit = fit(kept);
+    if (refit) { coef = refit; strips = kept; }
+  }
+
+  // Direction of the baseline at its two ends, in root units (u is x scaled by `half`).
+  const u0 = Math.min(...strips.map((s) => s.u));
+  const u1 = Math.max(...strips.map((s) => s.u));
+  const slope = (u: number) => (2 * coef!.a * u + coef!.b) / half;
+  const turn = Math.atan(slope(u1)) - Math.atan(slope(u0));
+  // y grows downwards, so a baseline sagging in the middle turns negatively from left to
+  // right — which is the slider's negative (∪). An arch turns positively (∩).
+  return Math.round(Math.max(-100, Math.min(100, (turn / Math.PI) * 100)));
+}
+
+// Curves smaller than this are the pass's noise on a straight row, not a curve anyone set.
+const MIN_ROW_CURVE = 5;
+
+// Puts a placed <text> row on an arc, as the Text tab's Curve slider would: the same
+// data-text-layer group, the same data-* bookkeeping and the same arc path, so the
+// result is edited by that slider exactly like a curve set by hand.
+//
+// Done after placement, on the settled straight row: sizing, alignment and de-overlap all
+// measure straight text, and the arc is then centred where the straight text was centred.
+// The centre is measured rather than read off `x`, because column alignment may have
+// left the row start- or end-anchored.
+function curvePlacedRow(root: Element, el: Element, curve: number): void {
+  const doc = root.ownerDocument!;
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const id = el.id;
+  const box = measureBoxPairs(root, new Map([[id, `[id="${id}"]`]])).get(id)?.box;
+  if (!box) return;
+  const cx = box.x + box.width / 2;
+  const cy = Number(el.getAttribute('y') ?? box.y + box.height / 2);
+  const { w: vbW } = parseViewBox(root);
+  const halfW = vbW * 0.35;
+  const content = textLines(el).replace(/\s*\n\s*/g, ' ');
+
+  const g = doc.createElementNS(SVG_NS, 'g');
+  g.id = id;
+  g.setAttribute('data-name', content);
+  g.setAttribute('data-text-layer', '1');
+  g.setAttribute('data-curve', String(curve));
+  g.setAttribute('data-cx', String(cx));
+  g.setAttribute('data-cy', String(cy));
+  g.setAttribute('data-halfw', String(halfW));
+  g.setAttribute('data-fontsize', el.getAttribute('font-size') ?? '48');
+  const arcId = `_arc_${id}`;
+  const defs = doc.createElementNS(SVG_NS, 'defs');
+  const arc = doc.createElementNS(SVG_NS, 'path');
+  arc.id = arcId;
+  defs.appendChild(arc);
+  g.appendChild(defs);
+  const text = doc.createElementNS(SVG_NS, 'text');
+  ['font-family', 'font-size', 'font-weight', 'fill', 'letter-spacing'].forEach((a) => {
+    const v = el.getAttribute(a);
+    if (v) text.setAttribute(a, v);
+  });
+  text.setAttribute('dominant-baseline', 'middle');
+  const tp = doc.createElementNS(SVG_NS, 'textPath');
+  tp.setAttribute('href', `#${arcId}`);
+  tp.setAttribute('startOffset', '50%');
+  tp.setAttribute('text-anchor', 'middle');
+  tp.textContent = content;
+  text.appendChild(tp);
+  g.appendChild(text);
+  el.parentNode?.replaceChild(g, el);
+  // Measured once the group is in the document, as the slider does.
+  arc.setAttribute('d', computeArcPath(cx, cy, curve, measureTextAdvance(root, id), halfW));
+}
+
 // Appends one top-level <text> element per detected row and returns the matching layer
 // entries, in document order. Deliberately flat: every row is its own layer, so the
 // element list has no sub-rows and each field is selected, moved and styled on its own.
@@ -1913,6 +2101,9 @@ export function appendTextRowLayers(
   vb: { x: number; y: number; w: number; h: number },
   idPrefix = `_text_${Date.now()}`,
   anchors: Map<string, DOMRect> = new Map(),
+  // Outline points of the removed lettering (sampleRemovedLettering). When a row's line of
+  // lettering is known, its curve is measured from these rather than taken from the pass.
+  outlines: Map<string, Point[]> = new Map(),
 ): SvgLayer[] {
   if (rows.length === 0) return [];
   const root = doc.documentElement;
@@ -2014,6 +2205,43 @@ export function appendTextRowLayers(
 
   // Last, once every size and x is settled: the line boxes it compares depend on both.
   deOverlapRowsVertically(root, placed, vb);
+
+  // Curved rows last, once every size and position is settled on straight text. A row
+  // with styled runs or several lines stays straight: a path carries one run of one style.
+  //
+  // The curve is MEASURED from the lettering the row replaces wherever that is possible:
+  // the pass reads it off the raster and is unreliable about it — the same crest came back
+  // with every row straight on one run and with a curved tagline at -10 on the next, where
+  // the artwork bends it about three times that. Measuring needs the row to own its line
+  // outright; a line split between rows by styling has no single baseline to fit.
+  const lineOwners = new Map<AnchorLine, number>();
+  for (const p of placed) if (p.line) lineOwners.set(p.line, (lineOwners.get(p.line) ?? 0) + 1);
+  let curved = 0;
+  for (const p of placed) {
+    const reported = Math.round(Math.max(-100, Math.min(100, Number(p.row.curve) || 0)));
+    let curve = reported;
+    // Only runs long enough for their letters to average out. A short word in a lively
+    // display face sits its letters at uneven heights, and the fit reads that as a bend:
+    // on a sheet of groovy posters the straight "LOVE" measured 16 and "HAPPY" 8, while
+    // every line of six letters or more measured 0 when straight and 24-25 when arched.
+    if (p.line && lineOwners.get(p.line) === 1 && p.row.content.replace(/\s/g, '').length >= CURVE_MIN_LETTERS) {
+      const measured = measureBaselineCurve(p.line.ids.flatMap((sid) => outlines.get(sid) ?? []));
+      if (measured !== null) {
+        if (Math.abs(measured - reported) >= MIN_ROW_CURVE) {
+          devLog(`[text-rows] "${p.row.content}" curve measured ${measured} from its lettering (pass said ${reported})`);
+        }
+        curve = measured;
+      }
+    }
+    if (Math.abs(curve) < MIN_ROW_CURVE) continue;
+    if ((p.row.spans?.length ?? 0) > 1 || p.label.includes('\n')) {
+      devLog(`[text-rows] "${p.row.content}" reported curve ${curve} but has styled runs or several lines — left straight`);
+      continue;
+    }
+    curvePlacedRow(root, p.el, curve);
+    curved++;
+  }
+  if (curved > 0) devLog(`[text-rows] put ${curved} row(s) on an arc`);
 
   // The drawn field keeps its line breaks; the panel row is given the flattened string,
   // since a layer row is one line high.

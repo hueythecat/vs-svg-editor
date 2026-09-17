@@ -19,6 +19,7 @@ import {
   isPlainWhiteLayer,
   isSyntheticLayerId,
   measureRemovedTextBoxes,
+  sampleRemovedLettering,
   normalizeColor,
   parseSvg,
   parseViewBox,
@@ -223,6 +224,7 @@ const TEXT_PARSING_PROMPT = `TASK 1 — Text detection: Examine the image carefu
 - weight: CSS font-weight integer (100, 200, 300, 400, 500, 600, 700, 800, or 900)
 - color: THIS row's own colour as CSS hex, as it appears in the image — composited over whatever sits behind it, not the colour it would be on white. Where an element in the SVG below carries data-fill, that is the colour it renders as, already composited (blend modes and opacity included): read the data-fill of the elements you name in this row's removeIds and report that value, and only judge colour by eye for a row whose elements you cannot identify. Judge each row on its own — a card routinely sets a heading in one colour and its body text in another, and a light heading over a mid-tone panel can sit directly above dark body text on the same panel. Do NOT give every row the same colour unless every row really is that colour, and do NOT assume text is white because other text on the image is.
 - content: the exact text string if legible, else ""
+- curve: how far THIS row's baseline bends, as a signed whole number from -100 to 100. 0 means the letters sit on a straight line — including a straight line that is rotated. The size is the baseline's total change of direction from its first letter to its last, as a share of a half-circle: if the first and last letters lean 45° apart it is 25, 90° apart is 50, a full semicircle is 100. The sign is the shape: POSITIVE when the row arches like the top of a circle (its middle higher than its ends, ∩), NEGATIVE when it sags like a smile (its middle lower than its ends, ∪). Judge it from the tilt of the letters at each end, not from the ornament around the text.
 - letterSpacing: CSS letter-spacing in em units. Default to 0.0 (normal) if you are not certain — only use a non-zero value when you can clearly see unusually wide or condensed tracking (e.g. 0.1 slightly wide, 0.3 very wide, -0.05 condensed)
 
 - spans: OPTIONAL. Only when the line is not all one style. The line broken into consecutive runs, in reading order, each { "text": "...", "color": "#hex", "weight": 400 }. Joining every span's text, with a single space between runs that are separated by one in the image, must reproduce "content" exactly. A line in one style has no spans — leave the field out.
@@ -232,6 +234,8 @@ const TEXT_PARSING_PROMPT = `TASK 1 — Text detection: Examine the image carefu
 TASK 2 — Text element identification: Most SVG elements in the source have a data-ai-idx attribute. Identify which elements visually render as text — including <text>/<tspan> elements AND <path>/<g> elements whose shapes form letter or word outlines. IMPORTANT: if a <g> group contains child paths that together form a word, return the group's data-ai-idx (not the individual letter path indices). Return every text element's data-ai-idx in "removeIds". NOTE: already-editable text fields have deliberately NOT been given a data-ai-idx — never invent indices for them; only return indices that actually appear in the source below.
 
 TASK 3 — Row ↔ element linking: Each row from TASK 1 also carries its own "removeIds" array: the TASK 2 indices whose shapes draw THAT row's text. This linking is what lets the replacement field be positioned from the original's real geometry instead of your estimate, so it matters more than the fraction estimates do — leave a row's array empty only when you genuinely cannot tell which elements draw it.
+
+CRITICAL: check EVERY row for a curved baseline before answering, and give "curve" on every row. Logos, badges, seals and banners very often set a name or tagline along an arc — around a circle, or along a ribbon under an emblem — and that lettering is curved even when it is short or small. Look at the letters at each end of the row: if they lean away from each other (tops spreading apart) the row sags and curve is negative; if they lean toward each other (tops closing in) the row arches and curve is positive. Only a row whose letters all stand upright on one straight line is 0.
 
 CRITICAL: a differently-styled word is a SPAN, never a row of its own. Returning "MICHAEL DOE" and also "MICHAEL" and "DOE" is one line of text read three times, and all three get drawn on top of each other. Each piece of lettering in the image belongs to exactly ONE row.
 
@@ -295,21 +299,43 @@ const rowFontFaces = (rows: TextRow[]): { family: string; weight: number }[] => 
 // them. It therefore resolves happily while every face is still absent. document.fonts.load
 // is the primitive that actually requests a face and resolves when it can be used.
 //
+// But document.fonts.load only knows the faces its @font-face rules declare, and those
+// arrive with the Google Fonts stylesheet — a <link> injected a moment earlier whose CSS
+// has not loaded yet. Until it has, load() finds no matching face and resolves at once
+// with nothing, and check() reports true, because a family with no declared faces counts
+// as "nothing to wait for". Every row was then measured in a fallback face: on a crest
+// logo both curved rows measured an identical 208 units against real widths of 207 and
+// 251, and "restaurant" was sized up to fill the gap. So the stylesheets are awaited
+// first, and a face only counts as ready when load() actually returned one.
+//
 // Bounded and individually caught: a font that never arrives must not strand the edit, and
 // a family that has no such weight must not stop the others loading.
 const FONT_SETTLE_TIMEOUT_MS = 4000;
+const fontStylesheetsLoaded = (): Promise<unknown> =>
+  Promise.all(
+    Array.from(document.querySelectorAll<HTMLLinkElement>('link[id^="gfont-"]')).map((link) =>
+      link.sheet
+        ? undefined
+        : new Promise((resolve) => {
+            link.addEventListener('load', resolve, { once: true });
+            link.addEventListener('error', resolve, { once: true });
+          })),
+  );
 const ensureRowFontsReady = async (rows: TextRow[]): Promise<void> => {
   if (typeof document === 'undefined' || !document.fonts) return;
   const faces = rowFontFaces(rows);
   if (faces.length === 0) return;
+  const found = new Set<string>();
   try {
     await Promise.race([
-      Promise.all(faces.map((f) =>
-        document.fonts.load(`${f.weight} 16px "${f.family}"`).catch(() => undefined),
-      )),
+      fontStylesheetsLoaded().then(() => Promise.all(faces.map((f) =>
+        document.fonts.load(`${f.weight} 16px "${f.family}"`)
+          .then((loaded) => { if (loaded.length > 0) found.add(`${f.family}@${f.weight}`); })
+          .catch(() => undefined),
+      ))),
       new Promise((resolve) => setTimeout(resolve, FONT_SETTLE_TIMEOUT_MS)),
     ]);
-    const missing = faces.filter((f) => !document.fonts.check(`${f.weight} 16px "${f.family}"`));
+    const missing = faces.filter((f) => !found.has(`${f.family}@${f.weight}`));
     if (missing.length) {
       console.log(
         `[text-rows] ${missing.length}/${faces.length} face(s) unavailable, falling back for: ` +
@@ -355,6 +381,11 @@ const normaliseRowRemoveIds = (row: TextRow): void => {
   } else {
     row.spans = undefined;
   }
+
+  // Curve on the Curve slider's own scale. Anything unusable is no curve at all — a bad
+  // value would bend a straight row, and straight is what every row was before this.
+  const curve = Number(row.curve);
+  row.curve = Number.isFinite(curve) ? Math.round(Math.max(-100, Math.min(100, curve))) : undefined;
 
   const left = frac(row.leftFraction);
   const right = frac(row.rightFraction);
@@ -3108,7 +3139,7 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
       // The suggestion limit is part of the key rather than a version bump: raising it
       // asks a different question, and a cached answer would otherwise keep returning
       // the old count and make the setting look like it does nothing.
-      const cacheKey = `customise-v12:${TEXT_PARSE_MODEL}:f${FONT_SUGGESTION_LIMIT}:${bgColor ?? 'none'}:${hashString(contentXml)}`;
+      const cacheKey = `customise-v14:${TEXT_PARSE_MODEL}:f${FONT_SUGGESTION_LIMIT}:${bgColor ?? 'none'}:${hashString(contentXml)}`;
       let parsed: CustomiseResult;
       const cachedRaw = readAiCache(cacheKey);
 
@@ -3164,6 +3195,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
         ` ${String(r.color).padEnd(7)} w${String(r.weight).padEnd(3)}` +
         ` ids=${(r.removeIds ?? []).length}` +
         (r.spans ? ` spans=${r.spans.map((sp) => sp.color).join('/')}` : '') +
+        (r.curve ? ` curve=${r.curve}` : '') +
         ` "${r.content}"`,
       ).join('\n'));
 
@@ -3191,6 +3223,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
       // Measured before anything is hidden. The boxes are what the replacement text is
       // placed from, and they also give the dev panel something to show per entry.
       const anchors = measureRemovedTextBoxes(doc.documentElement, removeIds);
+      const outlines = sampleRemovedLettering(doc.documentElement, removeIds);
       const hidden = hideRemovedElements(aiIdMap, removeIds, parsed.rows, anchors, hiddenLayers, 'customise');
       for (const [, el] of aiIdMap) { el.removeAttribute('data-ai-idx'); el.removeAttribute('data-fill'); }
 
@@ -3203,7 +3236,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
       allRows.forEach(({ font, weight }) => addUsedFont(font, weight));
       await ensureRowFontsReady(allRows);
       console.log(`[customise] ${countTaggedRows(allRows, anchors)}/${allRows.length} row(s) tagged with measured outlines`);
-      const newTextLayers = appendTextRowLayers(doc, allRows, { x: vbX, y: vbY, w: vw, h: vh }, undefined, anchors);
+      const newTextLayers = appendTextRowLayers(doc, allRows, { x: vbX, y: vbY, w: vw, h: vh }, undefined, anchors, outlines);
 
       // Suggested fonts, deduped across all layers. Registered with addGoogleFont rather
       // than just link-loaded, so they show up in the inspector's Font list and can be
@@ -3605,7 +3638,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences:
       // partition ("every index appears in exactly one row"), which made the model answer
       // with one row per stacked copy of a word, and those answers re-add each field
       // three times over.
-      const cacheKey = `strip-text-v15:${TEXT_PARSE_MODEL}:${hashString(svgString)}`;
+      const cacheKey = `strip-text-v17:${TEXT_PARSE_MODEL}:${hashString(svgString)}`;
       let parsed: StripResult;
 
       const cachedRaw = readAiCache(cacheKey);
@@ -3651,6 +3684,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
       // Ground truth for placement: the boxes are read off the live geometry, and the
       // elements stay in the document, so this is measuring rather than salvaging.
       const stripAnchors = measureRemovedTextBoxes(doc.documentElement, stripRemoveIds);
+      const stripOutlines = sampleRemovedLettering(doc.documentElement, stripRemoveIds);
       const stripHidden = hideRemovedElements(
         aiIdMap, stripRemoveIds, parsed.rows ?? [], stripAnchors, hiddenLayers, 'strip-text',
       );
@@ -3666,7 +3700,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
       detectedRows.forEach(({ font, weight }) => addUsedFont(font, weight));
       await ensureRowFontsReady(detectedRows);
       console.log(`[strip-text] ${countTaggedRows(detectedRows, stripAnchors)}/${detectedRows.length} row(s) tagged with measured outlines`);
-      const newTextLayers = appendTextRowLayers(doc, detectedRows, { x: vbX, y: vbY, w: vw, h: vh }, undefined, stripAnchors);
+      const newTextLayers = appendTextRowLayers(doc, detectedRows, { x: vbX, y: vbY, w: vw, h: vh }, undefined, stripAnchors, stripOutlines);
 
       const content = new XMLSerializer().serializeToString(doc.documentElement);
       // Same as the customise pass: a no-op for what this run took (hidden, not gone),
