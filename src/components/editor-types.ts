@@ -81,14 +81,34 @@ export type RemovedRecord = {
 };
 
 // Which LLM backs every AI action. Labels are what the model dropdown shows; the
-// concrete model ids live server-side in the matching /api route.
-export type LlmProvider = 'claude' | 'kimi';
+// concrete model ids live server-side in the matching /api route. 'claude-opus' also
+// goes to /api/claude, but swaps every call site's Sonnet id for OPUS_MODEL.
+export type LlmProvider = 'claude' | 'claude-opus' | 'kimi';
+
+export const OPUS_MODEL = 'claude-opus-5-5';
 
 // Kimi is off the menu for now; the 'kimi' provider and its /api/kimi route are
 // still wired up, so re-adding the entry below is all it takes to bring it back.
 export const LLM_OPTIONS: Array<{ value: LlmProvider; label: string }> = [
   { value: 'claude', label: 'Claude — Sonnet 5' },
+  { value: 'claude-opus', label: 'Claude — Opus 5.5' },
 ];
+
+// How the Customise pass finds the text in the artwork. 'current' is the vision pass
+// over the marked source (TEXT_PARSING_PROMPT). 'dom-regions' is its replacement,
+// src/lib/svg-text-detect.ts — DOM-measured regions plus an annotated render, judged by
+// /api/svg-text. For now Customise only runs it and logs the JSON; nothing is applied.
+// 'dom-regions' is the default (svg-drop-zone.web.tsx), and so is Opus for the model.
+export type TextDetectMethod = 'current' | 'dom-regions';
+
+export const TEXT_DETECT_OPTIONS: Array<{ value: TextDetectMethod; labelKey: string }> = [
+  { value: 'current', labelKey: 'ai.textDetectCurrent' },
+  { value: 'dom-regions', labelKey: 'ai.textDetectDomRegions' },
+];
+
+// One region from a DOM-regions text-detection run, as fractions (0–1) of the viewBox so
+// the canvas can place it on the board at any size.
+export type RegionBox = { region: number; left: number; top: number; width: number; height: number };
 
 type TextForm = {
   content: string; font: string; size: number; weight: number;

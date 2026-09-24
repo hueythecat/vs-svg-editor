@@ -52,9 +52,11 @@ import { t } from '@/i18n';
 import { useT } from '@/i18n/provider';
 import { isIgnoreCanCustomise, isIgnoreCooldownPrompt, isIgnoreHasCustomised } from '@/lib/dev-flags';
 import type {
-  AiActionType, CustomiseBundle, DocBundle, LlmProvider, RemovedRecord, TextLayerAttrs,
+  AiActionType, CustomiseBundle, DocBundle, LlmProvider, RegionBox, RemovedRecord, TextDetectMethod,
+  TextLayerAttrs,
 } from './editor-types';
-import { LLM_OPTIONS } from './editor-types';
+import { LLM_OPTIONS, OPUS_MODEL, TEXT_DETECT_OPTIONS } from './editor-types';
+import { detectSvgText } from '@/lib/svg-text-detect';
 import { EditorControlPanel, type ControlTab } from './editor-control-panel';
 import { AiPanel } from './editor-ai-panel';
 import { ExportPill } from './editor-export-pill';
@@ -213,6 +215,11 @@ const wrapInAncestorChain = (clone: Element, chain: Element[]): Element =>
 // Both passes also share one model, so an A/B model swap flips strip-text and
 // customise together and they can't drift apart.
 const TEXT_PARSE_MODEL = 'claude-sonnet-4-6';
+// The DOM-regions text detection (/api/svg-text) runs on its own model, not the dropdown's:
+// Sonnet 5 at low effort matched Opus 5.5 on the reference file (36/36 fields, words
+// split right) at about half the cost and a little faster. Haiku 4.5 misread regions.
+const TEXT_DETECT_MODEL = 'claude-sonnet-5';
+const TEXT_DETECT_EFFORT = 'low';
 const TEXT_PARSING_PROMPT = `TASK 1 — Text detection: Examine the image carefully. Detect ALL text present, including text rendered as outlined or filled path shapes (not just SVG <text> elements). A ROW is one LINE of text. "MICHAEL DOE" is one row, even when "DOE" is a different colour or weight from "MICHAEL" — a line is never returned as two rows, and a row never holds two lines. For each row, estimate:
 - yFraction: vertical center as a fraction of image height (0.0 = top edge, 1.0 = bottom edge)
 - xFraction: horizontal center as a fraction of image width (0.0 = left, 1.0 = right)
@@ -534,6 +541,7 @@ const hideRemovedElements = (
 // Stable identity, so passing "no preview" to the memoised canvas isn't a new object
 // on every render.
 const EMPTY_PREVIEW: Set<string> = new Set();
+const NO_REGION_BOXES: RegionBox[] = [];
 
 // A record and everything hidden beneath it.
 //
@@ -771,14 +779,26 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   // Which LLM every AI action calls. Picking 'kimi' diverts each request to
   // /api/kimi, which re-shapes the same Anthropic-style body for Moonshot. Mirrored
   // into a ref so the AI callbacks below read the live choice, never a stale closure.
-  const [llmProvider, setLlmProvider] = useState<LlmProvider>('claude');
-  const llmProviderRef = useRef<LlmProvider>('claude');
+  const [llmProvider, setLlmProvider] = useState<LlmProvider>('claude-opus');
+  const llmProviderRef = useRef<LlmProvider>('claude-opus');
   const selectLlmProvider = (p: LlmProvider) => { llmProviderRef.current = p; setLlmProvider(p); };
+  // Which text-detection call Customise makes. Ref-mirrored like the provider, so
+  // runCustomise reads the live choice without taking it as a dependency.
+  const [textDetectMethod, setTextDetectMethod] = useState<TextDetectMethod>('dom-regions');
+  const textDetectMethodRef = useRef<TextDetectMethod>('dom-regions');
+  const selectTextDetectMethod = (m: TextDetectMethod) => { textDetectMethodRef.current = m; setTextDetectMethod(m); };
+  // The regions the last DOM-regions run returned, boxed and numbered on the canvas like
+  // the annotated render the model saw. Debug only: cleared on the next run or a new file.
+  const [textDetectBoxes, setTextDetectBoxes] = useState<RegionBox[]>(NO_REGION_BOXES);
   const llmEndpoint = () => (llmProviderRef.current === 'kimi' ? '/api/kimi' : '/api/claude');
   // Log label. /api/kimi discards the model id we send and pins its own, so naming a
   // Claude model while Kimi is running would be a lie — say who actually answered.
   const llmLabel = (claudeModel: string) =>
-    llmProviderRef.current === 'kimi' ? 'kimi (model pinned in /api/kimi)' : `claude ${claudeModel}`;
+    llmProviderRef.current === 'kimi' ? 'kimi (model pinned in /api/kimi)' : `claude ${llmModel(claudeModel)}`;
+  // The model id actually sent. Call sites name the Sonnet they were tuned on; picking
+  // Opus overrides all of them. Also part of the AI cache keys, so switching model
+  // doesn't just replay the other model's cached answer.
+  const llmModel = (model: string) => (llmProviderRef.current === 'claude-opus' ? OPUS_MODEL : model);
 
   // Single image+text turn to the active LLM. Every AI action shared this exact
   // fetch/error/parse skeleton; extracting it here keeps the seven call sites to just
@@ -793,7 +813,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: opts.model,
+        model: llmModel(opts.model),
         max_tokens: opts.maxTokens,
         messages: [{
           role: 'user',
@@ -944,6 +964,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       const cleaned = stripScripts(raw);
       const { content, layers } = parseSvg(cleaned);
       setActiveSvg((prev) => { revokePrev(prev); return { name, src, content, originalContent: content, layers, objectUrl, edit }; });
+      setTextDetectBoxes(NO_REGION_BOXES);
       // A plain white canvas layer starts hidden, so artwork opens on the transparency
       // checkerboard and exports transparent unless it's switched on. A coloured or
       // patterned background is part of the design, so it stays visible.
@@ -1240,6 +1261,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   const clear = useCallback(() => {
     setActiveSvg((prev) => { revokePrev(prev); return null; });
     setActiveSample(null);
+    setTextDetectBoxes(NO_REGION_BOXES);
     setHiddenLayers(new Set());
     setDefaultHiddenLayers(new Set());
     setSelectedLayer(null);
@@ -3016,6 +3038,41 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
         return;
       }
     }
+    // The new detection call (src/lib/svg-text-detect.ts). Debug-only for now: it runs
+    // the call and logs the merged result, and applies nothing — so no undo snapshot.
+    if (textDetectMethodRef.current === 'dom-regions') {
+      setCustomiseLoading(true);
+      setAiLoading(true);
+      setAiError(null);
+      setAiStatusMsg(t('status.analysingImage'));
+      setTextDetectBoxes(NO_REGION_BOXES);
+      try {
+        console.log('[text-detect] invoking /api/svg-text:', TEXT_DETECT_MODEL, `effort ${TEXT_DETECT_EFFORT}`);
+        const regions = await detectSvgText(svgWithoutHidden(activeSvg.content, hiddenLayers), {
+          model: TEXT_DETECT_MODEL, effort: TEXT_DETECT_EFFORT, layers: activeSvg.layers,
+        });
+        console.log('[text-detect] result:\n' + JSON.stringify(regions, null, 2));
+        // bbox is in the SVG's user units; the board is the viewBox stretched to fit, so
+        // fractions of the viewBox place each box on it at any zoom.
+        const vb = parseViewBox(new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml').documentElement);
+        setTextDetectBoxes(regions.map((r) => {
+          const [x0, y0, x1, y1] = r.bbox;
+          return {
+            region: r.region,
+            left: (x0 - vb.x) / vb.w, top: (y0 - vb.y) / vb.h,
+            width: (x1 - x0) / vb.w, height: (y1 - y0) / vb.h,
+          };
+        }));
+      } catch (err) {
+        console.error('[text-detect] failed:', err);
+        setAiError(err instanceof Error ? err.message : t('errors.customiseFailed'));
+      } finally {
+        setCustomiseLoading(false);
+        setAiLoading(false);
+        setAiStatusMsg(t('status.thinking'));
+      }
+      return;
+    }
     setCustomiseLoading(true);
     setAiLoading(true);
     setAiError(null);
@@ -3139,7 +3196,7 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
       // The suggestion limit is part of the key rather than a version bump: raising it
       // asks a different question, and a cached answer would otherwise keep returning
       // the old count and make the setting look like it does nothing.
-      const cacheKey = `customise-v14:${TEXT_PARSE_MODEL}:f${FONT_SUGGESTION_LIMIT}:${bgColor ?? 'none'}:${hashString(contentXml)}`;
+      const cacheKey = `customise-v14:${llmModel(TEXT_PARSE_MODEL)}:f${FONT_SUGGESTION_LIMIT}:${bgColor ?? 'none'}:${hashString(contentXml)}`;
       let parsed: CustomiseResult;
       const cachedRaw = readAiCache(cacheKey);
 
@@ -3638,7 +3695,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences:
       // partition ("every index appears in exactly one row"), which made the model answer
       // with one row per stacked copy of a word, and those answers re-add each field
       // three times over.
-      const cacheKey = `strip-text-v17:${TEXT_PARSE_MODEL}:${hashString(svgString)}`;
+      const cacheKey = `strip-text-v17:${llmModel(TEXT_PARSE_MODEL)}:${hashString(svgString)}`;
       let parsed: StripResult;
 
       const cachedRaw = readAiCache(cacheKey);
@@ -4359,6 +4416,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
             hiddenLayers={hiddenLayers}
             previewIds={previewIds}
             previewOutlineId={previewRemovedId ?? peekedLayerId}
+            regionBoxes={textDetectBoxes}
             backgroundLayerId={backgroundLayerId}
             showSelectionOverlay={showSelectionOverlay}
             showSizeBadge={gestureActive}
@@ -4435,6 +4493,9 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                   llmProvider={llmProvider}
                   llmOptions={LLM_OPTIONS}
                   onSelectLlmProvider={selectLlmProvider}
+                  textDetectMethod={textDetectMethod}
+                  textDetectOptions={TEXT_DETECT_OPTIONS}
+                  onSelectTextDetectMethod={selectTextDetectMethod}
                   ai={{
                     loading: aiLoading, error: aiError,
                     fontSuggestion, suggestedFontName,

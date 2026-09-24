@@ -4,7 +4,7 @@
 // This exists instead of `npx expo serve` because several things have to happen in front
 // of the routes, and only this layer can tell the routes apart:
 //
-//   • rate limiting — two proxies spend real money (/api/claude, /api/kimi) and one
+//   • rate limiting — three AI routes spend real money (/api/claude, /api/kimi, /api/svg-text) and one
 //     returns whole SVGs off an enumerable numeric id (/api/review/<id>). Caddy has no
 //     built-in limit_req.
 //   • a global daily AI budget and an in-flight cap, which bound spend across all
@@ -237,6 +237,7 @@ if (!DEV_API_ROUTES) {
 app.use('/api', bodyLimit(MAX_BODY_BYTES));
 app.use('/api/claude', aiLimiter, aiBudget, aiConcurrency);
 app.use('/api/kimi', aiLimiter, aiBudget, aiConcurrency);
+app.use('/api/svg-text', aiLimiter, aiBudget, aiConcurrency);
 app.use('/api/review', reviewLimiter);
 app.use('/api', apiLimiter);
 

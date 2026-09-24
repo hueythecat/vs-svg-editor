@@ -1,6 +1,7 @@
 import React, { useMemo } from 'react';
 
 import type { ActiveSvg } from '@/lib/svg-utils';
+import type { RegionBox } from './editor-types';
 import { C, MONO_STACK, SHADOW, FONT_STACK, checkerStyle } from '@/lib/design-tokens';
 import { useT } from '@/i18n/provider';
 import { MoveIcon, ResizeIcon, RotateIcon, SparklesIcon } from './svg-icons';
@@ -49,7 +50,7 @@ export const CanvasStage = React.memo(function CanvasStage({
   onCanvasClick, onCanvasMouseDown, onCanvasDoubleClick, onCanvasMouseMove, onCanvasMouseLeave,
   aiLoading, aiStatusMsg,
   isLoading, activeSvg,
-  hiddenLayers, previewIds, previewOutlineId, backgroundLayerId,
+  hiddenLayers, previewIds, previewOutlineId, regionBoxes, backgroundLayerId,
   showSelectionOverlay, selectionIsEmptyText,
   onEmptyTextClick,
   editingTextId, textEditorRef, editingStyle, onInlineTextInput, onEndInlineEdit,
@@ -76,6 +77,9 @@ export const CanvasStage = React.memo(function CanvasStage({
   previewIds: Set<string>;
   // Which of those to outline: the entry itself, not every descendant.
   previewOutlineId: string | null;
+  // Regions the last text-detection run returned (the DOM-regions debug pass), boxed and
+  // numbered in the magenta of the annotated render the model was shown.
+  regionBoxes: RegionBox[];
   backgroundLayerId: string | null;
   showSelectionOverlay: boolean;
   selectionIsEmptyText: boolean;
@@ -242,6 +246,30 @@ export const CanvasStage = React.memo(function CanvasStage({
                 boxShadow: `0 0 0 100vmax ${C.offCanvasVeil}`,
               }}
             />
+            {/* Text-detection regions: a box per region, number above its top-left
+                corner, the same as the annotated render. Padded 3px like that render. */}
+            {regionBoxes.map((b) => (
+              <div
+                key={b.region}
+                aria-hidden
+                style={{
+                  position: 'absolute', pointerEvents: 'none', zIndex: 4,
+                  left: `calc(${b.left * 100}% - 3px)`, top: `calc(${b.top * 100}% - 3px)`,
+                  width: `calc(${b.width * 100}% + 6px)`, height: `calc(${b.height * 100}% + 6px)`,
+                  border: '2px solid #ff00b4', boxSizing: 'border-box',
+                }}
+              >
+                <span
+                  style={{
+                    position: 'absolute', left: -2, bottom: '100%', marginBottom: 1,
+                    fontFamily: FONT_STACK, fontSize: 11, fontWeight: 700, lineHeight: 1,
+                    color: '#ff00b4', textShadow: '0 0 2px #fff, 0 0 2px #fff',
+                  }}
+                >
+                  {b.region}
+                </span>
+              </div>
+            ))}
           </div>
 
           {/* Hover readout — the same x/y + w/h the selection badge shows, for whatever

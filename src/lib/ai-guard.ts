@@ -1,4 +1,5 @@
-// Shared request validation for the two AI proxies, /api/claude and /api/kimi.
+// Shared request validation for the AI proxies, /api/claude and /api/kimi (and, for its
+// model and image-size checks, /api/svg-text).
 //
 // Both routes inject a server-side API key and forward to a paid upstream, and neither
 // can be authenticated: production lets anyone drop an SVG and run a Customise pass, so
@@ -10,7 +11,7 @@
 // per-IP throttle in server/index.mjs and the global daily budget beside it bound that.
 // This bounds what each call can be *made to do*:
 //
-//   • the model is one of the two the client actually asks for, not opus-with-thinking
+//   • the model is one the client actually asks for (see ALLOWED_MODELS)
 //   • max_tokens is capped, so a single call can't bill a 64k completion
 //   • exactly one user turn with at most one image, so it can't be used as a chat
 //     endpoint or to batch a hundred images through on one request
@@ -21,10 +22,11 @@
 // added here on purpose; the failure mode of forgetting is a 400 during development, not
 // an open endpoint in production.
 
-// The model ids the client hardcodes at its call sites (svg-drop-zone.web.tsx). Kimi
+// The model ids the client hardcodes at its call sites (svg-drop-zone.web.tsx), plus
+// OPUS_MODEL (editor-types.ts), which the model dropdown can swap in for all of them. Kimi
 // ignores the incoming model and pins its own, but it is validated the same way so the
 // two routes can't drift into accepting different bodies.
-const ALLOWED_MODELS = new Set(['claude-sonnet-5', 'claude-sonnet-4-6']);
+const ALLOWED_MODELS = new Set(['claude-sonnet-5', 'claude-sonnet-4-6', 'claude-opus-5-5']);
 
 // The largest budget any call site asks for is 8192 (the customise and strip-text
 // passes). Headroom over that, but nowhere near a model's ceiling.
@@ -33,7 +35,7 @@ const MAX_TOKENS_CAP = 12_000;
 // One canvas render as base64 PNG. Caddy caps the whole body at 10MB; this is the same
 // bound expressed where the dev server can also see it, since Caddy isn't in front of
 // `expo start`.
-const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
+export const MAX_IMAGE_BYTES = 8 * 1024 * 1024;
 
 // The prompts are built client-side, and the two that matter — the customise and
 // strip-text passes — embed the ENTIRE SVG source in the prompt (`contentXml` /
@@ -81,10 +83,15 @@ const fail = (message: string): GuardResult => ({ ok: false, message });
 
 // base64 decodes to 3 bytes per 4 chars, minus padding. Measuring the encoded length
 // avoids decoding several megabytes just to find out it is too big.
-const base64Bytes = (data: string): number => {
+export const base64Bytes = (data: string): number => {
   const padding = data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0;
   return Math.floor((data.length * 3) / 4) - padding;
 };
+
+// For routes that build their own upstream body (/api/svg-text) but still let the
+// client pick among the same models.
+export const isAllowedModel = (model: unknown): model is string =>
+  typeof model === 'string' && ALLOWED_MODELS.has(model);
 
 export function guardAiRequest(raw: unknown): GuardResult {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {

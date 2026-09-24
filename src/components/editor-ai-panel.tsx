@@ -5,7 +5,7 @@ import {
 } from '@/lib/design-tokens';
 import { useT } from '@/i18n/provider';
 import type {
-  AiActionType, AiBundle, FontBundle, LlmProvider, TaxonomyBundle,
+  AiActionType, AiBundle, FontBundle, LlmProvider, TaxonomyBundle, TextDetectMethod,
 } from './editor-types';
 import { ChevronIcon, CloseIcon, SparklesIcon } from './svg-icons';
 
@@ -162,6 +162,7 @@ export const CustomiseButton = React.memo(function CustomiseButton({
 export const AiPanel = React.memo(function AiPanel({
   open, onClose,
   llmProvider, llmOptions, onSelectLlmProvider,
+  textDetectMethod, textDetectOptions, onSelectTextDetectMethod,
   ai, fonts, taxonomy,
   selectedLayer, backgroundLayerId,
   onRunAiAction, onApplyFontGlobally, onUseSuggestedFont, onRunTaxonomy,
@@ -171,6 +172,9 @@ export const AiPanel = React.memo(function AiPanel({
   llmProvider: LlmProvider;
   llmOptions: ReadonlyArray<{ value: LlmProvider; label: string }>;
   onSelectLlmProvider: (provider: LlmProvider) => void;
+  textDetectMethod: TextDetectMethod;
+  textDetectOptions: ReadonlyArray<{ value: TextDetectMethod; labelKey: string }>;
+  onSelectTextDetectMethod: (method: TextDetectMethod) => void;
   ai: AiBundle;
   fonts: FontBundle;
   taxonomy: TaxonomyBundle;
@@ -237,6 +241,22 @@ export const AiPanel = React.memo(function AiPanel({
         >
           {llmOptions.map((o) => (
             <option key={o.value} value={o.value}>{o.label}</option>
+          ))}
+        </select>
+      </div>
+
+      {/* Text detection — which call the Customise pass uses to find the text */}
+      <div style={{ padding: '0 14px 12px' }}>
+        <label style={labelStyle}>{t('ai.textDetect')}</label>
+        <select
+          className="ed-input"
+          value={textDetectMethod}
+          disabled={busy}
+          onChange={(e) => onSelectTextDetectMethod(e.target.value as TextDetectMethod)}
+          style={{ ...inputStyle, cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.5 : 1 }}
+        >
+          {textDetectOptions.map((o) => (
+            <option key={o.value} value={o.value}>{t(o.labelKey)}</option>
           ))}
         </select>
       </div>
