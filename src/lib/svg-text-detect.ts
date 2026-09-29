@@ -24,6 +24,11 @@ const SHAPES = 'path,rect,circle,ellipse,polygon,polyline,text';
 // space is usually 0.25–0.35.
 const WORD_GAP_FRAC = 0.24;
 
+// Overlapping shapes only count as faces of one letter when their bboxes are of similar
+// area. An extruded letter's face and side measure 1.0–1.5× each other; a monogram inside
+// its shield frame is 4–30×, and joining those swallows the letter into the ornament.
+const MAX_OVERLAP_AREA_RATIO = 3;
+
 type BBox = [number, number, number, number]; // x0, y0, x1, y1 in render px
 
 type Collected = {
@@ -31,6 +36,7 @@ type Collected = {
   kind: 'text' | 'path';
   bbox: BBox;
   fill: string;
+  paint: string;             // fill as compared when clustering — see paintKey
   classes: string[];
   layerId: string | null;
   group: string;             // xpath of the SVG group the shape clusters within
@@ -116,6 +122,28 @@ function toHex(color: string): string {
   return '#' + m.slice(1, 4).map((v) => Number(v).toString(16).padStart(2, '0')).join('');
 }
 
+// Illustrator gives every object its own gradient, so nine identical gold letters carry
+// nine different url(#…) fills and never count as the same colour (vectorstock_23517236's
+// LUXURIOUS). Gradients are compared by their stops instead, following href to the
+// gradient that actually holds them.
+function paintKey(fill: string, svg: SVGSVGElement): string {
+  let id = fill.match(/^url\(["']?#([^"')]+)/)?.[1];
+  if (!id) return toHex(fill);
+  for (let hops = 0; id && hops < 5; hops++) {
+    const grad: Element | null = svg.querySelector(`[id="${CSS.escape(id)}"]`);
+    if (!grad) break;
+    const stops = Array.from(grad.querySelectorAll('stop'));
+    if (stops.length) {
+      return 'gradient(' + stops.map((s) => {
+        const cs = getComputedStyle(s);
+        return `${toHex(cs.stopColor)} ${s.getAttribute('offset') ?? 0} ${cs.stopOpacity}`;
+      }).join(', ') + ')';
+    }
+    id = (grad.getAttribute('href') ?? grad.getAttribute('xlink:href'))?.replace(/^#/, '');
+  }
+  return fill;
+}
+
 // ---------- 2. Collect elements with pixel bboxes + computed styles ----------
 function collect(svg: SVGSVGElement, layerIds: Set<string>): Collected[] {
   const origin = svg.getBoundingClientRect();
@@ -131,6 +159,7 @@ function collect(svg: SVGSVGElement, layerIds: Set<string>): Collected[] {
       kind: isText ? 'text' : 'path',
       bbox: [r.left - origin.left, r.top - origin.top, r.right - origin.left, r.bottom - origin.top],
       fill: toHex(cs.fill),
+      paint: paintKey(cs.fill, svg),
       classes: Array.from(el.classList),
       layerId: layerIdOf(el, svg, layerIds),
       group: xpathOf(groupOf(el, svg), svg),
@@ -150,17 +179,38 @@ const unionBox = (els: Collected[]): BBox => [
 // Two glyphs belong to one region when they sit in the same SVG group and either
 //   • share a fill and sit side by side on a line (the original test: overlapping
 //     vertically by half the shorter one, with a gap under gapFactor × the taller), or
-//   • overlap each other — the faces of one extruded letter, whatever their colours.
+//   • overlap each other and are of similar size — the faces of one extruded letter,
+//     whatever their colours (see MAX_OVERLAP_AREA_RATIO).
 // Staying inside a group is what the reference does: it keeps a contact icon out of the
 // line of text beside it, and keeps the pieces of a logo letter together.
 //
 // Pairwise with union-find rather than the original's single pass, which dropped each
 // glyph into the first cluster it touched and never joined two clusters afterwards — so
 // the result depended on visiting order, and "LOGONAME" came out as LOG / ON / AME.
-function clusterGlyphs(paths: Collected[], canvasH: number, maxGlyphFrac = 0.25, gapFactor = 0.8): Collected[][] {
+//
+// maxGlyphFrac drops shapes too tall to be a glyph — backgrounds, frames. It was 0.25,
+// which silently threw out poster headlines: the BEER letters on vectorstock_1432338
+// are 0.34–0.36 of the canvas height and never reached clustering.
+function clusterGlyphs(paths: Collected[], canvasH: number, maxGlyphFrac = 0.5, gapFactor = 0.8): Collected[][] {
   const glyphs = paths.filter((p) => { const h = p.bbox[3] - p.bbox[1]; return h > 0 && h < canvasH * maxGlyphFrac; });
   const parent = glyphs.map((_, i) => i);
   const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+
+  // On one line and side by side, not one inside the other: neighbouring letters barely
+  // overlap horizontally, while a word set on a same-colour banner or a monogram inside
+  // its ring lies wholly within the ornament's span (vectorstock_4505328). Nor flat: no
+  // glyph, and not even a long word outlined as one path (~6.5:1), is FLAT_RATIO× wider
+  // than tall, but the mirrored halves of vectorstock_1993268's card shadow are ~15×.
+  const FLAT_RATIO = 8;
+  const beside = (a: BBox, b: BBox) => {
+    const ah = a[3] - a[1], bh = b[3] - b[1];
+    if (a[2] - a[0] > FLAT_RATIO * ah || b[2] - b[0] > FLAT_RATIO * bh) return false;
+    const vOverlap = Math.min(a[3], b[3]) - Math.max(a[1], b[1]);
+    const hOverlap = Math.min(a[2], b[2]) - Math.max(a[0], b[0]);
+    if (hOverlap >= 0.5 * Math.min(a[2] - a[0], b[2] - b[0])) return false;
+    const hGap = Math.max(a[0] - b[2], b[0] - a[2], 0);
+    return vOverlap > 0.5 * Math.min(ah, bh) && hGap < gapFactor * Math.max(ah, bh);
+  };
 
   const joins = (a: Collected, b: Collected) => {
     const [ax0, ay0, ax1, ay1] = a.bbox, [bx0, by0, bx1, by1] = b.bbox;
@@ -168,11 +218,11 @@ function clusterGlyphs(paths: Collected[], canvasH: number, maxGlyphFrac = 0.25,
     const vOverlap = Math.min(ay1, by1) - Math.max(ay0, by0);
     const hOverlap = Math.min(ax1, bx1) - Math.max(ax0, bx0);
     if (vOverlap > 0 && hOverlap > 0) {
-      const minArea = Math.min((ax1 - ax0) * ah, (bx1 - bx0) * bh);
-      if (hOverlap * vOverlap > 0.3 * minArea) return true;
+      const aArea = (ax1 - ax0) * ah, bArea = (bx1 - bx0) * bh;
+      const minArea = Math.min(aArea, bArea);
+      if (hOverlap * vOverlap > 0.3 * minArea && Math.max(aArea, bArea) <= MAX_OVERLAP_AREA_RATIO * minArea) return true;
     }
-    const hGap = Math.max(ax0 - bx1, bx0 - ax1, 0);
-    return a.fill === b.fill && vOverlap > 0.5 * Math.min(ah, bh) && hGap < gapFactor * Math.max(ah, bh);
+    return a.paint === b.paint && beside(a.bbox, b.bbox);
   };
 
   const byGroup = new Map<string, number[]>();
@@ -181,6 +231,30 @@ function clusterGlyphs(paths: Collected[], canvasH: number, maxGlyphFrac = 0.25,
     for (let x = 0; x < idx.length; x++) {
       for (let y = x + 1; y < idx.length; y++) {
         if (joins(glyphs[idx[x]], glyphs[idx[y]])) parent[find(idx[x])] = find(idx[y]);
+      }
+    }
+  }
+
+  // A group that came out as one glyph — each letter in its own <g>, face and extrusion
+  // together (vectorstock_1432338's BEER) — never meets the letters beside it above. Such
+  // groups are joined with their sibling one-glyph groups when they share a colour and sit
+  // side by side. Only with each other: a lone shape directly in the parent is as likely
+  // a monogram as a letter, and the scrolls either side of vectorstock_4505328's P are
+  // one-glyph groups too. Never across the root, which would join across layers.
+  const byParent = new Map<string, { root: number; bbox: BBox; paints: Set<string> }[]>();
+  for (const [group, idx] of byGroup) {
+    const up = group.replace(/\/\*\[\d+\]$/, '');
+    if (up === group || up === '/*' || new Set(idx.map(find)).size !== 1) continue;
+    const els = idx.map((i) => glyphs[i]);
+    byParent.set(up, [...(byParent.get(up) ?? []), {
+      root: find(idx[0]), bbox: unionBox(els), paints: new Set(els.map((e) => e.paint)),
+    }]);
+  }
+  for (const cs of byParent.values()) {
+    for (let x = 0; x < cs.length; x++) {
+      for (let y = x + 1; y < cs.length; y++) {
+        const a = cs[x], b = cs[y];
+        if ([...a.paints].some((p) => b.paints.has(p)) && beside(a.bbox, b.bbox)) parent[find(a.root)] = find(b.root);
       }
     }
   }
