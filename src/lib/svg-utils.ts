@@ -2438,15 +2438,20 @@ export function detectBackgroundLayerId(content: string, layers: SvgLayer[]): st
   // Case 1: the layer element itself is a background shape
   if (coversCanvas(el)) return candidate.id;
 
-  // Case 2: the layer is a group whose first few children include a background shape
-  const children = Array.from(el.children).filter(
-    (c) => !['defs', 'title', 'desc'].includes(c.localName.toLowerCase())
-  );
-  if (children.length > 0 && children.length <= 6 && children.some(coversCanvas)) return candidate.id;
+  // A group is only the canvas when the backdrop is ALL it draws. A bottom layer that
+  // also carries artwork on top of its backdrop (vectorstock_956069's "sky background"
+  // holds the sun) is ordinary artwork: flagging it would lock the sun along with the sky.
+  const drawn = Array.from(el.querySelectorAll(DRAWABLE_SELECTOR));
+  if (drawn.length === 0) return null;
+
+  // Case 2: the layer is a group of background shapes and nothing else
+  if (drawn.every(coversCanvas)) return candidate.id;
 
   // Case 3: measure it. Real-world assets (the vectorstock downloads especially) draw
   // their backdrop as a <path> or <polygon>, whose coverage can't be read off plain
-  // attributes — so fall back to a bbox measurement of the bottom layer.
+  // attributes — so fall back to a bbox measurement of the bottom layer. Only for a
+  // single mark: a group's bbox covers the canvas as soon as its artwork is spread out.
+  if (drawn.length > 1) return null;
   try {
     if (isFullCanvasLayer(root, candidate.id, canvasW, canvasH)) return candidate.id;
   } catch {
