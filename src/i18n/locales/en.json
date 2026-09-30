@@ -95,6 +95,7 @@
     "copySuffix": "%{label} copy"
   },
   "canvas": {
+    "replaceRegionWithText": "Replace with editable text",
     "beta": "Beta",
     "rotateHandle": "Drag to rotate (hold Shift to snap to 15°)",
     "moveHandle": "Drag to move",

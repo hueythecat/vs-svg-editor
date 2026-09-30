@@ -107,8 +107,11 @@ export const TEXT_DETECT_OPTIONS: Array<{ value: TextDetectMethod; labelKey: str
 ];
 
 // One region from a DOM-regions text-detection run, as fractions (0–1) of the viewBox so
-// the canvas can place it on the board at any size.
-export type RegionBox = { region: number; left: number; top: number; width: number; height: number };
+// the canvas can place it on the board at any size. `replaceable` regions — the ones the
+// model read as text — get a dot that swaps the artwork for an editable field.
+export type RegionBox = {
+  region: number; left: number; top: number; width: number; height: number; replaceable: boolean;
+};
 
 type TextForm = {
   content: string; font: string; size: number; weight: number;

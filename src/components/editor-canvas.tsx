@@ -50,7 +50,7 @@ export const CanvasStage = React.memo(function CanvasStage({
   onCanvasClick, onCanvasMouseDown, onCanvasDoubleClick, onCanvasMouseMove, onCanvasMouseLeave,
   aiLoading, aiStatusMsg,
   isLoading, activeSvg,
-  hiddenLayers, previewIds, previewOutlineId, regionBoxes, backgroundLayerId,
+  hiddenLayers, previewIds, previewOutlineId, regionBoxes, onRegionDotClick, backgroundLayerId,
   showSelectionOverlay, selectionIsEmptyText,
   onEmptyTextClick,
   editingTextId, textEditorRef, editingStyle, onInlineTextInput, onEndInlineEdit,
@@ -80,6 +80,7 @@ export const CanvasStage = React.memo(function CanvasStage({
   // Regions the last text-detection run returned (the DOM-regions debug pass), boxed and
   // numbered in the magenta of the annotated render the model was shown.
   regionBoxes: RegionBox[];
+  onRegionDotClick: (region: number) => void;
   backgroundLayerId: string | null;
   showSelectionOverlay: boolean;
   selectionIsEmptyText: boolean;
@@ -268,6 +269,22 @@ export const CanvasStage = React.memo(function CanvasStage({
                 >
                   {b.region}
                 </span>
+                {/* Swap this region's artwork for an editable text field. Its own events
+                    stop here: the canvas under it would otherwise select or start a drag. */}
+                {b.replaceable && (
+                  <div
+                    role="button"
+                    title={t('canvas.replaceRegionWithText')}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    onDoubleClick={(e) => e.stopPropagation()}
+                    onClick={(e) => { e.stopPropagation(); onRegionDotClick(b.region); }}
+                    style={{
+                      position: 'absolute', right: -9, top: -9, width: 14, height: 14,
+                      borderRadius: 7, background: '#ff00b4', border: '2px solid #fff',
+                      boxShadow: SHADOW.handle, cursor: 'pointer', pointerEvents: 'auto',
+                    }}
+                  />
+                )}
               </div>
             ))}
           </div>

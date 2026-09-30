@@ -42,12 +42,14 @@ Candidate regions:
 ${JSON.stringify(brief)}
 
 For EVERY numbered region, look at it in both images and describe it. Return JSON only, no markdown, in exactly this shape:
-{"regions":[{"region":1,"is_text":true,"text_content":"…","font_weight":"light|regular|medium|bold|black","italic":false,"font_category":"sans|serif|script|display|mono|handwritten","font_guess":"short description of the typeface, e.g. Geometric sans (Gotham / Montserrat style)","effects":["…"],"role":"logo|headline|subheading|tagline|body|placeholder|decorative","replaceable":true,"confidence":0.0,"words":[{"text_content":"…","font_weight":"…"}]}]}
+{"regions":[{"region":1,"is_text":true,"text_content":"…","font_weight":"light|regular|medium|bold|black","italic":false,"font_category":"sans|serif|script|display|mono|handwritten","font_guess":"short description of the typeface, e.g. Geometric sans (Gotham / Montserrat style)","google_font":"Montserrat","google_font_weight":700,"color":"#1a2b3c","effects":["…"],"role":"logo|headline|subheading|tagline|body|placeholder|decorative","replaceable":true,"confidence":0.0,"words":[{"text_content":"…","font_weight":"…"}]}]}
 
 Rules:
 - One entry per numbered region, using its number. Do not add regions that are not boxed.
 - A letter or monogram used as a logo mark — however it is styled, extruded or drawn — IS text: is_text true, text_content the letter(s), role "logo". Only pictures and symbols (icons, arrows, ornaments) are not text.
-- text_content is exactly what the region reads, with its case. When is_text is false, text_content is "" and add "note" naming what the region is (e.g. "phone handset icon"); it still gets role (usually "decorative"), replaceable and confidence; omit italic, font_guess, effects and words.
+- text_content is exactly what the region reads, with its case. When is_text is false, text_content is "" and add "note" naming what the region is (e.g. "phone handset icon"); it still gets role (usually "decorative"), replaceable and confidence; omit italic, font_guess, google_font, google_font_weight, color, effects and words.
+- google_font is the Google Fonts family (fonts.google.com) whose letterforms are the nearest match to the region's lettering — its exact family name as Google lists it, never a commercial font. google_font_weight is the nearest weight (100–900) that family actually offers.
+- color is the hex colour of the letters' main face — the front face of extruded or shadowed lettering, not its side, shadow or outline.
 - For live_text, trust the render over svg_text if they disagree.
 - effects lists visible styling: all caps, 3D extrusion, outline, shadow, gradient, arc, mixed weights, and so on; [] when plain.
 - role "placeholder" is template filler text (lorem ipsum, 1234-5678, example emails/URLs); replaceable is whether a user would want to retype it — true for names, contact details, placeholders and logo lettering (people swap in their own initial or brand), false for icons and ornaments.

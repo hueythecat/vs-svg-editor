@@ -96,3 +96,29 @@ export const setIgnoreCanCustomise = (on: boolean): void => {
     storage()?.setItem(IGNORE_CAN_CUSTOMISE_KEY, on ? '1' : '0');
   } catch { /* preference is best-effort */ }
 };
+
+// Hide the boxes of detected regions the model read as NOT text — icons, ornaments,
+// nails — so a DOM-regions debug run shows only the text regions and their dots.
+//
+// Defaults ON: the text regions and their dots are what a run is usually looked at
+// for. Turn it off to see every region the model was shown — that is how a clustering
+// problem gets spotted. Unlike the flags above this one changes what the
+// canvas draws, so the editor mirrors it in state; the rail tells it when it flips.
+const HIDE_NON_TEXT_REGIONS_KEY = 'svg-editor:hide-non-text-regions';
+
+let hideNonTextRegions: boolean | null = null;
+
+export const isHideNonTextRegions = (): boolean => {
+  if (IS_PRODUCTION_UI) return false;
+  if (hideNonTextRegions === null) {
+    hideNonTextRegions = storage()?.getItem(HIDE_NON_TEXT_REGIONS_KEY) !== '0';   // absent ⇒ on
+  }
+  return hideNonTextRegions;
+};
+
+export const setHideNonTextRegions = (on: boolean): void => {
+  hideNonTextRegions = on;
+  try {
+    storage()?.setItem(HIDE_NON_TEXT_REGIONS_KEY, on ? '1' : '0');
+  } catch { /* preference is best-effort */ }
+};

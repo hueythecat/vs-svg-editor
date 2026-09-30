@@ -50,13 +50,15 @@ import { readAiCache, writeAiCache } from '@/lib/ai-cache';
 // shared instance's locale during render, so the two never disagree.
 import { t } from '@/i18n';
 import { useT } from '@/i18n/provider';
-import { isIgnoreCanCustomise, isIgnoreCooldownPrompt, isIgnoreHasCustomised } from '@/lib/dev-flags';
+import {
+  isHideNonTextRegions, isIgnoreCanCustomise, isIgnoreCooldownPrompt, isIgnoreHasCustomised, setHideNonTextRegions,
+} from '@/lib/dev-flags';
 import type {
   AiActionType, CustomiseBundle, DocBundle, LlmProvider, RegionBox, RemovedRecord, TextDetectMethod,
   TextLayerAttrs,
 } from './editor-types';
 import { LLM_OPTIONS, OPUS_MODEL, TEXT_DETECT_OPTIONS } from './editor-types';
-import { detectSvgText } from '@/lib/svg-text-detect';
+import { detectSvgText, type DetectedTextRegion } from '@/lib/svg-text-detect';
 import { EditorControlPanel, type ControlTab } from './editor-control-panel';
 import { AiPanel } from './editor-ai-panel';
 import { ExportPill } from './editor-export-pill';
@@ -790,6 +792,19 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   // The regions the last DOM-regions run returned, boxed and numbered on the canvas like
   // the annotated render the model saw. Debug only: cleared on the next run or a new file.
   const [textDetectBoxes, setTextDetectBoxes] = useState<RegionBox[]>(NO_REGION_BOXES);
+  // The last detection run's regions, for the canvas dots that replace one with text.
+  const detectedRegionsRef = useRef<{ regions: DetectedTextRegion[]; hidden: Set<string> } | null>(null);
+  // Dev rail flag: box only the regions the model read as text. Persisted in dev-flags;
+  // mirrored here because it changes what the canvas draws.
+  const [hideNonTextRegions, setHideNonTextRegionsState] = useState(() => isHideNonTextRegions());
+  const onSetHideNonTextRegions = useCallback((on: boolean) => {
+    setHideNonTextRegions(on);
+    setHideNonTextRegionsState(on);
+  }, []);
+  const visibleRegionBoxes = useMemo(
+    () => (hideNonTextRegions ? textDetectBoxes.filter((b) => b.replaceable) : textDetectBoxes),
+    [textDetectBoxes, hideNonTextRegions],
+  );
   const llmEndpoint = () => (llmProviderRef.current === 'kimi' ? '/api/kimi' : '/api/claude');
   // Log label. /api/kimi discards the model id we send and pins its own, so naming a
   // Claude model while Kimi is running would be a lie — say who actually answered.
@@ -3052,6 +3067,15 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
           model: TEXT_DETECT_MODEL, effort: TEXT_DETECT_EFFORT, layers: activeSvg.layers,
         });
         console.log('[text-detect] result:\n' + JSON.stringify(regions, null, 2));
+        // Kept with the hidden set the detection ran against: region xpaths address the
+        // document with those elements removed (svgWithoutHidden above).
+        detectedRegionsRef.current = { regions, hidden: new Set(hiddenLayers) };
+        // Fetched now so a dot click can measure in the matched face without waiting.
+        for (const r of regions) {
+          if (r.is_text === true && typeof r.google_font === 'string' && r.google_font) {
+            loadGoogleFontLink(r.google_font, Number(r.google_font_weight) || undefined);
+          }
+        }
         // bbox is in the SVG's user units; the board is the viewBox stretched to fit, so
         // fractions of the viewBox place each box on it at any zoom.
         const vb = parseViewBox(new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml').documentElement);
@@ -3061,6 +3085,7 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
             region: r.region,
             left: (x0 - vb.x) / vb.w, top: (y0 - vb.y) / vb.h,
             width: (x1 - x0) / vb.w, height: (y1 - y0) / vb.h,
+            replaceable: r.is_text === true && typeof r.text_content === 'string' && r.text_content.trim() !== '',
           };
         }));
       } catch (err) {
@@ -3356,6 +3381,107 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
       setAiStatusMsg(t('status.thinking'));
     }
   }, [activeSvg, addGoogleFont, loadGoogleFontLink, snapshotForUndo, notifyCustomised, cooldownActive]);
+
+  // ── Replace one detected region with editable text (canvas dot) ───────────
+  //
+  // The same take-and-replace the customise pass does, for one region the DOM-regions
+  // run found: its shapes are measured, then hidden (recoverable from the dev panel, and
+  // undoable), and a <text> set in the region's nearest Google Font is placed on the
+  // measured geometry and opened for typing.
+  const replaceDetectedRegion = useCallback(async (regionNum: number) => {
+    const run = detectedRegionsRef.current;
+    const region = run?.regions.find((r) => r.region === regionNum);
+    if (!activeSvg || !run || !region || typeof region.text_content !== 'string') return;
+
+    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+    const root = doc.documentElement;
+    // Region xpaths address the document the detection saw, which had the then-hidden
+    // elements removed, so each step counts only the children that were still there.
+    const resolve = (xpath: string): Element | null => {
+      let el: Element | null = root;
+      for (const m of xpath.replace(/^\/\*/, '').matchAll(/\/\*\[(\d+)\]/g)) {
+        const kids: Element[] = Array.from(el!.children).filter((c) => !(c.id && run.hidden.has(c.id)));
+        el = kids[Number(m[1]) - 1] ?? null;
+        if (!el) return null;
+      }
+      return el;
+    };
+    const idMap = new Map<string, Element>();
+    region.xpaths.forEach((xp, i) => {
+      const el = resolve(xp);
+      if (el && !(el.id && hiddenLayers.has(el.id))) {
+        el.setAttribute('data-ai-idx', `td${i}`);
+        idMap.set(`td${i}`, el);
+      }
+    });
+    if (idMap.size === 0) {
+      console.warn(`[text-detect] region ${regionNum}: none of its shapes are in the document any more`);
+      return;
+    }
+    const sids = [...idMap.keys()];
+
+    // The model's nearest Google Font, in the weight it named. A family Google does not
+    // serve falls back to a Google Font of the same category, so the field never renders
+    // in the browser's default face.
+    const WEIGHTS: Record<string, number> = { light: 300, regular: 400, medium: 500, bold: 700, black: 900 };
+    const FALLBACK: Record<string, string> = {
+      sans: 'Inter', serif: 'Lora', script: 'Dancing Script', display: 'Bebas Neue', mono: 'Roboto Mono', handwritten: 'Caveat',
+    };
+    const weight = Number(region.google_font_weight) || WEIGHTS[String(region.font_weight)] || 400;
+    const fallback = FALLBACK[String(region.font_category)] ?? 'Inter';
+    let font = typeof region.google_font === 'string' && region.google_font ? region.google_font : fallback;
+    const color = typeof region.color === 'string' && /^#[0-9a-f]{3,8}$/i.test(region.color)
+      ? region.color
+      : /^#[0-9a-f]{3,8}$/i.test(region.fill) ? region.fill : '#000000';
+
+    const vb = parseViewBox(root);
+    const [x0, y0, x1, y1] = region.bbox;
+    const row: TextRow = {
+      // Estimates only: the measured anchors below replace them.
+      yFraction: ((y0 + y1) / 2 - vb.y) / vb.h, xFraction: ((x0 + x1) / 2 - vb.x) / vb.w,
+      leftFraction: (x0 - vb.x) / vb.w, rightFraction: (x1 - vb.x) / vb.w,
+      sizeFraction: (y1 - y0) / vb.h,
+      font, weight, color, content: region.text_content, letterSpacing: 0, removeIds: sids,
+    };
+    addUsedFont(font, weight);
+    await ensureRowFontsReady([row]);
+    if (font !== fallback && !document.fonts.check(`${weight} 16px "${font}"`)) {
+      console.log(`[text-detect] region ${regionNum}: "${font}" is not a Google Font it could load — using ${fallback}`);
+      font = fallback;
+      row.font = fallback;
+      addUsedFont(fallback, weight);
+      await ensureRowFontsReady([row]);
+    }
+
+    snapshotForUndo(activeSvg.content, activeSvg.layers);
+    // Measured before anything is hidden: this is the geometry the field is placed from.
+    const anchors = measureRemovedTextBoxes(root, sids);
+    const outlines = sampleRemovedLettering(root, sids);
+    const hidden = hideRemovedElements(idMap, sids, [row], anchors, hiddenLayers, 'text-detect');
+    for (const el of idMap.values()) el.removeAttribute('data-ai-idx');
+    const newTextLayers = appendTextRowLayers(doc, [row], vb, undefined, anchors, outlines);
+    console.log(`[text-detect] region ${regionNum} → "${row.content}" in ${font} ${weight}, ${sids.length} shape(s) hidden`);
+
+    const content = new XMLSerializer().serializeToString(root);
+    const kept = pruneMissingLayers(doc, activeSvg.layers);
+    setActiveSvg((prev) => (prev ? { ...prev, content, layers: [...kept, ...newTextLayers] } : null));
+    registerRemoved(hidden);
+    setTextDetectBoxes((prev) => prev.filter((b) => b.region !== regionNum));
+    const added = newTextLayers[0];
+    if (added) {
+      // selectOne, not setSelectedLayer: the overlay (and the editor inside it) is driven
+      // by the selection set, which setSelectedLayer alone leaves empty.
+      selectOne(added.id);
+      // Straight into typing, unless the field came out curved — those have no flat box
+      // to type in, and the Text tab edits them instead (same rule as a canvas click).
+      // A frame later, not with the selection: the editor lives inside the selection
+      // overlay, which only exists once the new layer has rendered selected, and the
+      // effect that focuses it runs once per edit — too early and it finds no node,
+      // leaving the glyphs hidden with nothing standing in for them.
+      const curved = Number(doc.getElementById(added.id)?.getAttribute('data-curve') ?? '0') !== 0;
+      if (!curved) requestAnimationFrame(() => requestAnimationFrame(() => setEditingTextId(added.id)));
+    }
+  }, [activeSvg, hiddenLayers, addUsedFont, snapshotForUndo, registerRemoved, selectOne]);
 
   const applyFontGlobally = useCallback((fontName: string) => {
     if (!activeSvg) return;
@@ -4416,7 +4542,8 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
             hiddenLayers={hiddenLayers}
             previewIds={previewIds}
             previewOutlineId={previewRemovedId ?? peekedLayerId}
-            regionBoxes={textDetectBoxes}
+            regionBoxes={visibleRegionBoxes}
+            onRegionDotClick={replaceDetectedRegion}
             backgroundLayerId={backgroundLayerId}
             showSelectionOverlay={showSelectionOverlay}
             showSizeBadge={gestureActive}
@@ -4584,6 +4711,8 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
           onOpenFetched={openSample}
           onOpenReviewUuid={openReviewUuid}
           onReviewListLoaded={onReviewListLoaded}
+          hideNonTextRegions={hideNonTextRegions}
+          onSetHideNonTextRegions={onSetHideNonTextRegions}
         />
       )}
 

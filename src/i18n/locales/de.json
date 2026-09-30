@@ -95,6 +95,7 @@
     "copySuffix": "%{label} Kopie"
   },
   "canvas": {
+    "replaceRegionWithText": "Durch bearbeitbaren Text ersetzen",
     "beta": "Beta",
     "rotateHandle": "Zum Drehen ziehen (Umschalt halten für 15°-Schritte)",
     "moveHandle": "Zum Verschieben ziehen",

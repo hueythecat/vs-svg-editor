@@ -79,11 +79,15 @@ interface DevRailProps<S extends Sample> {
   // customised_at across rows that aren't cancelled. One value for every asset, since
   // customising one puts them all on cooldown.
   onReviewListLoaded?: (info: { lastCustomised: number | null; cooldownHours: number }) => void;
+  // Hide the text-detection boxes of regions the model read as not text. Owned by the
+  // editor, which draws the boxes; the rail only flips it.
+  hideNonTextRegions: boolean;
+  onSetHideNonTextRegions: (on: boolean) => void;
 }
 
 export function DevRail<S extends Sample>({
   samples, activeSample, isLoading, open, onSetOpen, onOpenSample, onOpenFetched,
-  onOpenReviewUuid, onReviewListLoaded,
+  onOpenReviewUuid, onReviewListLoaded, hideNonTextRegions, onSetHideNonTextRegions,
 }: DevRailProps<S>) {
   const [selectedDownload, setSelectedDownload] = useState<string>('');
   const [reviewList, setReviewList] = useState<ReviewListItem[]>([]);
@@ -518,6 +522,22 @@ export function DevRail<S extends Sample>({
                 style={{ accentColor: C.accent, width: 12, height: 12, margin: 0, cursor: 'pointer', flex: 'none' }}
               />
               Ignore can_customise
+            </label>
+
+            <label
+              title="Text detection: box only the regions read as text, not icons and ornaments"
+              style={{
+                display: 'flex', alignItems: 'center', gap: 7, marginTop: 7,
+                fontSize: 10, color: C.devTextMuted, cursor: 'pointer', userSelect: 'none',
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={hideNonTextRegions}
+                onChange={(e) => onSetHideNonTextRegions(e.target.checked)}
+                style={{ accentColor: C.accent, width: 12, height: 12, margin: 0, cursor: 'pointer', flex: 'none' }}
+              />
+              Hide non-text region borders
             </label>
           </div>
 
