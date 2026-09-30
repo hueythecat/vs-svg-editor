@@ -22,39 +22,44 @@ const MAX_TOKENS = 8192;
 // more than any real artwork's text, and it keeps the brief (and the answer) bounded.
 const MAX_REGIONS = 150;
 const MAX_SVG_TEXT = 2000;
+// Image-level font suggestions asked for alongside the regions. The client sends
+// FONT_SUGGESTION_LIMIT; this bounds what any caller can make the answer carry.
+const MAX_FONT_SUGGESTIONS = 20;
 
 type BriefRegion = {
-  region: number; source: string; fill: string; glyph_paths?: number; word_count?: number; svg_text?: string;
+  region: number; source: string; fill: string; glyph_paths?: number; subpaths?: number; word_count?: number; svg_text?: string;
 };
 
 const bad = (message: string, status = 400) => Response.json({ error: { message } }, { status });
 
-const PROMPT = (brief: BriefRegion[]) => `You are given two renders of the same vector artwork.
+const PROMPT = (brief: BriefRegion[], fontCount: number) => `You are given two renders of the same vector artwork.
 
 Image 1 is the artwork as-is. Image 2 is the same artwork with numbered magenta boxes drawn around candidate regions. The boxes and numbers are annotations, not part of the artwork.
 
 The candidates were found by measuring the SVG, not by reading it:
 - "live_text": a real <text> element; svg_text is its content in the file.
 - "outlined_paths": same-coloured shapes laid out like glyphs. It may be lettering converted to outlines, or an icon, decoration or texture.
-glyph_paths is how many shapes the region holds.
+glyph_paths is how many shapes the region holds, and subpaths how many separate outlines those shapes draw. One shape can hold a whole word or several lines of lettering, so glyph_paths 1 does not mean a single letter — read what is inside the box.
 
 Candidate regions:
 ${JSON.stringify(brief)}
 
 For EVERY numbered region, look at it in both images and describe it. Return JSON only, no markdown, in exactly this shape:
-{"regions":[{"region":1,"is_text":true,"text_content":"…","font_weight":"light|regular|medium|bold|black","italic":false,"font_category":"sans|serif|script|display|mono|handwritten","font_guess":"short description of the typeface, e.g. Geometric sans (Gotham / Montserrat style)","google_font":"Montserrat","google_font_weight":700,"color":"#1a2b3c","effects":["…"],"role":"logo|headline|subheading|tagline|body|placeholder|decorative","replaceable":true,"confidence":0.0,"words":[{"text_content":"…","font_weight":"…"}]}]}
+{"regions":[{"region":1,"is_text":true,"text_content":"…","font_weight":"light|regular|medium|bold|black","italic":false,"font_category":"sans|serif|script|display|mono|handwritten","font_guess":"short description of the typeface, e.g. Geometric sans (Gotham / Montserrat style)","google_font":"Montserrat","google_font_weight":700,"color":"#1a2b3c","effects":["…"],"role":"logo|headline|subheading|tagline|body|placeholder|decorative","replaceable":true,"confidence":0.0,"words":[{"text_content":"…","font_weight":"…"}]}]${fontCount > 0 ? ',"fonts":["…"]' : ''}}
 
 Rules:
 - One entry per numbered region, using its number. Do not add regions that are not boxed.
 - A letter or monogram used as a logo mark — however it is styled, extruded or drawn — IS text: is_text true, text_content the letter(s), role "logo". Only pictures and symbols (icons, arrows, ornaments) are not text.
-- text_content is exactly what the region reads, with its case. When is_text is false, text_content is "" and add "note" naming what the region is (e.g. "phone handset icon"); it still gets role (usually "decorative"), replaceable and confidence; omit italic, font_guess, google_font, google_font_weight, color, effects and words.
+- text_content is exactly what the region reads, with its case.
+- A region that is NOT text gets the short form and nothing else: {"region":7,"is_text":false,"note":"phone icon"} — note names it in at most three words. Artwork can have a hundred such regions, so keep them to that.
 - google_font is the Google Fonts family (fonts.google.com) whose letterforms are the nearest match to the region's lettering — its exact family name as Google lists it, never a commercial font. google_font_weight is the nearest weight (100–900) that family actually offers.
 - color is the hex colour of the letters' main face — the front face of extruded or shadowed lettering, not its side, shadow or outline.
 - For live_text, trust the render over svg_text if they disagree.
 - effects lists visible styling: all caps, 3D extrusion, outline, shadow, gradient, arc, mixed weights, and so on; [] when plain.
 - role "placeholder" is template filler text (lorem ipsum, 1234-5678, example emails/URLs); replaceable is whether a user would want to retype it — true for names, contact details, placeholders and logo lettering (people swap in their own initial or brand), false for icons and ornaments.
 - words: include ONLY when the words of the region differ in weight or style — one entry per word, in reading order. Otherwise omit it. When words is present, the region's own font_weight is the first word's.
-- confidence is 0–1 for is_text and the reading together.`;
+- confidence is 0–1 for is_text and the reading together.${fontCount > 0 ? `
+- fonts: ${fontCount} Google Fonts families (exact names as Google lists them) that suit the style, mood and colour palette of the whole design — alternatives someone customising it might switch the text to. Names only, no duplicates.` : ''}`;
 
 // The model sometimes wraps its JSON in a ```json fence despite being told not to.
 const extractJson = (raw: string): string => {
@@ -91,6 +96,12 @@ export async function POST(request: Request): Promise<Response> {
     return bad('effort must be low, medium or high');
   }
 
+  // How many image-level Google Font suggestions to ask for; absent asks for none.
+  const fontCount = body.font_suggestions ?? 0;
+  if (typeof fontCount !== 'number' || !Number.isInteger(fontCount) || fontCount < 0 || fontCount > MAX_FONT_SUGGESTIONS) {
+    return bad(`font_suggestions must be a whole number from 0 to ${MAX_FONT_SUGGESTIONS}`);
+  }
+
   for (const key of ['clean', 'annotated'] as const) {
     const img = body[key];
     if (!validImage(img)) return bad(`${key} must be a base64 PNG`);
@@ -107,7 +118,7 @@ export async function POST(request: Request): Promise<Response> {
     if (r.source !== 'live_text' && r.source !== 'outlined_paths') return bad('Unknown region source');
     if (typeof r.fill !== 'string' || r.fill.length > 64) return bad('Each region needs a fill');
     const out: BriefRegion = { region: r.region, source: r.source, fill: r.fill };
-    for (const key of ['glyph_paths', 'word_count'] as const) {
+    for (const key of ['glyph_paths', 'subpaths', 'word_count'] as const) {
       const v = r[key];
       if (v === undefined) continue;
       if (typeof v !== 'number' || !Number.isInteger(v) || v < 0 || v > 10_000) return bad(`${key} must be a count`);
@@ -136,7 +147,7 @@ export async function POST(request: Request): Promise<Response> {
         content: [
           { type: 'image', source: { type: 'base64', media_type: 'image/png', data: body.clean } },
           { type: 'image', source: { type: 'base64', media_type: 'image/png', data: body.annotated } },
-          { type: 'text', text: PROMPT(brief) },
+          { type: 'text', text: PROMPT(brief, fontCount) },
         ],
       }],
     }),
@@ -152,11 +163,22 @@ export async function POST(request: Request): Promise<Response> {
     model?: string; content?: Array<{ type: string; text?: string }>; stop_reason?: string; usage?: unknown;
   };
   const answer = data.content?.find((b) => b.type === 'text')?.text ?? '';
+  // Cut off at the token ceiling: the JSON is unfinished, and saying "unparseable" hides
+  // the cause. Busy artwork does this — every candidate region costs answer tokens.
+  if (data.stop_reason === 'max_tokens') {
+    console.log(`[svg-text] answer cut off at max_tokens (${MAX_TOKENS}) with ${brief.length} regions`);
+    return bad(`Answer cut off at the ${MAX_TOKENS}-token limit — ${brief.length} regions is more than one call can describe`, 502);
+  }
   try {
-    const parsed = JSON.parse(extractJson(answer)) as { regions?: unknown };
+    const parsed = JSON.parse(extractJson(answer)) as { regions?: unknown; fonts?: unknown };
     if (!Array.isArray(parsed.regions)) throw new Error('no regions array');
+    // Capped as well as asked for: the model is not bound by the number in the prompt.
+    const fonts = Array.isArray(parsed.fonts)
+      ? [...new Set(parsed.fonts.filter((f): f is string => typeof f === 'string' && f.trim() !== '').map((f) => f.trim()))]
+          .slice(0, fontCount)
+      : [];
     // usage alongside the regions so a debug run can price itself; the client ignores it.
-    return Response.json({ regions: parsed.regions, model: data.model, usage: data.usage });
+    return Response.json({ regions: parsed.regions, fonts, model: data.model, usage: data.usage });
   } catch (err) {
     console.log('[svg-text] unparseable answer:', data.stop_reason, answer.slice(0, 500));
     return bad(`Model returned unparseable JSON (${(err as Error).message}, stop_reason ${data.stop_reason})`, 502);

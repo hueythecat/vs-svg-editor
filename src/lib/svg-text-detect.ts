@@ -29,6 +29,17 @@ const WORD_GAP_FRAC = 0.24;
 // its shield frame is 4–30×, and joining those swallows the letter into the ornament.
 const MAX_OVERLAP_AREA_RATIO = 3;
 
+// Subpaths a lone path needs to pass for a whole line of outlined lettering — see the
+// end of clusterGlyphs.
+const LINE_MIN_SUBPATHS = 4;
+
+// Lone shapes a layer may contribute on the strength of sharing it with real text — see
+// the end of clusterGlyphs.
+const LONE_PER_LAYER_MAX = 15;
+
+// The most regions one call can carry: /api/svg-text refuses more (its MAX_REGIONS).
+const MAX_REGIONS = 150;
+
 type BBox = [number, number, number, number]; // x0, y0, x1, y1 in render px
 
 type Collected = {
@@ -37,6 +48,7 @@ type Collected = {
   bbox: BBox;
   fill: string;
   paint: string;             // fill as compared when clustering — see paintKey
+  subpaths: number;          // moveto commands in a <path>'s d — one per letter part
   classes: string[];
   layerId: string | null;
   group: string;             // xpath of the SVG group the shape clusters within
@@ -160,6 +172,7 @@ function collect(svg: SVGSVGElement, layerIds: Set<string>): Collected[] {
       bbox: [r.left - origin.left, r.top - origin.top, r.right - origin.left, r.bottom - origin.top],
       fill: toHex(cs.fill),
       paint: paintKey(cs.fill, svg),
+      subpaths: (el.getAttribute('d')?.match(/[Mm]/g) ?? []).length || 1,
       classes: Array.from(el.classList),
       layerId: layerIdOf(el, svg, layerIds),
       group: xpathOf(groupOf(el, svg), svg),
@@ -269,8 +282,31 @@ function clusterGlyphs(paths: Collected[], canvasH: number, maxGlyphFrac = 0.5, 
 
   // The original kept clusters of 2+; a lone shape is kept too when it sits in the same
   // layer as a real cluster, which is how the reference picks up the contact icons.
+  //
+  // Or when it looks like a line of lettering outlined as ONE path: several subpaths (a
+  // letter and each of its holes is one) in a strip at least twice as wide as tall.
+  // vectorstock_34038068's COMPANY NAME and TAGLINE HERE are that, alone in their own
+  // layer, and were dropped while the fish beside them was kept. A single glyph fails the
+  // width test and a plain shape the subpath one.
+  //
+  // The layer rule stops at LONE_PER_LAYER_MAX. Text artwork puts a handful of lone shapes
+  // beside its lettering (≤ 11 across the samples); an illustration layer holds dozens to
+  // thousands — every landmass of vectorstock_1032105's globe, every piece of
+  // vectorstock_20430206's cats — and sending them all made the answer too long to finish
+  // (or the request too big to accept). Past the cap a layer's lone shapes are not text
+  // candidates at all, except the ones that look like an outlined line.
   const textLayers = new Set(list.filter((c) => c.length >= 2).map((c) => c[0].layerId));
-  return list.filter((c) => c.length >= 2 || (c[0].layerId !== null && textLayers.has(c[0].layerId)));
+  const outlinedLine = (e: Collected) =>
+    e.subpaths >= LINE_MIN_SUBPATHS && e.bbox[2] - e.bbox[0] >= 2 * (e.bbox[3] - e.bbox[1]);
+  const byLayerRule = (c: Collected[]) => c[0].layerId !== null && textLayers.has(c[0].layerId);
+  const lonePerLayer = new Map<string | null, number>();
+  for (const c of list) {
+    if (c.length === 1 && !outlinedLine(c[0]) && byLayerRule(c)) {
+      lonePerLayer.set(c[0].layerId, (lonePerLayer.get(c[0].layerId) ?? 0) + 1);
+    }
+  }
+  return list.filter((c) => c.length >= 2 || outlinedLine(c[0])
+    || (byLayerRule(c) && (lonePerLayer.get(c[0].layerId) ?? 0) <= LONE_PER_LAYER_MAX));
 }
 
 // The fill most of a region's shapes carry — the purple of an extruded letter's sides
@@ -335,25 +371,39 @@ async function renderPngs(svg: SVGSVGElement, regions: Region[]): Promise<{ clea
 // thinks; the route defaults to Sonnet 5 at low effort when they are omitted.
 export async function detectSvgText(
   svgString: string,
-  opts: { layers?: LayerRef[]; model?: string; effort?: 'low' | 'medium' | 'high' } = {},
-): Promise<DetectedTextRegion[]> {
+  opts: { layers?: LayerRef[]; model?: string; effort?: 'low' | 'medium' | 'high'; fontSuggestions?: number } = {},
+): Promise<{ regions: DetectedTextRegion[]; fonts: string[] }> {
   const layers = opts.layers ?? [];
   const layerLabel = new Map(layers.map((l) => [l.id, l.label]));
   const { host, svg } = mountSvg(svgString);
   try {
     const els = collect(svg, new Set(layerLabel.keys()));
-    const regions: Region[] = [
+    let candidates = [
       ...els.filter((e) => e.kind === 'text').map((e) => ({
         els: [e], bbox: e.bbox, fill: e.fill, source: 'live_text' as const, svgText: e.text,
       })),
       ...clusterGlyphs(els.filter((e) => e.kind === 'path'), svg.height.baseVal.value)
         .map((c) => ({ els: c, bbox: unionBox(c), fill: mainFill(c), source: 'outlined_paths' as const })),
-    ].map((r, i) => ({ ...r, region: i + 1 }));
-    if (!regions.length) return [];
+    ];
+    // Still more than one call can carry (a busy illustration whose clusters are real
+    // pairs): keep the likeliest text — live <text>, then the clusters with the most
+    // glyphs — rather than have the route refuse the lot. Reading order is kept.
+    if (candidates.length > MAX_REGIONS) {
+      console.warn(`[text-detect] ${candidates.length} candidate regions; sending the ${MAX_REGIONS} likeliest to be text`);
+      const keep = new Set(
+        candidates.map((c, i) => ({ i, live: c.source === 'live_text', n: c.els.length }))
+          .sort((a, b) => Number(b.live) - Number(a.live) || b.n - a.n || a.i - b.i)
+          .slice(0, MAX_REGIONS).map((c) => c.i),
+      );
+      candidates = candidates.filter((_, i) => keep.has(i));
+    }
+    const regions: Region[] = candidates.map((r, i) => ({ ...r, region: i + 1 }));
+    if (!regions.length) return { regions: [], fonts: [] };
 
     const images = await renderPngs(svg, regions);
     const brief = regions.map((r) => ({
       region: r.region, source: r.source, fill: r.fill, glyph_paths: r.els.length,
+      subpaths: r.els.reduce((n, e) => n + e.subpaths, 0),
       ...(r.svgText ? { svg_text: r.svgText } : {}),
     }));
 
@@ -362,10 +412,13 @@ export async function detectSvgText(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model: opts.model, effort: opts.effort, clean: images.clean, annotated: images.annotated, regions: brief,
+        font_suggestions: opts.fontSuggestions,
       }),
     });
     if (!resp.ok) throw new Error(`Text detection failed: ${resp.status} ${await resp.text()}`);
-    const { regions: judged } = await resp.json() as { regions: Array<{ region: number } & Record<string, unknown>> };
+    const { regions: judged, fonts } = await resp.json() as {
+      regions: Array<{ region: number } & Record<string, unknown>>; fonts?: string[];
+    };
 
     // Render px → the SVG's own user units, which is what the reference reports.
     const vb = svg.viewBox.baseVal;
@@ -375,8 +428,11 @@ export async function detectSvgText(
 
     // Merge: exact facts from the DOM + the model's reading/style
     const byNum = Object.fromEntries(judged.map((j) => [j.region, j]));
-    return regions.map((r) => {
+    const merged = regions.map((r) => {
       const { region: _region, words: modelWords, ...m } = byNum[r.region] ?? ({} as Record<string, unknown>);
+      // Non-text regions come back in a short form (see the route's prompt); the fields
+      // it leaves out are the same for all of them, so they are filled in here.
+      if (m.is_text === false) Object.assign(m, { text_content: '', role: 'decorative', replaceable: false, ...m });
       const layerId = r.els[0].layerId;
       const out: DetectedTextRegion = {
         region: r.region,
@@ -403,6 +459,7 @@ export async function detectSvgText(
       }
       return out;
     });
+    return { regions: merged, fonts: Array.isArray(fonts) ? fonts : [] };
   } finally {
     host.remove();
   }

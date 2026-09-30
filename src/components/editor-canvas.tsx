@@ -1,10 +1,10 @@
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 
 import type { ActiveSvg } from '@/lib/svg-utils';
 import type { RegionBox } from './editor-types';
 import { C, MONO_STACK, SHADOW, FONT_STACK, checkerStyle } from '@/lib/design-tokens';
 import { useT } from '@/i18n/provider';
-import { MoveIcon, ResizeIcon, RotateIcon, SparklesIcon } from './svg-icons';
+import { MoveIcon, ResizeIcon, RotateIcon } from './svg-icons';
 
 // The canvas stage (handoff §1.1–1.3): a full-bleed, flex-centred area holding the
 // white board, plus the selection / drag / rotate / scale overlay. Memoised and fed
@@ -44,6 +44,43 @@ const handleBase: React.CSSProperties = {
   pointerEvents: 'all',
   boxShadow: SHADOW.handle,
 };
+
+// Veil over the canvas while an AI pass runs: a spinner, the pass's current status and
+// the seconds since it started. Its own component so the once-a-second tick re-renders
+// this and nothing else; mounting with the pass is what starts the count from zero.
+function AiLoadingOverlay({ message }: { message: string }) {
+  const [seconds, setSeconds] = useState(0);
+  useEffect(() => {
+    const started = Date.now();
+    const id = setInterval(() => setSeconds(Math.floor((Date.now() - started) / 1000)), 250);
+    return () => clearInterval(id);
+  }, []);
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      style={{
+        position: 'absolute', inset: 0, zIndex: 10,
+        display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+        background: 'rgba(238,240,243,.72)', backdropFilter: 'blur(2px)',
+        fontFamily: FONT_STACK,
+      }}
+    >
+      <span
+        aria-hidden
+        style={{
+          width: 34, height: 34, borderRadius: '50%',
+          border: `3px solid ${C.borderInput}`, borderTopColor: C.accent,
+          animation: 'ed-spin .8s linear infinite',
+        }}
+      />
+      <span style={{ marginTop: 14, fontSize: 13, color: C.textSecondary }}>
+        {message}{' '}
+        <span style={{ fontVariantNumeric: 'tabular-nums', color: C.textMuted }}>{seconds}s</span>
+      </span>
+    </div>
+  );
+}
 
 export const CanvasStage = React.memo(function CanvasStage({
   svgCanvasRef, overlayRef, sizeBadgeRef, showSizeBadge, hoverBadgeRef,
@@ -165,19 +202,7 @@ export const CanvasStage = React.memo(function CanvasStage({
         {t('canvas.beta')}
       </span>
 
-      {aiLoading && (
-        <div
-          style={{
-            position: 'absolute', inset: 0, zIndex: 10,
-            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-            background: 'rgba(238,240,243,.72)', backdropFilter: 'blur(2px)',
-            fontFamily: FONT_STACK,
-          }}
-        >
-          <span style={{ color: C.accent, display: 'flex' }}><SparklesIcon size={34} /></span>
-          <span style={{ marginTop: 12, fontSize: 13, color: C.textSecondary }}>{aiStatusMsg}</span>
-        </div>
-      )}
+      {aiLoading && <AiLoadingOverlay message={aiStatusMsg} />}
 
       {isLoading && !activeSvg ? (
         <div

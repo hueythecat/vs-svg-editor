@@ -3063,10 +3063,18 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
       setTextDetectBoxes(NO_REGION_BOXES);
       try {
         console.log('[text-detect] invoking /api/svg-text:', TEXT_DETECT_MODEL, `effort ${TEXT_DETECT_EFFORT}`);
-        const regions = await detectSvgText(svgWithoutHidden(activeSvg.content, hiddenLayers), {
+        const { regions, fonts } = await detectSvgText(svgWithoutHidden(activeSvg.content, hiddenLayers), {
           model: TEXT_DETECT_MODEL, effort: TEXT_DETECT_EFFORT, layers: activeSvg.layers,
+          fontSuggestions: FONT_SUGGESTION_LIMIT,
         });
         console.log('[text-detect] result:\n' + JSON.stringify(regions, null, 2));
+        console.log(`[text-detect] ${fonts.length} font suggestion(s): ${fonts.join(', ')}`);
+        // Image-level suggestions, handled as the customise pass handles its own: listed
+        // in the inspector's Font list and the AI panel, and the first becomes the default
+        // for text added afterwards — never written onto fields that already exist.
+        fonts.forEach((f) => addGoogleFont(f));
+        setCustomiseFonts(fonts);
+        if (fonts[0]) setTextForm((f) => ({ ...f, font: fonts[0] }));
         // Kept with the hidden set the detection ran against: region xpaths address the
         // document with those elements removed (svgWithoutHidden above).
         detectedRegionsRef.current = { regions, hidden: new Set(hiddenLayers) };
