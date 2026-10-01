@@ -248,6 +248,51 @@ function expandWrappedLayers(roots: Element[]): Element[] {
   return level;
 }
 
+// A bottom layer that is a backdrop WITH artwork on it (vectorstock_956069's "sky
+// background" holds a full-size rect, a ring and the sun) can't be the Canvas — that
+// would lock the sun — but treating the whole thing as artwork leaves the sky draggable.
+// So the backdrop is moved out into a layer of its own, directly beneath, which
+// detectBackgroundLayerId then flags as the Canvas on its own merits.
+//
+// Only the bottom-most shape is a candidate: a full-size shape higher up the group is
+// drawn over artwork and isn't a backdrop. The new group is a sibling of the old one, not
+// a child of the root, so any wrapper transforms above it still apply, and it copies the
+// old group's own attributes (transform, class, fill, opacity, clip-path) so the backdrop
+// renders exactly as it did. A filter, mask, group opacity or blend mode is the
+// exception: each composites the group as one image, so splitting it would change how the
+// backdrop and the art over it blend (two 80% groups are not one 80% group), and that
+// layer is left whole.
+const CANVAS_LAYER_PREFIX = '_canvas_';
+const SPLIT_KEEP_ATTRS = new Set(['id', 'data-name', 'inkscape:label']);
+const COMPOSITING_ATTRS = ['filter', 'mask', 'opacity', 'mix-blend-mode'];
+
+function splitBackdrop(roots: Element[]): Element[] {
+  const bottom = roots[0];
+  if (!bottom || bottom.localName.toLowerCase() !== 'g') return roots;
+  if (COMPOSITING_ATTRS.some((a) => bottom.hasAttribute(a))) return roots;
+  if (new RegExp(`(^|;)\\s*(${COMPOSITING_ATTRS.join('|')})\\s*:`).test(bottom.getAttribute('style') ?? '')) return roots;
+
+  const kids = layerChildren(bottom);
+  if (kids.length < 2) return roots;
+  const root = bottom.ownerDocument.documentElement;
+  const canvas = canvasSize(root);
+  if (!canvas) return roots;
+  const isBackdrop = (node: Element) => isBackdropShape(root, node, canvas[0], canvas[1]);
+  if (!isBackdrop(kids[0])) return roots;
+  // Nothing but backdrops — already a Canvas layer as it stands.
+  if (kids.every(isBackdrop)) return roots;
+
+  const wrapper = bottom.ownerDocument.createElementNS(bottom.namespaceURI, 'g');
+  for (const attr of Array.from(bottom.attributes)) {
+    if (!SPLIT_KEEP_ATTRS.has(attr.name)) wrapper.setAttributeNS(attr.namespaceURI, attr.name, attr.value);
+  }
+  wrapper.id = `${CANVAS_LAYER_PREFIX}0`;
+  bottom.parentNode?.insertBefore(wrapper, bottom);
+  wrapper.appendChild(kids[0]);
+  console.log(`[layers] split backdrop <${kids[0].localName}> out of ${bottom.id || 'bottom layer'} into Canvas`);
+  return [wrapper, ...roots];
+}
+
 export function parseSvg(raw: string): { content: string; layers: SvgLayer[] } {
   try {
     const doc = new DOMParser().parseFromString(raw, 'image/svg+xml');
@@ -261,11 +306,13 @@ export function parseSvg(raw: string): { content: string; layers: SvgLayer[] } {
     // regression, not a fix.
     let roots = layerChildren(svg);
     if (roots.length <= 1) roots = expandWrappedLayers(roots);
+    roots = splitBackdrop(roots);
 
     roots.forEach((child, i) => {
       if (!child.id) child.id = `_layer_${i}`;
 
       const label =
+        (child.id.startsWith(CANVAS_LAYER_PREFIX) ? t('layers.canvas') : null) ||
         child.getAttribute('data-name')?.trim() ||
         child.getAttribute('inkscape:label')?.trim() ||
         (!isSyntheticLayerId(child.id) ? child.id : null) ||
@@ -294,9 +341,10 @@ export function parseSvg(raw: string): { content: string; layers: SvgLayer[] } {
 // document because the AI passes hide rather than delete — meant a group opened into its
 // parts listed eight raw ids. The prefixes are the ones minted by parseSvg (`_layer_`),
 // expandLayer (`_sub_`), collapseLayer (`_grp_`), appendTextRowLayers (`_text_`),
-// hideRemovedElements (`_hidden_`) and duplicateLayer (`_layer_copy_`).
+// hideRemovedElements (`_hidden_`), duplicateLayer (`_layer_copy_`) and splitBackdrop
+// (`_canvas_`).
 export const isSyntheticLayerId = (id: string | null | undefined): boolean =>
-  !!id && /^_(layer|sub|grp|text|hidden|layer_copy)_/.test(id);
+  !!id && /^_(layer|sub|grp|text|hidden|layer_copy|canvas)_/.test(id);
 
 // Returns the element's bounding box in SVG root coordinate space,
 // correctly accounting for the element's own transform attribute.
@@ -2404,6 +2452,41 @@ export const isFullCanvasLayer = (
 // Deliberately attribute-based (no layout): it runs on a parsed string before anything
 // is in the DOM, unlike isFullCanvasLayer above which measures a live bbox.
 const BACKGROUND_MIN_AREA = 0.75; // ≥75% of the viewBox area ⇒ a background shape
+
+// Whether a basic shape covers the canvas, read straight off its geometry attributes.
+// Paths and polygons can't be judged this way — see isBackdropShape.
+function coversByAttributes(node: Element, viewBoxArea: number): boolean {
+  const tag = node.localName.toLowerCase();
+  const num = (name: string) => parseFloat(node.getAttribute(name) ?? '0');
+  let area = 0;
+  if (tag === 'rect') area = num('width') * num('height');
+  else if (tag === 'circle') area = Math.PI * num('r') ** 2;
+  else if (tag === 'ellipse') area = Math.PI * num('rx') * num('ry');
+  return area >= viewBoxArea * BACKGROUND_MIN_AREA;
+}
+
+// Whether one element is a backdrop: a single shape covering the canvas. Basic shapes are
+// read off their attributes; a <path> or <polygon> backdrop (common in the vectorstock
+// files) is measured, which needs a live DOM — without one it simply isn't a backdrop.
+const MEASURED_BACKDROP_TAGS = new Set(['path', 'polygon']);
+const BACKDROP_PROBE = 'data-backdrop-probe';
+function isBackdropShape(root: Element, node: Element, canvasW: number, canvasH: number): boolean {
+  if (coversByAttributes(node, canvasW * canvasH)) return true;
+  if (!MEASURED_BACKDROP_TAGS.has(node.localName.toLowerCase())) return false;
+  node.setAttribute(BACKDROP_PROBE, '');
+  try {
+    return withOffscreenSvg(root, (measureSvg) => {
+      const el = measureSvg.querySelector(`[${BACKDROP_PROBE}]`) as SVGGraphicsElement | null;
+      if (!el || typeof el.getBBox !== 'function') return false;
+      const b = el.getBBox();
+      return b.width >= FULL_CANVAS_MIN * canvasW && b.height >= FULL_CANVAS_MIN * canvasH;
+    });
+  } catch {
+    return false;
+  } finally {
+    node.removeAttribute(BACKDROP_PROBE);
+  }
+}
 export function detectBackgroundLayerId(content: string, layers: SvgLayer[]): string | null {
   if (layers.length === 0) return null;
   const candidate = layers[0];
@@ -2416,24 +2499,7 @@ export function detectBackgroundLayerId(content: string, layers: SvgLayer[]): st
   const el = doc.getElementById(candidate.id);
   if (!el) return null;
 
-  const coversCanvas = (node: Element): boolean => {
-    const tag = node.localName.toLowerCase();
-    if (tag === 'rect') {
-      const w = parseFloat(node.getAttribute('width') ?? '0');
-      const h = parseFloat(node.getAttribute('height') ?? '0');
-      return w * h >= viewBoxArea * BACKGROUND_MIN_AREA;
-    }
-    if (tag === 'circle') {
-      const r = parseFloat(node.getAttribute('r') ?? '0');
-      return Math.PI * r * r >= viewBoxArea * BACKGROUND_MIN_AREA;
-    }
-    if (tag === 'ellipse') {
-      const rx = parseFloat(node.getAttribute('rx') ?? '0');
-      const ry = parseFloat(node.getAttribute('ry') ?? '0');
-      return Math.PI * rx * ry >= viewBoxArea * BACKGROUND_MIN_AREA;
-    }
-    return false;
-  };
+  const coversCanvas = (node: Element) => coversByAttributes(node, viewBoxArea);
 
   // Case 1: the layer element itself is a background shape
   if (coversCanvas(el)) return candidate.id;
