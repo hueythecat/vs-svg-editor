@@ -358,6 +358,9 @@ export const CanvasStage = React.memo(function CanvasStage({
                   frame is padded with, so it lands on the glyphs rather than the frame. */}
               {editingTextId && (
                 <div
+                  // One node per field: a contentEditable keeps whatever was typed into
+                  // it, so a node carried over from the last field would show its words.
+                  key={editingTextId}
                   ref={textEditorRef}
                   contentEditable
                   suppressContentEditableWarning

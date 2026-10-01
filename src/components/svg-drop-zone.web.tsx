@@ -91,6 +91,12 @@ type SampleName = (typeof SAMPLES)[number]['name'];
 const isEditableTextField = (el: Element) =>
   el.getAttribute('data-text-layer') === '1' || el.id.startsWith('_text_');
 
+// The panel tab a layer picked ON THE CANVAS brings up: the type form for text, the
+// Layers list (with its row highlighted) for anything else. Same test selectedTextProps
+// uses to decide the Text tab has something to edit, so the two can't disagree.
+const canvasTabFor = (el: Element): ControlTab =>
+  el.getAttribute('data-text-layer') === '1' || el.tagName.toLowerCase() === 'text' ? 'text' : 'layers';
+
 // Reasons offered when a one-star rating leads the user to abandon the export
 // (handoff §4). Multi-select — any number can apply.
 //
@@ -1545,6 +1551,10 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
           return;   // building a selection, not editing — never steal focus to the text input
         }
         selectOne(id);
+        // A canvas click always shows the tab for what was clicked, even from Layers —
+        // the same click must not do different things depending on a tab you can't see
+        // from the artwork. Re-clicking the current selection counts too.
+        setControlTab(canvasTabFor(el));
         // Clicking a text layer used to pull focus into the panel's Words field, so that
         // typing went somewhere. Inline editing is that, done properly — and the focus
         // grab actively broke it, landing on the rAF after this click and blurring the
@@ -2179,8 +2189,9 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
 
     const layerIds = new Set(activeSvg.layers.map((l) => l.id));
     let hitId: string | null = null;
+    let hitEl: Element | null = null;
     for (let el = e.target as Element | null; el && el !== (svgEl as Element); el = el.parentElement) {
-      if (layerIds.has(el.id)) { hitId = el.id; break; }
+      if (layerIds.has(el.id)) { hitId = el.id; hitEl = el; break; }
     }
     if (!hitId || hitId === backgroundLayerId) return;
 
@@ -2188,6 +2199,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       beginLayerDrag(e, selectionIds);
     } else {
       selectOne(hitId);
+      setControlTab(canvasTabFor(hitEl!));
       beginLayerDrag(e, [hitId]);
     }
   }, [activeSvg, backgroundLayerId, selectedLayers, selectionIds, selectOne, beginLayerDrag]);
@@ -2324,16 +2336,17 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   const selectedTextPropsRef = useRef(selectedTextProps);
   useEffect(() => { selectedTextPropsRef.current = selectedTextProps; });
 
-  // The control panel follows the selection: picking text on the canvas brings up the
-  // type form, picking artwork or the background brings up the colours. The Layers tab
-  // is the exception and stays put — it is a list you work down, and having it flip away
-  // under you on every row you select would make it unusable. Read as a functional
-  // update so the current tab is not itself a dependency; otherwise the effect would
-  // re-fire (and fight the user) on every manual tab change.
+  // Selections made anywhere but the canvas — a row in the Layers list, a duplicate, an
+  // AI pass handing back new text — follow the selection too, except that Layers stays
+  // put: it is a list you work down, and having it flip away under you on every row you
+  // select would make it unusable. Canvas clicks set the tab themselves (canvasTabFor) and
+  // always win, which is why this rule can't trap a canvas click on Layers.
+  // Read as a functional update so the current tab is not itself a dependency; otherwise
+  // the effect would re-fire (and fight the user) on every manual tab change.
   const selectionIsText = !!selectedTextProps;
   useEffect(() => {
     if (!selectedLayer) return;
-    setControlTab((cur) => (cur === 'layers' ? cur : selectionIsText ? 'text' : 'tools'));
+    setControlTab((cur) => (cur === 'layers' ? cur : selectionIsText ? 'text' : 'layers'));
   }, [selectedLayer, selectionIsText]);
 
   // The layers panel gives each row one line. A multi-line field's newlines would break
@@ -2533,20 +2546,30 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   // Push the current text in and select it, so the first keypress replaces the word —
   // which is what double-clicking a word is asking for. Runs on entry only; after that
   // the node is the user's to type in.
+  //
+  // The text comes from THIS render's selection, checked against the id being edited —
+  // not from selectedTextPropsRef, which is only brought up to date by a passive effect
+  // and so can still hold the previous field's words when this runs. And it re-runs when
+  // the overlay appears: the editor lives inside it, and the canvas dot opens editing a
+  // couple of frames after making the field, which on a heavy file can be before the
+  // overlay has rendered. Keyed on the id alone, that early run found no node and never
+  // came back, so the editor mounted empty (or, reusing the last node, showing the last
+  // field's words) over glyphs it had already hidden.
   useLayoutEffect(() => {
     if (!editingTextId) return;
     const node = textEditorRef.current;
     if (!node) return;
-    node.textContent = selectedTextPropsRef.current?.content ?? '';
+    node.textContent = selectedLayer === editingTextId ? selectedTextProps?.content ?? '' : '';
     node.focus();
     const range = document.createRange();
     range.selectNodeContents(node);
     const sel = window.getSelection();
     sel?.removeAllRanges();
     sel?.addRange(range);
-    // Deliberately keyed on the id alone: re-running as the content changes would
+    // Deliberately not keyed on the content or selection: re-running as they change would
     // re-select everything mid-typing.
-  }, [editingTextId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editingTextId, showSelectionOverlay]);
 
   const endInlineEdit = useCallback(() => {
     setEditingTextId(null);
@@ -3053,6 +3076,10 @@ Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"bri
         return;
       }
     }
+    // The pass works on the whole artwork, not the selection, and rewrites layers under
+    // it — so drop the selection (and any inline edit, which follows it) rather than leave
+    // handles framing something that may be about to be hidden or replaced.
+    selectOne(null);
     // The new detection call (src/lib/svg-text-detect.ts). Debug-only for now: it runs
     // the call and logs the merged result, and applies nothing — so no undo snapshot.
     if (textDetectMethodRef.current === 'dom-regions') {
@@ -3388,7 +3415,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
       setAiLoading(false);
       setAiStatusMsg(t('status.thinking'));
     }
-  }, [activeSvg, addGoogleFont, loadGoogleFontLink, snapshotForUndo, notifyCustomised, cooldownActive]);
+  }, [activeSvg, addGoogleFont, loadGoogleFontLink, snapshotForUndo, notifyCustomised, cooldownActive, selectOne]);
 
   // ── Replace one detected region with editable text (canvas dot) ───────────
   //
