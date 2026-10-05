@@ -1,5 +1,5 @@
 import type { TaxonomyGroup } from '@/lib/svg-utils';
-import type { Dispatch, RefObject, SetStateAction } from 'react';
+import type { Dispatch, SetStateAction } from 'react';
 
 // Shared prop bundles for the editor panels. These used to live in layers-panel.tsx,
 // which was the single docked right-hand panel; the design splits that panel into a
@@ -113,16 +113,6 @@ export type RegionBox = {
   region: number; left: number; top: number; width: number; height: number; replaceable: boolean;
 };
 
-type TextForm = {
-  content: string; font: string; size: number; weight: number;
-  color: string; curve: number; letterSpacing: number;
-};
-
-export interface TextBundle {
-  form: TextForm;
-  setForm: Dispatch<SetStateAction<TextForm>>;
-}
-
 export interface AiBundle {
   loading: boolean;
   error: string | null;
@@ -136,18 +126,8 @@ export interface AiBundle {
   setTextCheckResult: Dispatch<SetStateAction<{ heading: string; subheading: string } | null>>;
 }
 
-export interface ColorBundle {
-  from: string;
-  to: string;
-  setTo: Dispatch<SetStateAction<string>>;
-  layerColors: string[];
-  baselineRef: RefObject<string | null>;
-}
-
 export interface FontBundle {
   extra: string[];
-  imageFonts: Array<{ font: string; reason: string }> | null;
-  imageFontsLoading: boolean;
   customiseFonts: string[];
   customiseLoading: boolean;
   customiseDone: boolean;

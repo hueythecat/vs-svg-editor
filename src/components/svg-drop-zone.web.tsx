@@ -7,39 +7,27 @@ import {
   type TextRow,
   appendTextRowLayers,
   applyTranslateDelta,
-  bboxInRootSpace,
-  collectLayerGradientIds,
+  unionBoxInRootSpace,
   computeArcPath,
   measureTextAdvance,
   detectBackgroundLayerId,
-  extractLayerColors,
   filterOutBackgroundIds,
   hashString,
   isFullCanvasLayer,
   isPlainWhiteLayer,
-  isSyntheticLayerId,
   measureRemovedTextBoxes,
   sampleRemovedLettering,
-  normalizeColor,
   parseSvg,
   parseViewBox,
   extractDesign,
   pruneMissingLayers,
-  resolveGradient,
   stripScripts,
   svgToBase64Png,
-  sampleElementInkColors,
   backgroundFillColor,
-  declaresOwnFill,
-  effectiveFill,
-  PAINTABLE_TAGS,
   canExpandLayer,
   expansionTarget,
   collapsibleParent,
-  withOffscreenSvg,
   setTextLines,
-  setTextX,
-  textLines
 } from '@/lib/svg-utils';
 import { C, EDITOR_CSS, FONT_STACK, SHADOW } from '@/lib/design-tokens';
 import { FONT_SUGGESTION_LIMIT, SHOW_DEV_UI } from '@/lib/env';
@@ -51,7 +39,7 @@ import { readAiCache, writeAiCache } from '@/lib/ai-cache';
 import { t } from '@/i18n';
 import { useT } from '@/i18n/provider';
 import {
-  isHideNonTextRegions, isIgnoreCanCustomise, isIgnoreCooldownPrompt, isIgnoreHasCustomised, setHideNonTextRegions,
+  isHideNonTextRegions, isIgnoreCooldownPrompt, setHideNonTextRegions,
 } from '@/lib/dev-flags';
 import type {
   AiActionType, CustomiseBundle, DocBundle, LlmProvider, RegionBox, RemovedRecord, TextDetectMethod,
@@ -64,10 +52,22 @@ import { AiPanel } from './editor-ai-panel';
 import { ExportPill } from './editor-export-pill';
 import { DevRail, SAMPLE_DRAG_MIME } from './dev-rail';
 import { DevRemovedPanel } from './dev-removed-panel';
-import type { OpenedSample } from './dev-rail';
 import { UpsellModal, CooldownModal, RatingModal, AbortReasonModal, ConfirmModal } from './editor-modals';
 import { CanvasStage } from './editor-canvas';
-import { FontSuggestions } from './editor-font-suggestions';
+import { useArrangeActions } from '@/hooks/use-arrange-actions';
+import { useColorReplace } from '@/hooks/use-color-replace';
+import { useGoogleFonts } from '@/hooks/use-google-fonts';
+import { groupLabelFor } from '@/lib/layer-dom';
+import { useLayerReorder } from '@/hooks/use-layer-reorder';
+import { useLayerStructure } from '@/hooks/use-layer-structure';
+import { useInlineTextEdit } from '@/hooks/use-inline-text-edit';
+import { useReviewAsset } from '@/hooks/use-review-asset';
+import { layerLabel, useTextLayer } from '@/hooks/use-text-layer';
+import {
+  TEXT_PARSE_MODEL, TEXT_DETECT_MODEL, TEXT_DETECT_EFFORT, TEXT_PARSING_PROMPT, extractJson,
+  ensureRowFontsReady, normaliseRowRemoveIds, logUnreadable, allRemoveIds, svgWithoutHidden,
+  hideRemovedElements, removedSubtree, annotateRenderedPaint, countTaggedRows,
+} from '@/lib/ai-text-pass';
 
 // ─── Samples ─────────────────────────────────────────────────────────────────
 
@@ -81,8 +81,6 @@ const SAMPLES = [
   { label: 'Badge',        name: 'vectorstock_14306497.svg',  src: '/samples/vectorstock_14306497.svg' },
   { label: 'Candle',       name: 'vectorstock_19973486.svg',  src: '/samples/vectorstock_19973486.svg' },
 ] as const;
-
-type SampleName = (typeof SAMPLES)[number]['name'];
 
 // Text fields the user manages — added via the text tool (data-text-layer="1")
 // or re-added by an AI pass (id starting "_text_"). These are already real,
@@ -112,73 +110,6 @@ const ABORT_REASONS = [
   'mistake',
 ];
 
-// The smallest root-space box containing every one of `ids`. It frames a multi-layer
-// selection and supplies the shared pivot that multi-layer rotate/scale turn about, so
-// the selection transforms as one rigid group. Null when nothing measurable is left.
-const unionBoxInRootSpace = (svgEl: SVGSVGElement, ids: string[]): DOMRect | null => {
-  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
-  ids.forEach((id) => {
-    const el = svgEl.querySelector(`#${CSS.escape(id)}`) as SVGGraphicsElement | null;
-    const b = el ? bboxInRootSpace(svgEl, el) : null;
-    if (!b) return;
-    x0 = Math.min(x0, b.x);              y0 = Math.min(y0, b.y);
-    x1 = Math.max(x1, b.x + b.width);    y1 = Math.max(y1, b.y + b.height);
-  });
-  return Number.isFinite(x0) ? new DOMRect(x0, y0, x1 - x0, y1 - y0) : null;
-};
-
-// Rewrites a cloned element's id and every descendant id to a fresh namespace, and fixes
-// intra-subtree references (href / xlink:href / url(#…)) so a duplicated layer doesn't
-// collide with, or point back at, the original — e.g. curved text's arc path referenced
-// by its <textPath>. References to shared <defs> (gradients, filters) are left untouched.
-const remapClonedIds = (el: Element, newBaseId: string, origId: string) => {
-  const idMap = new Map<string, string>();
-  const collect = (node: Element) => {
-    if (node.id) {
-      const nid = node.id === origId ? newBaseId : `${newBaseId}__${node.id}`;
-      idMap.set(node.id, nid);
-      node.id = nid;
-    }
-    Array.from(node.children).forEach((c) => collect(c));
-  };
-  collect(el);
-  const fixRefs = (node: Element) => {
-    for (const attr of ['href', 'xlink:href']) {
-      const v = node.getAttribute(attr);
-      if (v && v.startsWith('#') && idMap.has(v.slice(1))) node.setAttribute(attr, `#${idMap.get(v.slice(1))}`);
-    }
-    for (const attr of ['fill', 'stroke', 'clip-path', 'mask', 'filter', 'style']) {
-      const v = node.getAttribute(attr);
-      if (v && v.includes('url(#')) {
-        node.setAttribute(attr, v.replace(/url\(#([^)]+)\)/g, (m, id) => (idMap.has(id) ? `url(#${idMap.get(id)})` : m)));
-      }
-    }
-    Array.from(node.children).forEach((c) => fixRefs(c));
-  };
-  fixRefs(el);
-};
-
-// The name a group goes by: the name the row had when it was opened if we still hold it,
-// else whatever the file called it, else its own id when that isn't one this app minted,
-// else the positional name parseSvg would have given the row. Shared by the drill-in
-// breadcrumb and by collapseLayer, so the group the panel says you are inside is named
-// the same as the row you get back when you leave it.
-//
-// `remembered` comes first because it is the name the user last saw on that row, and
-// re-derivation cannot reproduce it: a row named by parseSvg from a `<title>`, or one
-// whose group is reached through an unnamed wrapper, has nothing on the element itself to
-// recover the name from and would come back as a bare "Layer 5".
-const groupLabelFor = (
-  group: Element,
-  firstRowIndex: number,
-  remembered: ReadonlyMap<string, string>,
-): string =>
-  remembered.get(group.id) ||
-  group.getAttribute('data-name')?.trim() ||
-  group.getAttribute('inkscape:label')?.trim() ||
-  (!isSyntheticLayerId(group.id) ? group.id : '') ||
-  t('layers.numberedLabel', { index: firstRowIndex + 1 });
-
 // How a row relates to the group the list is drilled into: part of it, or part of the
 // level above it. Rows that are neither — the parts of some OTHER group opened at the
 // same level — carry no mark; see the drillContext memo.
@@ -195,485 +126,10 @@ const NO_MARKS: ReadonlyMap<string, DrillMark> = new Map<string, DrillMark>();
 // click having done nothing except damage the artwork.
 const CLICK_SLOP_PX = 4;
 
-// The wrappers an element is drawn inside, from just below the root <svg> down to its own
-// parent. Cloning a layer out of its group and into a paste group at the root would drop
-// every transform, clip and inherited paint those wrappers contribute, which is what this
-// is read for.
-const ancestorChain = (el: Element, root: Element): Element[] => {
-  const chain: Element[] = [];
-  for (let n = el.parentElement; n && n !== root; n = n.parentElement) chain.unshift(n);
-  return chain;
-};
-
-// Re-creates that chain around a clone as shallow copies of the wrappers, so the clone
-// still renders exactly where the original does. Ids are stripped: they name the original
-// elements and duplicating one would give the document two nodes answering to it.
-const wrapInAncestorChain = (clone: Element, chain: Element[]): Element =>
-  chain.reduceRight((inner, anc) => {
-    const w = anc.cloneNode(false) as Element;
-    w.removeAttribute('id');
-    w.appendChild(inner);
-    return w;
-  }, clone);
-
-// Shared text-detection + element-identification instructions used by BOTH the
-// strip-text pass and the customise pass, so the two never drift apart. Callers
-// wrap this with their own intro line, any extra tasks (e.g. font suggestions),
-// the marked SVG source, and the JSON output schema.
-// Both passes also share one model, so an A/B model swap flips strip-text and
-// customise together and they can't drift apart.
-const TEXT_PARSE_MODEL = 'claude-sonnet-4-6';
-// The DOM-regions text detection (/api/svg-text) runs on its own model, not the dropdown's:
-// Sonnet 5 at low effort matched Opus 5.5 on the reference file (36/36 fields, words
-// split right) at about half the cost and a little faster. Haiku 4.5 misread regions.
-const TEXT_DETECT_MODEL = 'claude-sonnet-5';
-const TEXT_DETECT_EFFORT = 'low';
-const TEXT_PARSING_PROMPT = `TASK 1 — Text detection: Examine the image carefully. Detect ALL text present, including text rendered as outlined or filled path shapes (not just SVG <text> elements). A ROW is one LINE of text. "MICHAEL DOE" is one row, even when "DOE" is a different colour or weight from "MICHAEL" — a line is never returned as two rows, and a row never holds two lines. For each row, estimate:
-- yFraction: vertical center as a fraction of image height (0.0 = top edge, 1.0 = bottom edge)
-- xFraction: horizontal center as a fraction of image width (0.0 = left, 1.0 = right)
-- leftFraction: the LEFT edge of this row's lettering, as a fraction of image width — where its first glyph begins, NOT counting any icon, bullet or ornament sitting beside it
-- rightFraction: the RIGHT edge of this row's lettering, same scale — where its last glyph ends
-  Report leftFraction and rightFraction as what you can actually see, per row. Do NOT copy one row's value onto another to tidy them up: rows that share an edge will come back with the same number by themselves, and that agreement is the signal. Forcing it destroys it.
-- font: the Google Font that most closely matches THIS row's own lettering. Judge each row separately — one design routinely mixes families, and picking a single family for the whole image is a wrong answer for every row that does not use it. Match the letterforms actually visible in this row: script or handwritten lettering needs a script face (Dancing Script, Great Vibes, Pacifico, Sacramento), a serif needs a serif (Playfair Display, Cormorant Garamond, Cinzel), condensed lettering needs a condensed face (Barlow Condensed, Oswald), geometric sans needs a geometric sans (Montserrat, Poppins). Only give two rows the same family when their letterforms really are the same
-- sizeFraction: font cap-height as a fraction of image height (e.g. 0.08 if text height ≈ 8% of image)
-- weight: CSS font-weight integer (100, 200, 300, 400, 500, 600, 700, 800, or 900)
-- color: THIS row's own colour as CSS hex, as it appears in the image — composited over whatever sits behind it, not the colour it would be on white. Where an element in the SVG below carries data-fill, that is the colour it renders as, already composited (blend modes and opacity included): read the data-fill of the elements you name in this row's removeIds and report that value, and only judge colour by eye for a row whose elements you cannot identify. Judge each row on its own — a card routinely sets a heading in one colour and its body text in another, and a light heading over a mid-tone panel can sit directly above dark body text on the same panel. Do NOT give every row the same colour unless every row really is that colour, and do NOT assume text is white because other text on the image is.
-- content: the exact text string if legible, else ""
-- curve: how far THIS row's baseline bends, as a signed whole number from -100 to 100. 0 means the letters sit on a straight line — including a straight line that is rotated. The size is the baseline's total change of direction from its first letter to its last, as a share of a half-circle: if the first and last letters lean 45° apart it is 25, 90° apart is 50, a full semicircle is 100. The sign is the shape: POSITIVE when the row arches like the top of a circle (its middle higher than its ends, ∩), NEGATIVE when it sags like a smile (its middle lower than its ends, ∪). Judge it from the tilt of the letters at each end, not from the ornament around the text.
-- letterSpacing: CSS letter-spacing in em units. Default to 0.0 (normal) if you are not certain — only use a non-zero value when you can clearly see unusually wide or condensed tracking (e.g. 0.1 slightly wide, 0.3 very wide, -0.05 condensed)
-
-- spans: OPTIONAL. Only when the line is not all one style. The line broken into consecutive runs, in reading order, each { "text": "...", "color": "#hex", "weight": 400 }. Joining every span's text, with a single space between runs that are separated by one in the image, must reproduce "content" exactly. A line in one style has no spans — leave the field out.
-  Example: "MICHAEL DOE" set with DOE bolder and whiter is ONE row, content "MICHAEL DOE", spans [{"text":"MICHAEL","color":"#cfcfe8","weight":300},{"text":"DOE","color":"#ffffff","weight":700}].
-  The row's own color, weight and font describe its dominant run; spans override them for the runs that differ. Do NOT give a span its own position — the runs sit side by side on the line and are laid out in the order you give them.
-
-TASK 2 — Text element identification: Most SVG elements in the source have a data-ai-idx attribute. Identify which elements visually render as text — including <text>/<tspan> elements AND <path>/<g> elements whose shapes form letter or word outlines. IMPORTANT: if a <g> group contains child paths that together form a word, return the group's data-ai-idx (not the individual letter path indices). Return every text element's data-ai-idx in "removeIds". NOTE: already-editable text fields have deliberately NOT been given a data-ai-idx — never invent indices for them; only return indices that actually appear in the source below.
-
-TASK 3 — Row ↔ element linking: Each row from TASK 1 also carries its own "removeIds" array: the TASK 2 indices whose shapes draw THAT row's text. This linking is what lets the replacement field be positioned from the original's real geometry instead of your estimate, so it matters more than the fraction estimates do — leave a row's array empty only when you genuinely cannot tell which elements draw it.
-
-CRITICAL: check EVERY row for a curved baseline before answering, and give "curve" on every row. Logos, badges, seals and banners very often set a name or tagline along an arc — around a circle, or along a ribbon under an emblem — and that lettering is curved even when it is short or small. Look at the letters at each end of the row: if they lean away from each other (tops spreading apart) the row sags and curve is negative; if they lean toward each other (tops closing in) the row arches and curve is positive. Only a row whose letters all stand upright on one straight line is 0.
-
-CRITICAL: a differently-styled word is a SPAN, never a row of its own. Returning "MICHAEL DOE" and also "MICHAEL" and "DOE" is one line of text read three times, and all three get drawn on top of each other. Each piece of lettering in the image belongs to exactly ONE row.
-
-CRITICAL: linking NEVER adds a row. Many indices can point at one row; a row is never split to give an index a home. Artwork often draws one word several times over — a shadow copy, an outline copy and a fill copy stacked on the same spot — and every one of those indices belongs to the SINGLE row for that word. If you are about to emit two rows with the same content, emit one row listing both indices instead — wherever on the image you think they sit.`;
-
-// Every AI prompt below demands bare JSON, and both providers ignore that often enough to
-// matter: a ```json fence around the object, or — seen once the text prompt grew a third
-// task — a paragraph of reasoning before it ("Looking at the image, I can identify two
-// lines of text: ..."). Either one makes JSON.parse throw on a reply whose JSON was
-// perfectly good, and the failure surfaces to the user as "AI returned an unreadable
-// response" with the whole answer discarded.
-//
-// So don't demand that the reply BE json — find the json in it. The first balanced
-// {...} is the object every one of these prompts asks for. Braces inside strings are not
-// structure (a `d="M0 0h4z"` payload is full of them, and one stray brace in a path or a
-// font name would otherwise end the scan early), and a backslash-escaped quote does not
-// close a string.
-const extractJson = (raw: string): string => {
-  const unfenced = raw.replace(/^```(?:json)?\s*/im, '').replace(/```\s*$/m, '').trim();
-  if (unfenced.startsWith('{')) return unfenced;
-  const start = unfenced.indexOf('{');
-  if (start === -1) return unfenced; // no object at all — let the caller's parse report it
-  let depth = 0;
-  let inString = false;
-  let escaped = false;
-  for (let i = start; i < unfenced.length; i++) {
-    const c = unfenced[i];
-    if (escaped) { escaped = false; continue; }
-    if (c === '\\') { escaped = true; continue; }
-    if (c === '"') { inString = !inString; continue; }
-    if (inString) continue;
-    if (c === '{') depth++;
-    else if (c === '}' && --depth === 0) return unfenced.slice(start, i + 1);
-  }
-  return unfenced; // unbalanced — truncated mid-answer, and logUnreadable will say so
-};
-
-// The distinct faces a set of detected rows needs — one per (family, weight) pair.
-//
-// Keyed on the pair, not the family, because the weight is part of what the model matched:
-// a wordmark answered as Montserrat 800 is not rendered by Montserrat 400, and a field
-// sized against the wrong weight is measured too narrow and comes out too large.
-const rowFontFaces = (rows: TextRow[]): { family: string; weight: number }[] => {
-  const faces = new Map<string, { family: string; weight: number }>();
-  for (const row of rows) {
-    const family = (row.font ?? '').trim();
-    if (!family) continue;
-    const weight = Number(row.weight) || 400;
-    faces.set(`${family}@${weight}`, { family, weight });
-  }
-  return [...faces.values()];
-};
-
-// Waits until each row's own face is actually usable, so the widths appendTextRowLayers
-// measures are the real face's and not a fallback's — the two can differ by a fifth, and
-// that error goes straight into the font size it derives from them.
-//
-// document.fonts.ready is NOT enough on its own, which is what this used to await. It
-// settles the loads already PENDING, and a <link> injected moments earlier has only
-// declared @font-face rules — the files are not fetched until something lays out text in
-// them. It therefore resolves happily while every face is still absent. document.fonts.load
-// is the primitive that actually requests a face and resolves when it can be used.
-//
-// But document.fonts.load only knows the faces its @font-face rules declare, and those
-// arrive with the Google Fonts stylesheet — a <link> injected a moment earlier whose CSS
-// has not loaded yet. Until it has, load() finds no matching face and resolves at once
-// with nothing, and check() reports true, because a family with no declared faces counts
-// as "nothing to wait for". Every row was then measured in a fallback face: on a crest
-// logo both curved rows measured an identical 208 units against real widths of 207 and
-// 251, and "restaurant" was sized up to fill the gap. So the stylesheets are awaited
-// first, and a face only counts as ready when load() actually returned one.
-//
-// Bounded and individually caught: a font that never arrives must not strand the edit, and
-// a family that has no such weight must not stop the others loading.
-const FONT_SETTLE_TIMEOUT_MS = 4000;
-const fontStylesheetsLoaded = (): Promise<unknown> =>
-  Promise.all(
-    Array.from(document.querySelectorAll<HTMLLinkElement>('link[id^="gfont-"]')).map((link) =>
-      link.sheet
-        ? undefined
-        : new Promise((resolve) => {
-            link.addEventListener('load', resolve, { once: true });
-            link.addEventListener('error', resolve, { once: true });
-          })),
-  );
-const ensureRowFontsReady = async (rows: TextRow[]): Promise<void> => {
-  if (typeof document === 'undefined' || !document.fonts) return;
-  const faces = rowFontFaces(rows);
-  if (faces.length === 0) return;
-  const found = new Set<string>();
-  try {
-    await Promise.race([
-      fontStylesheetsLoaded().then(() => Promise.all(faces.map((f) =>
-        document.fonts.load(`${f.weight} 16px "${f.family}"`)
-          .then((loaded) => { if (loaded.length > 0) found.add(`${f.family}@${f.weight}`); })
-          .catch(() => undefined),
-      ))),
-      new Promise((resolve) => setTimeout(resolve, FONT_SETTLE_TIMEOUT_MS)),
-    ]);
-    const missing = faces.filter((f) => !found.has(`${f.family}@${f.weight}`));
-    if (missing.length) {
-      console.log(
-        `[text-rows] ${missing.length}/${faces.length} face(s) unavailable, falling back for: ` +
-        missing.map((f) => `${f.family} ${f.weight}`).join(', '),
-      );
-    }
-  } catch { /* font loading is best-effort — measure with whatever is available */ }
-};
-
-// Coerces a row's removeIds to the string array the anchoring expects. The model is asked
-// for strings and mostly obliges, but a JSON number index would silently miss every
-// data-ai-idx lookup, and an absent array is legitimate — it means "couldn't tell".
-const normaliseRowRemoveIds = (row: TextRow): void => {
-  row.removeIds = Array.isArray(row.removeIds) ? row.removeIds.map(String) : [];
-
-  // The edges are optional and stay optional: a cached answer from before they were asked
-  // for has none, and a model is free to omit them. Anything that is not a sane fraction
-  // with left before right is dropped rather than half-trusted — downstream treats absent
-  // as "no opinion" and falls back to geometry, which is the behaviour that existed
-  // before, so a bad value is strictly worse than none.
-  const frac = (v: unknown): number | undefined => {
-    const n = Number(v);
-    return Number.isFinite(n) && n >= 0 && n <= 1 ? n : undefined;
-  };
-  // Spans must reproduce the row's own content, or they are not a breakdown of it — a
-  // model that drops or invents a word would otherwise silently change what gets drawn.
-  // Checked on the joined text, and thrown away whole if it does not match, because a
-  // partial breakdown is worse than none: the row still renders, just in one style.
-  const spans = Array.isArray(row.spans) ? row.spans : null;
-  if (spans && spans.length > 1) {
-    const clean = spans
-      .filter((sp) => sp && typeof sp.text === 'string' && sp.text.trim() !== '')
-      .map((sp) => ({
-        text: String(sp.text),
-        color: typeof sp.color === 'string' ? sp.color : undefined,
-        weight: Number.isFinite(Number(sp.weight)) ? Number(sp.weight) : undefined,
-        font: typeof sp.font === 'string' ? sp.font : undefined,
-      }));
-    const norm = (v: string) => v.replace(/\s+/g, ' ').trim().toLowerCase();
-    row.spans = clean.length > 1 && norm(clean.map((sp) => sp.text).join(' ')) === norm(row.content ?? '')
-      ? clean
-      : undefined;
-  } else {
-    row.spans = undefined;
-  }
-
-  // Curve on the Curve slider's own scale. Anything unusable is no curve at all — a bad
-  // value would bend a straight row, and straight is what every row was before this.
-  const curve = Number(row.curve);
-  row.curve = Number.isFinite(curve) ? Math.round(Math.max(-100, Math.min(100, curve))) : undefined;
-
-  const left = frac(row.leftFraction);
-  const right = frac(row.rightFraction);
-  row.leftFraction = left !== undefined && right !== undefined && right > left ? left : undefined;
-  row.rightFraction = row.leftFraction === undefined ? undefined : right;
-};
-
-// An unparseable answer reaches the user as "AI returned an unreadable response" and
-// nothing else — the payload is dropped on the floor, which makes the one failure that
-// most needs evidence the only one that leaves none. Log enough to tell the two causes
-// apart: a truncated answer (hit the token ceiling — ends mid-token, no closing brace)
-// versus a malformed one (prose, an apology, a stray fence).
-const logUnreadable = (tag: string, raw: string, err: unknown): void => {
-  const text = raw ?? '';
-  const closed = text.trimEnd().endsWith('}');
-  console.log(
-    `[${tag}] unreadable response: ${text.length} chars, ${closed ? 'ends with "}" (malformed, not truncated)' : 'does NOT end with "}" — looks TRUNCATED'}`,
-    `\n  parse error: ${err instanceof Error ? err.message : String(err)}`,
-    `\n  head: ${text.slice(0, 200)}`,
-    `\n  tail: ${text.slice(-200)}`,
-  );
-};
-
-// Every index the answer names anywhere, top-level or inside a row.
-//
-// The model is asked for a document-wide removeIds AND a per-row linking, and it does not
-// reliably keep the two in step — an index named only by a row is otherwise never
-// deleted, which leaves the original artwork sitting underneath the field that replaced
-// it. The union is always safe: a row naming an index is the model asserting that element
-// draws that row's text, which is the same claim the top-level list makes.
-// Coerced to strings, not merely collected. The model is asked for string indices and
-// returns them for most artwork, but on some it answers with JSON numbers — [184, 202]
-// rather than ["184", "202"] — and the two are not interchangeable downstream. The
-// removal looks elements up in a Map keyed by string, so map.get(184) misses and the
-// element is never deleted; the measuring path interpolates into `[data-ai-idx="${sid}"]`,
-// where a number stringifies and works fine. The result is the worst possible split: the
-// replacement text is measured and placed perfectly, on top of artwork that was never
-// removed. Normalising here covers both passes, since both route through this.
-const allRemoveIds = (parsed: { removeIds: unknown[]; rows?: TextRow[] }): string[] =>
-  [...new Set([
-    ...parsed.removeIds.map(String),
-    ...(parsed.rows ?? []).flatMap((r) => (r.removeIds ?? []).map(String)),
-  ])];
-
-// The same SVG with hidden elements dropped — what the artwork actually looks like now.
-//
-// Every AI pass rasterises the document to see it, and hidden elements are still in that
-// document. Without this a second run sees the lettering the first run took, detects it
-// again, and hides a duplicate set behind the text fields already standing there. Mirrors
-// what `exportSvg` does for the same reason: hidden means gone from every rendering of
-// the artwork, and only the editor knows otherwise.
-const svgWithoutHidden = (svg: string, hidden: Set<string>): string => {
-  if (hidden.size === 0) return svg;
-  try {
-    const doc = new DOMParser().parseFromString(svg, 'image/svg+xml');
-    if (doc.querySelector('parsererror')) return svg;
-    hidden.forEach((id) => doc.getElementById(id)?.parentNode?.removeChild(doc.getElementById(id)!));
-    return new XMLSerializer().serializeToString(doc.documentElement);
-  } catch {
-    return svg; // never let the raster fail over this — a stale view beats no view
-  }
-};
-
-// Takes the elements an AI pass identified as text OUT OF THE ARTWORK without deleting
-// them: each gets a stable id, and the caller hides that id. Returns the record of what
-// was taken so it can be offered back.
-//
-// Hiding rather than deleting because the classification is not reliable enough to be
-// destructive. On an ornate calligraphic logo the model named the decorative frame and
-// every flourish as text — they are the same colour and the same hand as the lettering —
-// and deleting on that answer destroyed the design with no way back short of reverting
-// the whole document. Hidden elements are excluded from the export (see `exportSvg`), so
-// the deliverable is identical either way; the only thing that changes is that a wrong
-// call is now recoverable.
-//
-// The id is synthesized only when the element has none, following the same convention as
-// parseSvg's `_layer_N` and expandLayer's `_sub_N`. An element that already has an id
-// keeps it — overwriting could break a `url(#…)` reference elsewhere in the document.
-const hideRemovedElements = (
-  idMap: Map<string, Element>,
-  removeIds: string[],
-  rows: TextRow[],
-  anchors: Map<string, DOMRect>,
-  alreadyHidden: Set<string>,
-  logTag: string,
-): RemovedRecord[] => {
-  // Which text row, if any, claimed each element. A row naming an index is the model
-  // asserting that element draws that row's text; an index no row names was called text
-  // by the bulk pass and then vouched for by nothing.
-  const claimant = new Map<string, string>();
-  for (const row of rows) {
-    for (const sid of row.removeIds ?? []) {
-      if (!claimant.has(sid)) claimant.set(sid, (row.content ?? '').trim());
-    }
-  }
-
-  const stamp = Date.now();
-  // Ids assigned first, for every element in the batch, because the parent lookup below
-  // needs them all to exist — a group and its own children are routinely both in here,
-  // and the child is often reached before the parent.
-  const taken: { sid: string; el: Element }[] = [];
-  removeIds.forEach((sid, i) => {
-    const el = idMap.get(sid);
-    if (!el) {
-      console.log(`[${logTag}] removeId has no matching element: ${sid}`);
-      return;
-    }
-    if (!el.id) el.id = `_hidden_${stamp}_${i}`;
-    taken.push({ sid, el });
-  });
-
-  const hiddenNow = new Set([...alreadyHidden, ...taken.map((t) => t.el.id)]);
-  const records: RemovedRecord[] = taken.map(({ sid, el }) => {
-    // Nearest ancestor that is also hidden. Everything below such an ancestor is
-    // invisible regardless of its own rule, so this is what the panel groups on and what
-    // preview has to walk.
-    let parentId: string | null = null;
-    for (let p = el.parentElement; p && !parentId; p = p.parentElement) {
-      if (p.id && hiddenNow.has(p.id)) parentId = p.id;
-    }
-    const b = anchors.get(sid);
-    return {
-      id: el.id,
-      tag: el.tagName.toLowerCase().replace(/.*:/, ''),
-      claimedBy: claimant.get(sid) ?? null,
-      box: b ? { x: b.x, y: b.y, w: b.width, h: b.height } : null,
-      parentId,
-    };
-  });
-
-  // Logged every run, including when it's healthy, because the unclaimed share is the
-  // signal that predicts a bad answer and it is otherwise invisible. Across the review
-  // corpus 91% of removal ids are claimed by a row; the calligraphic logo that fails runs
-  // at 6%. Nothing gates on it — nothing is destroyed, so there is nothing to veto — but
-  // a run that reports mostly-unclaimed is one to look at in the dev panel.
-  const unclaimed = records.filter((r) => r.claimedBy === null).length;
-  if (records.length) {
-    console.log(
-      `[${logTag}] hid ${records.length} element(s); ${unclaimed} claimed by no row ` +
-      `(${Math.round((unclaimed / records.length) * 100)}%)`,
-    );
-  }
-  return records;
-};
-
 // Stable identity, so passing "no preview" to the memoised canvas isn't a new object
 // on every render.
 const EMPTY_PREVIEW: Set<string> = new Set();
 const NO_REGION_BOXES: RegionBox[] = [];
-
-// A record and everything hidden beneath it.
-//
-// Showing or restoring one entry always means the whole subtree. A hidden <g> draws
-// nothing itself — all its ink is in children that carry their own hide rules — so
-// un-hiding just the group shows an empty box, and un-hiding just a child shows nothing
-// at all while the group above it is still display:none.
-const removedSubtree = (records: RemovedRecord[], rootId: string): Set<string> => {
-  const childrenOf = new Map<string, string[]>();
-  for (const r of records) {
-    if (!r.parentId) continue;
-    const list = childrenOf.get(r.parentId);
-    if (list) list.push(r.id); else childrenOf.set(r.parentId, [r.id]);
-  }
-  const out = new Set<string>();
-  const walk = (id: string) => {
-    if (out.has(id)) return;
-    out.add(id);
-    (childrenOf.get(id) ?? []).forEach(walk);
-  };
-  walk(rootId);
-  return out;
-};
-
-// Writes onto every marked element the colour it APPEARS as in the image, so the source
-// the model reads states the answer instead of hiding it.
-//
-// The model is sent the content elements alone. The <style> block their classes resolve
-// against lives in defs, which goes into the RASTER but not the text, so a class-styled
-// element gives no colour in the source at all — and judging small lettering by eye off a
-// raster mostly reads antialiasing, or the panel behind it.
-//
-// Sampled rather than read off the fill, because the fill is not what you see: a glyph
-// declaring a mid grey under mix-blend-mode:multiply composites to something much darker
-// over a coloured panel. data-fill carries the composited value, so the model reports the
-// colour of the text in the image and it can be applied as-is.
-const annotateRenderedPaint = async (
-  svgRoot: Element,
-  marked: Map<string, Element>,
-  vb: { x: number; y: number; w: number; h: number },
-  tag: string,
-): Promise<void> => {
-  const ids = [...marked.keys()];
-  if (ids.length === 0) return;
-  try {
-    const boxes = measureRemovedTextBoxes(svgRoot, ids);
-    const inks = await sampleElementInkColors(
-      new XMLSerializer().serializeToString(svgRoot),
-      ids.map((id) => boxes.get(id) ?? null),
-      vb,
-    );
-    let n = 0;
-    ids.forEach((id, i) => {
-      const ink = inks[i];
-      if (!ink) return;
-      marked.get(id)!.setAttribute('data-fill', ink);
-      n++;
-    });
-    if (__DEV__) console.log(`[${tag}] annotated ${n}/${ids.length} element(s) with the colour they render as`);
-  } catch (err) {
-    // The pass still works without it — the model falls back to reading the image — but a
-    // silent failure here looks exactly like the model ignoring data-fill, so it says so.
-    console.warn(`[${tag}] could not sample rendered colours:`, err);
-  }
-};
-
-
-// How many rows the model tagged with outlines that were actually measured.
-//
-// This no longer says anything about where a row will be PLACED: appendTextRowLayers
-// links rows to lettering by reading order over the measured geometry and does not use
-// removeIds at all, precisely because the model returns them shifted. It stays as a
-// read on the vision answer itself — a low count means the pass stopped pointing at the
-// artwork it was describing, which is worth seeing even though placement now survives it.
-// `[text-rows] linked …` is the line to read for placement.
-const countTaggedRows = (rows: TextRow[], anchors: Map<string, DOMRect>): number =>
-  rows.filter((r) => (r.removeIds ?? []).some((sid) => anchors.has(sid))).length;
-
-// ─── Customise cooldown ──────────────────────────────────────────────────────
-
-// review/check answers with customise_next — when the asset may be customised again —
-// for anything already carrying has_customised. The upstream hasn't pinned a format
-// down, so accept the three plausible ones: an ISO date string, a seconds epoch, or a
-// milliseconds epoch. Returns that moment in ms, or null when it can't be read.
-const parseCustomiseNext = (value: unknown): number | null => {
-  const fromNumber = (n: number) => (n < 1e11 ? n * 1000 : n); // seconds vs ms epoch
-  if (typeof value === 'number' && Number.isFinite(value)) return fromNumber(value);
-  if (typeof value === 'string' && value.trim()) {
-    const n = Number(value);
-    if (Number.isFinite(n)) return fromNumber(n);
-    const parsed = Date.parse(value);
-    return Number.isNaN(parsed) ? null : parsed;
-  }
-  return null;
-};
-
-// Inside the cooldown when that moment is still ahead of us and no further away than
-// API_COOLDOWN hours — the lockout the upstream started when the asset was customised.
-// Returns the milliseconds left, or null when the asset is free to customise.
-const cooldownRemaining = (nextMs: number | null, cooldownHours: number): number | null => {
-  if (nextMs === null) return null;
-  const ms = nextMs - Date.now();
-  if (ms <= 0) return null;
-  return ms <= cooldownHours * 3_600_000 ? ms : null;
-};
-
-// What /api/review/check/<uuid> answers with — the fields this file reads, plus the
-// cooldown_hours the proxy derives from API_COOLDOWN.
-type ReviewCheck = {
-  message?: string;
-  id?: number;
-  can_edit?: number;
-  has_customised?: number;
-  customise_next?: string | number;
-  cooldown_hours?: number;
-  error?: { message?: string };
-};
-
-const formatRemaining = (ms: number): string => {
-  const mins = Math.ceil(ms / 60_000);
-  if (mins < 60) return t('cooldown.inMinutes', { count: mins });
-  const hours = Math.round(mins / 60);
-  return t('cooldown.inHours', { count: hours });
-};
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
@@ -754,16 +210,8 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   const [aiStatusMsg, setAiStatusMsg]     = useState<string>(t('status.thinking'));
   const [fontSuggestion, setFontSuggestion]   = useState<string | null>(null);
   const [suggestedFontName, setSuggestedFontName] = useState<string | null>(null);
-  // Fonts the AI offered, split by how much they've earned their place. `usedFonts` are
-  // the faces actually applied to text this session re-created — the ones you are most
-  // likely to want again — while `extraFonts` are image-level suggestions nothing has
-  // used yet. The Font dropdown lists them in that order, ahead of the built-in stack.
-  const [usedFonts, setUsedFonts]             = useState<string[]>([]);
-  const [extraFonts, setExtraFonts]           = useState<string[]>([]);
-  const [imageFonts, setImageFonts]           = useState<Array<{ font: string; reason: string }> | null>(null);
-  const [imageFontsLoading, setImageFontsLoading] = useState(false);
-  const [showImageFonts, setShowImageFonts]   = useState(false);
-  const [selectedImageFont, setSelectedImageFont] = useState<string | null>(null);
+  // The Font dropdown's lists and the stylesheet loader (use-google-fonts.ts).
+  const { usedFonts, extraFonts, loadGoogleFontLink, addGoogleFont, addUsedFont, resetFonts } = useGoogleFonts();
   const [customiseFonts, setCustomiseFonts]   = useState<string[]>([]);
   const [customiseLoading, setCustomiseLoading] = useState(false);
   const [customiseDone, setCustomiseDone] = useState(false);
@@ -856,7 +304,6 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   // An open colour-picker session: the colour being replaced and the document as it
   // was when the picker opened. Live dragging replays from that baseline, so the whole
   // pick is one undo entry rather than one per intermediate colour.
-  const colorEditRef            = useRef<{ from: string; baseline: string } | null>(null);
   // Visibility is part of a history entry, not just the document. An AI pass now takes
   // artwork out by hiding it, so a snapshot of content and layers alone would record a
   // run as having changed nothing and undo would have nothing to give back.
@@ -1053,208 +500,15 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     [applyParsed]
   );
 
-  // ── Open review asset (/<uuid> deep link) ──────────────────────────────────
-
-  // A uuid identifies a review asset. The check endpoint says what it resolves to —
-  // { message: 'success', id, can_edit } — and on a successful answer the numeric id
-  // goes through /api/review/<id>, the same download the dev rail's id box uses, and
-  // opens like any other sample.
-  // can_edit only decides whether the AI/customise pass is allowed: it becomes the
-  // asset's `edit` gate, so can_edit: 0 still opens the artwork on the canvas and
-  // sends the customise click to the upsell instead.
-  // Both responses are logged under [review…] so a load can be traced without reaching
-  // for the network tab.
-  //
-  // A callback rather than effect-only code because two things open a uuid: the
-  // /<uuid> path (the effect below) and the dev rail's list dropdown. Both must take
-  // this exact route, cooldown and edit gate included — a second implementation would
-  // be a second set of rules to keep in sync.
-  //
-  // Returns the sample it opened so the dev rail can add a preview card for it, the
-  // same way its own fetches do — or null when nothing was opened, so a failed
-  // selection doesn't leave a card pointing at artwork that never loaded.
-  //
-  // Reopening a uuid this session replays what was already resolved instead of asking
-  // again — the same artwork the preview card shows, so the two can't disagree. The
-  // check response is kept rather than the conclusions drawn from it, so the cooldown
-  // is re-derived on each replay and the dev toggles still apply. A successful
-  // customise drops the entry: the host rewrites the SVG, so the copy held here stops
-  // being the artwork.
-  const reviewCacheRef = useRef(new Map<string, { sample: OpenedSample; check: ReviewCheck }>());
-
   // Which review asset is on the canvas, if any. Not derivable from `reviewUuid`, which
   // only knows about the /<uuid> path — an asset opened from the dev rail's dropdown
   // has no uuid in the URL at all.
   const openReviewUuidRef = useRef<string | null>(null);
 
-  // The asset's AI gate. Anything other than can_edit: 1 sends the Customise click to
-  // the upsell; the dev toggle opens it as editable instead. Derived rather than stored
-  // — asked at call time on both paths — so flipping the toggle changes the next open,
-  // including a reopen served from the cache.
-  const resolveEdit = useCallback((check: ReviewCheck): 0 | 1 => {
-    if (check.can_edit === 1) return 1;
-    if (isIgnoreCanCustomise()) {
-      console.log(`[review] ${check.id} can_edit=${check.can_edit} — ignored (dev toggle), opening editable`);
-      return 1;
-    }
-    return 0;
-  }, []);
-
-  // The cooldown basis remembered from the asset list: the most recent customised_at
-  // that wasn't cancelled. Customising one asset puts them all on cooldown, so this is
-  // a single account-level moment rather than anything per asset. Null until the list
-  // has loaded — a /<uuid> deep link may never load it, and there's no list at all in
-  // a production build, so the check response stays the fallback.
-  const [listCooldown, setListCooldown] =
-    useState<{ lastCustomised: number | null; cooldownHours: number } | null>(null);
-
-  const onReviewListLoaded = useCallback(
-    (info: { lastCustomised: number | null; cooldownHours: number }) => {
-      console.log(
-        '[review/list] cooldown basis:',
-        info.lastCustomised ? new Date(info.lastCustomised).toISOString() : 'none',
-        `(${info.cooldownHours}h)`,
-      );
-      setListCooldown(info);
-    },
-    [],
-  );
-
-  // Applied on both paths (fresh check and cache replay), so an asset's cooldown reads
-  // the same however it was opened.
-  const applyCooldown = useCallback((check: ReviewCheck) => {
-    // Asked at call time, not captured in a dep: flipping the toggle applies to the
-    // next asset opened without this callback having to be rebuilt.
-    if (isIgnoreHasCustomised()) {
-      console.log(`[review] ${check.id} cooldown ignored (dev toggle)`);
-      return;
-    }
-
-    // Prefer the list's account-level moment. It's the more reliable of the two: the
-    // host's own customise_next doesn't move when an already-customised asset is
-    // customised again, so it can report a window that has long expired.
-    if (listCooldown) {
-      // cooldownRemaining measures against the moment it unlocks, so turn the moment it
-      // was customised into that: last customise + the cooldown window.
-      const { lastCustomised, cooldownHours } = listCooldown;
-      const unlocksAt =
-        lastCustomised === null ? null : lastCustomised + cooldownHours * 3_600_000;
-      const left = cooldownRemaining(unlocksAt, cooldownHours);
-      console.log(
-        `[review] ${check.id} last customise (any asset) ${
-          lastCustomised ? new Date(lastCustomised).toISOString() : 'none'
-        } ->`,
-        left === null ? 'no cooldown' : `${Math.round(left / 60_000)} min left`,
-      );
-      if (left !== null) {
-        setCooldownUntil(formatRemaining(left));
-        setCooldownActive(true);
-      }
-      return;
-    }
-
-    if (check.has_customised !== 1) return;
-    const left = cooldownRemaining(
-      parseCustomiseNext(check.customise_next),
-      check.cooldown_hours ?? 24,
-    );
-    console.log(
-      `[review] ${check.id} has_customised=1 customise_next=${check.customise_next} ->`,
-      left === null ? 'cooldown expired' : `${Math.round(left / 60_000)} min left`,
-    );
-    if (left !== null) {
-      setCooldownUntil(formatRemaining(left));
-      setCooldownActive(true);
-    }
-  }, [listCooldown]);
-
-  const openReviewUuid = useCallback(async (uuid: string): Promise<OpenedSample | null> => {
-    // Already resolved this session — reopen from what's held rather than repeating the
-    // check and download. applyParsed clears the cooldown as part of loading, so the
-    // cooldown is re-applied after, exactly as the fresh path does.
-    const cached = reviewCacheRef.current.get(uuid);
-    if (cached) {
-      console.log(`[review] ${uuid} — reopening from cache, no requests made`);
-      setIsLoading(true);
-      // Re-derive the gate rather than replaying the stored one, so flipping the dev
-      // toggle takes effect on a cached asset too.
-      const sample = { ...cached.sample, edit: resolveEdit(cached.check) };
-      await openSample(sample);
-      openReviewUuidRef.current = uuid;
-      applyCooldown(cached.check);
-      return sample;
-    }
-
-    // Hold the loading state across both requests so the drop zone doesn't flash up
-    // in between — opening an asset should look like it's opening artwork from the start.
-    setIsLoading(true);
-    try {
-      const res = await fetch(`/api/review/check/${uuid}`, { method: 'POST' });
-      const check = (await res.json()) as ReviewCheck;
-      console.log(`[review/check] ${uuid} -> ${res.status}`, check);
-
-      if (!res.ok || check.message !== 'success' || !check.id) {
-        console.log('[review] check unsuccessful — nothing to load');
-        setIsLoading(false);
-        return null;
-      }
-      // An asset that has been customised has had its SVG rewritten upstream, so a
-      // cached copy is the wrong artwork rather than merely a stale one. `fresh=1`
-      // makes the proxy bypass its caches, and cache: 'reload' does the same for this
-      // request, so re-selecting a customised asset always shows what's there now.
-      // The dev toggle only suppresses the cooldown, never this: whatever the host
-      // holds is still the artwork to open.
-      const customised = check.has_customised === 1;
-      const dl = await fetch(
-        `/api/review/${check.id}${customised ? '?fresh=1' : ''}`,
-        customised ? { cache: 'reload' } : undefined,
-      );
-      const data = (await dl.json()) as { svg?: string | null; error?: { message?: string } };
-      console.log(
-        `[review/download] ${check.id}${customised ? ' (fresh)' : ''} -> ${dl.status}`,
-        data.svg ? `${data.svg.length} chars of SVG` : data,
-      );
-
-      if (!dl.ok || !data.svg) {
-        setIsLoading(false);
-        return null;
-      }
-
-      // Same hand-off as the dev rail: inline the SVG as a data: URI so openSample
-      // can re-read it with fetch().text(), exactly like a static sample src.
-      const edit = resolveEdit(check);
-      console.log(`[review] ${check.id} opening with edit=${edit} (can_edit=${check.can_edit})`);
-      const sample: OpenedSample = {
-        label: `Review ${check.id}`,
-        name: `vectorstock_${check.id}.svg`,
-        src: `data:image/svg+xml,${encodeURIComponent(data.svg)}`,
-        edit,
-      };
-      await openSample(sample);
-      openReviewUuidRef.current = uuid;
-      reviewCacheRef.current.set(uuid, { sample, check });
-
-      // Record the cooldown, don't announce it. Opening an asset isn't the moment to
-      // interrupt with a restriction on an action nobody has asked for yet — the
-      // message belongs to the Customise click, which is where runCustomise raises it.
-      applyCooldown(check);
-      return sample;
-    } catch (err) {
-      console.log(`[review] ${uuid} failed:`, err);
-      setIsLoading(false);
-      return null;
-    }
-  }, [openSample, applyCooldown, resolveEdit]);
-
-  const reviewLoadedRef = useRef<string | null>(null);
-
-  useEffect(() => {
-    // The ref makes this once-per-uuid: an effect re-run (StrictMode's double mount,
-    // a re-render changing openReviewUuid) must not fire the requests again.
-    if (!reviewUuid || reviewLoadedRef.current === reviewUuid) return;
-    reviewLoadedRef.current = reviewUuid;
-    void openReviewUuid(reviewUuid);
-  }, [reviewUuid, openReviewUuid]);
+  // Review assets: the uuid deep link, the dev rail's dropdown, cooldown and AI gate.
+  const { openReviewUuid, onReviewListLoaded, notifyCustomised } = useReviewAsset({
+    reviewUuid, openReviewUuidRef, openSample, setIsLoading, setCooldownActive, setCooldownUntil,
+  });
 
   // ── Open dropped / browsed file ────────────────────────────────────────────
 
@@ -1978,58 +1232,9 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     // whatever unrelated change happens to reposition the overlay next.
   }, [positionSelectionOverlay, activeSvg?.content, canvasDrag, canvasRotate, canvasScale, editingTextId]);
 
-  // ── Layer reorder ──────────────────────────────────────────────────────────
+  // ── Layer reorder (use-layer-reorder.ts) ───────────────────────────────────
 
-  const reorderLayers = useCallback((fromId: string, toId: string, panelBefore: boolean) => {
-    if (!activeSvg || fromId === toId) return;
-    snapshotForUndo(activeSvg.content, activeSvg.layers);
-
-    // Work in panel order (reversed document order: panel[0] = topmost layer)
-    const panelLayers = [...activeSvg.layers].reverse();
-    const fromPanelIdx = panelLayers.findIndex((l) => l.id === fromId);
-    const toPanelIdx   = panelLayers.findIndex((l) => l.id === toId);
-    if (fromPanelIdx === -1 || toPanelIdx === -1) return;
-
-    let insertPanelIdx = panelBefore ? toPanelIdx : toPanelIdx + 1;
-    const newPanel = [...panelLayers];
-    const [moved] = newPanel.splice(fromPanelIdx, 1);
-    if (fromPanelIdx < insertPanelIdx) insertPanelIdx--;
-    newPanel.splice(insertPanelIdx, 0, moved);
-
-    const newDocLayers = [...newPanel].reverse();
-
-    // Reorder the SVG DOM by moving fromEl to its new document position
-    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
-    const svg = doc.documentElement;
-    const fromEl = doc.getElementById(fromId);
-    if (!fromEl) return;
-
-    const newFromDocIdx = newDocLayers.findIndex((l) => l.id === fromId);
-    const nextDocId = newFromDocIdx < newDocLayers.length - 1 ? newDocLayers[newFromDocIdx + 1].id : null;
-    const nextEl = nextDocId ? doc.getElementById(nextDocId) : null;
-
-    // Layers are not always direct children of <svg>: a file that wraps its drawing in
-    // one group has its layers taken from inside that wrapper. Move within the element's
-    // own parent, so reordering can't hoist it out of a wrapper whose class or transform
-    // it is being drawn under.
-    const parent = fromEl.parentNode;
-    if (!parent) return;
-    if (nextEl && nextEl.parentNode === parent) {
-      parent.insertBefore(fromEl, nextEl);
-    } else if (!nextEl && parent === svg) {
-      svg.appendChild(fromEl);
-    } else if (!nextEl) {
-      parent.appendChild(fromEl);
-    } else {
-      // Different parents — there is no single position that means "between these two",
-      // so the drop is ignored rather than moved somewhere arbitrary.
-      console.log('[layers] reorder across different parents ignored');
-      return;
-    }
-
-    const content = new XMLSerializer().serializeToString(svg);
-    setActiveSvg((prev) => (prev ? { ...prev, content, layers: newDocLayers } : null));
-  }, [activeSvg, snapshotForUndo]);
+  const reorderLayers = useLayerReorder({ activeSvg, setActiveSvg, snapshotForUndo });
 
   // ── Export ─────────────────────────────────────────────────────────────────
 
@@ -2116,7 +1321,6 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   const openAbortReason = useCallback(() => setAbortReasonOpen(true), []);
   const closeAbortReason = useCallback(() => setAbortReasonOpen(false), []);
   const openRating = useCallback(() => { setRating(0); setRatingHover(0); setRatingOpen(true); }, []);
-  const closeImageFonts = useCallback(() => setShowImageFonts(false), []);
   const closeAiPanel = useCallback(() => setAiPanelOpen(false), []);
   // The pill's caret opens the AI tools. Gated assets (edit === 0) get the upsell
   // instead — the tools are AI features too, and runCustomise gates itself the same way.
@@ -2292,49 +1496,11 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     });
   }, [activeSvg, selectionIds, captureBaseTransforms, snapshotForUndo]);
 
-  // ── Selected text layer properties ────────────────────────────────────────
+  // ── Selected text layer (use-text-layer.ts) ────────────────────────────────
 
-  const layerColors = useMemo(() => {
-    if (!selectedLayer || !activeSvg) return [];
-    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
-    const layerEl = doc.getElementById(selectedLayer);
-    if (!layerEl) return [];
-    return extractLayerColors(layerEl, doc);
-  }, [selectedLayer, activeSvg?.content]);
-
-  const selectedTextProps = useMemo(() => {
-    if (!activeSvg) return null;
-    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
-
-    if (!selectedLayer) return null;
-    const el = doc.getElementById(selectedLayer);
-    if (!el) return null;
-    const isGroup = el.getAttribute('data-text-layer') === '1';
-    const textEl = isGroup
-      ? el.querySelector('text')
-      : el.tagName.toLowerCase() === 'text' ? el : null;
-    if (!textEl) return null;
-    const textPathEl = textEl.querySelector('textPath');
-    return {
-      content: textPathEl ? (textPathEl.textContent ?? '') : textLines(textEl),
-      font:    textEl.getAttribute('font-family') ?? 'Arial',
-      size:    Number(textEl.getAttribute('font-size') ?? 48),
-      weight:  Number(textEl.getAttribute('font-weight') ?? 400),
-      color:         textEl.getAttribute('fill') ?? '#000000',
-      curve:         isGroup ? Number(el.getAttribute('data-curve') ?? 0) : null as number | null,
-      letterSpacing: parseFloat((textEl.getAttribute('letter-spacing') ?? '0').replace('em', '')) || 0,
-    };
-  }, [selectedLayer, activeSvg?.content]);
-
-  // An empty text layer renders no geometry, so clicks inside its placeholder
-  // selection box fall through to the background. Flag it so the overlay can
-  // capture those clicks and keep the empty text layer selected instead.
-  const selectionIsEmptyText = !!selectedTextProps && selectedTextProps.content.trim() === '';
-
-  // Live mirror, so the inline editor can seed itself from the current text without
-  // taking a dependency on it — depending on the content would re-seed mid-typing.
-  const selectedTextPropsRef = useRef(selectedTextProps);
-  useEffect(() => { selectedTextPropsRef.current = selectedTextProps; });
+  const { selectedTextProps, selectionIsText, selectionIsEmptyText, updateTextLayer } = useTextLayer({
+    activeSvg, setActiveSvg, selectedLayer, selectedLayers, textLayerIds, snapshotForUndo, textEditSnappedRef,
+  });
 
   // Selections made anywhere but the canvas — a row in the Layers list, a duplicate, an
   // AI pass handing back new text — follow the selection too, except that Layers stays
@@ -2343,265 +1509,17 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   // always win, which is why this rule can't trap a canvas click on Layers.
   // Read as a functional update so the current tab is not itself a dependency; otherwise
   // the effect would re-fire (and fight the user) on every manual tab change.
-  const selectionIsText = !!selectedTextProps;
   useEffect(() => {
     if (!selectedLayer) return;
     setControlTab((cur) => (cur === 'layers' ? cur : selectionIsText ? 'text' : 'layers'));
   }, [selectedLayer, selectionIsText]);
 
-  // The layers panel gives each row one line. A multi-line field's newlines would break
-  // that row, so the label is the flattened string — the artwork still stacks.
-  const layerLabel = (content: string) => content.replace(/\s*\n\s*/g, ' ').trim();
+  // ── Inline text editing (use-inline-text-edit.ts) ──────────────────────────
 
-  const updateTextLayer = useCallback((attrs: Partial<{ content: string; font: string; size: number; weight: number; color: string; curve: number; letterSpacing: number }>) => {
-    if (!activeSvg) return;
-    if (!textEditSnappedRef.current) {
-      snapshotForUndo(activeSvg.content, activeSvg.layers);
-      textEditSnappedRef.current = true;
-    }
-    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
-
-    if (!selectedLayer) return;
-    const el = doc.getElementById(selectedLayer);
-    if (!el) return;
-    const isGroup = el.getAttribute('data-text-layer') === '1';
-    let textEl: Element | null = isGroup ? el.querySelector('text') : el;
-    if (!textEl) return;
-
-    // For non-group text elements that need a curve, promote to group first
-    if (attrs.curve !== undefined && !isGroup && el.tagName.toLowerCase() === 'text' && attrs.curve !== 0) {
-      const SVG_NS = 'http://www.w3.org/2000/svg';
-      const svgEl = doc.documentElement;
-      const vb = svgEl.getAttribute('viewBox')?.trim().split(/[\s,]+/).map(Number);
-      const vbW = vb && vb.length === 4 ? vb[2] : Number(svgEl.getAttribute('width') || 400);
-      const cx = Number(el.getAttribute('x') ?? 0);
-      const cy = Number(el.getAttribute('y') ?? 0);
-      const halfW = vbW * 0.35;
-      const gId = el.id;
-      el.removeAttribute('id');
-      const g = doc.createElementNS(SVG_NS, 'g');
-      g.id = gId;
-      g.setAttribute('data-name', el.textContent ?? '');
-      g.setAttribute('data-text-layer', '1');
-      g.setAttribute('data-curve', String(attrs.curve));
-      g.setAttribute('data-cx', String(cx));
-      g.setAttribute('data-cy', String(cy));
-      g.setAttribute('data-halfw', String(halfW));
-      g.setAttribute('data-fontsize', el.getAttribute('font-size') ?? '48');
-      const arcId = `_arc_${gId}`;
-      const defsEl2 = doc.createElementNS(SVG_NS, 'defs');
-      const arcEl = doc.createElementNS(SVG_NS, 'path');
-      arcEl.id = arcId;
-      defsEl2.appendChild(arcEl);
-      g.appendChild(defsEl2);
-      const newText = doc.createElementNS(SVG_NS, 'text');
-      ['font-family','font-size','font-weight','fill','letter-spacing'].forEach((a) => { const v = el.getAttribute(a); if (v) newText.setAttribute(a, v); });
-      newText.setAttribute('dominant-baseline', 'middle');
-      const tp = doc.createElementNS(SVG_NS, 'textPath');
-      tp.setAttribute('href', `#${arcId}`); tp.setAttribute('startOffset', '50%'); tp.setAttribute('text-anchor', 'middle');
-      tp.textContent = el.textContent ?? '';
-      newText.appendChild(tp); g.appendChild(newText);
-      el.parentNode?.replaceChild(g, el);
-      // Written only now the group is in the document: measuring the string needs it
-      // mounted, and this branch returns before the re-arc step at the end of the function.
-      arcEl.setAttribute(
-        'd',
-        computeArcPath(cx, cy, attrs.curve, measureTextAdvance(doc.documentElement, gId), halfW),
-      );
-      const content = new XMLSerializer().serializeToString(doc.documentElement);
-      setActiveSvg((prev) => prev ? { ...prev, content } : null);
-      return;
-    }
-
-    if (attrs.curve !== undefined && isGroup) {
-      const currentCurve = Number(el.getAttribute('data-curve') ?? 0);
-      const newCurve = attrs.curve;
-      el.setAttribute('data-curve', String(newCurve));
-      const cx = Number(el.getAttribute('data-cx') ?? 0);
-      const cy = Number(el.getAttribute('data-cy') ?? 0);
-      const SVG_NS = 'http://www.w3.org/2000/svg';
-      const COPY_ATTRS = ['font-family', 'font-size', 'font-weight', 'fill', 'letter-spacing'];
-
-      if (currentCurve === 0 && newCurve !== 0) {
-        // A path is one baseline, so a multi-line field collapses to a single line when
-        // it goes on the curve. Joining with spaces rather than letting the newlines
-        // through keeps the words apart — SVG would render them run together.
-        const content = textLines(textEl).replace(/\s*\n\s*/g, ' ');
-        el.removeChild(textEl);
-        const arcId = `_arc_${el.id}`;
-        const defsEl = doc.createElementNS(SVG_NS, 'defs');
-        const arcEl = doc.createElementNS(SVG_NS, 'path');
-        arcEl.id = arcId;
-        // `d` is left for the re-arc step at the end of this function, which measures the
-        // text once it is in place — the arc's size follows the string it carries.
-        defsEl.appendChild(arcEl);
-        el.appendChild(defsEl);
-        const newText = doc.createElementNS(SVG_NS, 'text');
-        COPY_ATTRS.forEach((a) => { const v = textEl!.getAttribute(a); if (v) newText.setAttribute(a, v); });
-        newText.setAttribute('dominant-baseline', 'middle');
-        const tp = doc.createElementNS(SVG_NS, 'textPath');
-        tp.setAttribute('href', `#${arcId}`); tp.setAttribute('startOffset', '50%'); tp.setAttribute('text-anchor', 'middle');
-        tp.textContent = content;
-        newText.appendChild(tp); el.appendChild(newText);
-        textEl = newText;
-      } else if (currentCurve !== 0 && newCurve === 0) {
-        const tp = textEl.querySelector('textPath');
-        const content = tp?.textContent ?? textEl.textContent ?? '';
-        // Remove arc — may be directly in group (legacy) or inside <defs>
-        const arcEl = doc.getElementById(`_arc_${el.id}`) ?? el.querySelector('path');
-        if (arcEl) {
-          const arcParent = arcEl.parentNode;
-          arcParent?.removeChild(arcEl);
-          if (arcParent && arcParent.nodeName.toLowerCase() === 'defs' && !arcParent.firstChild) {
-            arcParent.parentNode?.removeChild(arcParent);
-          }
-        }
-        el.removeChild(textEl);
-        const newText = doc.createElementNS(SVG_NS, 'text');
-        newText.setAttribute('y', String(cy));
-        newText.setAttribute('text-anchor', 'middle'); newText.setAttribute('dominant-baseline', 'middle');
-        COPY_ATTRS.forEach((a) => { const v = textEl!.getAttribute(a); if (v) newText.setAttribute(a, v); });
-        setTextLines(newText, content, cx);
-        el.appendChild(newText);
-        textEl = newText;
-      }
-      // No non-zero → non-zero case here: the arc's `d` is written once at the end of
-      // this function, where the text it has to fit is in its final state.
-    }
-
-    if (attrs.content !== undefined) {
-      const tp = textEl.querySelector('textPath');
-      // Curved text has one baseline and cannot stack; flat text re-emits its lines,
-      // keeping the x it already had so editing the string never moves the field.
-      if (tp) tp.textContent = attrs.content.replace(/\s*\n\s*/g, ' ');
-      else setTextLines(textEl, attrs.content, Number(textEl.getAttribute('x') ?? 0));
-    }
-    if (attrs.font   !== undefined) textEl.setAttribute('font-family', attrs.font);
-    // A font pick applies to the whole selection, not just the row the inspector is
-    // pointed at — with several text layers selected the dropdown reads as acting on all
-    // of them. Only the font fans out; size/weight/colour/content stay single-layer.
-    // Non-text layers in the selection are skipped so a shape never picks up font-family.
-    if (attrs.font !== undefined && selectedLayers.size > 1) {
-      for (const id of selectedLayers) {
-        if (id === selectedLayer || !textLayerIds.has(id)) continue;
-        const otherEl = doc.getElementById(id);
-        if (!otherEl) continue;
-        // Same resolution as the primary layer above, so both behave identically: the
-        // inner <text> for a text group, otherwise the element itself (font-family
-        // inherits to any text inside it).
-        const otherText = otherEl.getAttribute('data-text-layer') === '1'
-          ? otherEl.querySelector('text')
-          : otherEl;
-        if (otherText) otherText.setAttribute('font-family', attrs.font);
-      }
-    }
-    if (attrs.size   !== undefined) textEl.setAttribute('font-size', String(attrs.size));
-    if (attrs.weight !== undefined) textEl.setAttribute('font-weight', String(attrs.weight));
-    if (attrs.color  !== undefined) textEl.setAttribute('fill', attrs.color);
-    if (attrs.letterSpacing !== undefined) {
-      if (attrs.letterSpacing === 0) textEl.removeAttribute('letter-spacing');
-      else textEl.setAttribute('letter-spacing', `${attrs.letterSpacing}em`);
-    }
-
-    // Re-arc. The arc's placement depends on how much room the string takes along it, so
-    // it has to be recomputed after every edit that changes that — not just the curve.
-    // It runs here, once, rather than inside the curve branch above, because that branch
-    // executes before content/font/size/letter-spacing are applied and would measure the
-    // text as it was rather than as it now is.
-    const curveNow = isGroup ? Number(el.getAttribute('data-curve') ?? 0) : 0;
-    const reArc =
-      attrs.curve !== undefined || attrs.content !== undefined || attrs.font !== undefined ||
-      attrs.size !== undefined || attrs.letterSpacing !== undefined;
-    if (isGroup && curveNow !== 0 && reArc) {
-      const arcEl = doc.getElementById(`_arc_${el.id}`) ?? el.querySelector('path');
-      if (arcEl) {
-        arcEl.setAttribute('d', computeArcPath(
-          Number(el.getAttribute('data-cx') ?? 0),
-          Number(el.getAttribute('data-cy') ?? 0),
-          curveNow,
-          measureTextAdvance(doc.documentElement, el.id),
-          Number(el.getAttribute('data-halfw') ?? 100),
-        ));
-      }
-    }
-
-    const content = new XMLSerializer().serializeToString(doc.documentElement);
-    setActiveSvg((prev) => {
-      if (!prev) return null;
-      const layers = attrs.content !== undefined
-        ? prev.layers.map((l) => l.id === selectedLayer ? { ...l, label: layerLabel(attrs.content!) || l.label } : l)
-        : prev.layers;
-      return { ...prev, content, layers };
-    });
-  }, [selectedLayer, selectedLayers, textLayerIds, activeSvg, snapshotForUndo]);
-
-  // ── Inline text editing ────────────────────────────────────────────────────
-  // Double-clicking a text layer types straight onto the artwork instead of into the
-  // Text tab. The editable node is an HTML overlay, not the SVG <text> itself: the
-  // document lives as a string that is re-parsed and re-rendered on every edit, so a
-  // contentEditable inside it would be destroyed on the first keystroke.
-  //
-  // Curved text is deliberately excluded — see handleCanvasClick, where editing starts.
-  //
-  // Push the current text in and select it, so the first keypress replaces the word —
-  // which is what double-clicking a word is asking for. Runs on entry only; after that
-  // the node is the user's to type in.
-  //
-  // The text comes from THIS render's selection, checked against the id being edited —
-  // not from selectedTextPropsRef, which is only brought up to date by a passive effect
-  // and so can still hold the previous field's words when this runs. And it re-runs when
-  // the overlay appears: the editor lives inside it, and the canvas dot opens editing a
-  // couple of frames after making the field, which on a heavy file can be before the
-  // overlay has rendered. Keyed on the id alone, that early run found no node and never
-  // came back, so the editor mounted empty (or, reusing the last node, showing the last
-  // field's words) over glyphs it had already hidden.
-  useLayoutEffect(() => {
-    if (!editingTextId) return;
-    const node = textEditorRef.current;
-    if (!node) return;
-    node.textContent = selectedLayer === editingTextId ? selectedTextProps?.content ?? '' : '';
-    node.focus();
-    const range = document.createRange();
-    range.selectNodeContents(node);
-    const sel = window.getSelection();
-    sel?.removeAllRanges();
-    sel?.addRange(range);
-    // Deliberately not keyed on the content or selection: re-running as they change would
-    // re-select everything mid-typing.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [editingTextId, showSelectionOverlay]);
-
-  const endInlineEdit = useCallback(() => {
-    setEditingTextId(null);
-    window.getSelection()?.removeAllRanges();
-  }, []);
-
-  // Type styling for the editor, mirroring the layer it stands over. Font size is absent
-  // on purpose — it depends on the board scale and is written onto the node by the
-  // overlay positioning pass.
-  const inlineEditStyle = useMemo(() => ({
-    fontFamily: selectedTextProps?.font ?? 'Arial',
-    fontWeight: selectedTextProps?.weight ?? 400,
-    color: selectedTextProps?.color ?? '#000000',
-    letterSpacing: selectedTextProps?.letterSpacing ?? 0,
-  }), [selectedTextProps?.font, selectedTextProps?.weight, selectedTextProps?.color, selectedTextProps?.letterSpacing]);
-
-  // Every keystroke goes through the same path the Text tab's Words field uses, so the
-  // two are never out of step and a whole edit session is still one undo entry.
-  const onInlineTextInput = useCallback(() => {
-    const node = textEditorRef.current;
-    if (!node) return;
-    // innerText, not textContent: a contentEditable holds its line breaks as <div>/<br>
-    // elements, which textContent drops silently — typing Return on the canvas would
-    // then join the two lines back together on the next keystroke.
-    updateTextLayer({ content: node.innerText ?? '' });
-  }, [updateTextLayer]);
-
-  // Leaving edit mode whenever the selection moves off the layer being typed into —
-  // clicking another layer, deleting this one, or opening a group.
-  useEffect(() => {
-    if (editingTextId && selectedLayer !== editingTextId) setEditingTextId(null);
-  }, [selectedLayer, editingTextId]);
+  const { endInlineEdit, inlineEditStyle, onInlineTextInput } = useInlineTextEdit({
+    editingTextId, setEditingTextId, textEditorRef, selectedLayer, selectedTextProps, showSelectionOverlay,
+    updateTextLayer,
+  });
 
   // The Text tab is always live — it has no empty state, so the controls need something
   // to read and write whether or not a text layer is selected. Selected: the layer's own
@@ -2612,20 +1530,6 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     if (selectionIsText) updateTextLayer(attrs);
     else setTextForm((f) => ({ ...f, ...attrs }));
   }, [selectionIsText, updateTextLayer]);
-
-  // Toggle a suggested font: deselect if already selected, else apply it to the
-  // selected text layer (or the pending text-form default when nothing is selected).
-  // Defined after updateTextLayer/selectedTextProps so it can depend on them.
-  const onSelectImageFont = useCallback((font: string) => {
-    setSelectedImageFont((prev) => {
-      const next = prev === font ? null : font;
-      if (next) {
-        if (selectedTextProps) updateTextLayer({ font: next });
-        else setTextForm((f) => ({ ...f, font: next }));
-      }
-      return next;
-    });
-  }, [selectedTextProps, updateTextLayer]);
 
   // ── Add text layer ─────────────────────────────────────────────────────────
 
@@ -2720,136 +1624,13 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     setControlTab('text');
   }, [activeSvg, textForm, snapshotForUndo]);
 
-  // ── Center to canvas horizontal midpoint ─────────────────────────────────
+  // ── Arrange: centre, tidy, match rotation, rotate 90° (use-arrange-actions.ts) ──
 
-  const centerLayersToCanvas = useCallback(() => {
-    if (!activeSvg) return;
-    const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
-    if (!svgEl) return;
-    const screenCTM = svgEl.getScreenCTM();
-    if (!screenCTM) return;
-    const inv = screenCTM.inverse();
-
-    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
-    const vb = (doc.documentElement.getAttribute('viewBox') ?? '').trim().split(/[\s,]+/).map(Number);
-    if (vb.length < 4) return;
-    const canvasCenterX = vb[0] + vb[2] / 2;
-
-    // Which layers move, and by how far.
-    const shifts: { id: string; dx: number }[] = [];
-    if (selectionIds.length > 0) {
-      // With a selection, Center acts on it and nothing else. Several layers move as
-      // one block: the union box's midpoint goes to the canvas midpoint and every
-      // selected layer shifts by that SAME delta, so the spacing between them survives
-      // — centring each one individually would stack them all on the midline. For a
-      // single layer the union is just its own box, so it centres itself.
-      const box = unionBoxInRootSpace(svgEl, selectionIds);
-      if (!box) return;
-      const dx = canvasCenterX - (box.x + box.width / 2);
-      selectionIds.forEach((id) => shifts.push({ id, dx }));
-    } else {
-      // Nothing selected: every layer is centred on its own.
-      activeSvg.layers.forEach(({ id }) => {
-        if (id === backgroundLayerId) return;
-        const liveEl = svgEl.getElementById(id);
-        if (!liveEl) return;
-        const r = liveEl.getBoundingClientRect();
-        const pt = svgEl.createSVGPoint();
-        pt.x = r.left + r.width / 2;
-        pt.y = r.top + r.height / 2;
-        const center = pt.matrixTransform(inv);
-        shifts.push({ id, dx: canvasCenterX - center.x });
-      });
-    }
-
-    let changed = false;
-    shifts.forEach(({ id, dx }) => {
-      if (Math.abs(dx) < 0.5) return;
-      const docEl = doc.getElementById(id);
-      if (!docEl) return;
-      const existing = docEl.getAttribute('transform') ?? '';
-      docEl.setAttribute('transform', `translate(${dx.toFixed(2)},0) ${existing}`.trim());
-      changed = true;
-    });
-
-    if (!changed) return;
-    snapshotForUndo(activeSvg.content, activeSvg.layers);
-    const content = new XMLSerializer().serializeToString(doc.documentElement);
-    setActiveSvg((prev) => (prev ? { ...prev, content } : null));
-  }, [activeSvg, selectionIds, backgroundLayerId, snapshotForUndo]);
-
-  // ── Tidy: even out the gaps across the selection, down or across ─────────
-
-  const tidySelectionAlong = useCallback((axis: 'x' | 'y') => {
-    if (!activeSvg || selectionIds.length < 3) return;
-    const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
-    if (!svgEl) return;
-
-    // Position and extent along the axis being tidied.
-    const at = (b: DOMRect) => (axis === 'y' ? b.y : b.x);
-    const extent = (b: DOMRect) => (axis === 'y' ? b.height : b.width);
-
-    // Each selected layer's own box, in order along the axis.
-    const items = selectionIds
-      .map((id) => ({ id, box: unionBoxInRootSpace(svgEl, [id]) }))
-      .filter((it): it is { id: string; box: DOMRect } => !!it.box)
-      .sort((a, b) => at(a.box) - at(b.box));
-    if (items.length < 3) return;
-
-    // Distribute SPACING, not centres. Equalising the distance between centres is the
-    // other thing this button could mean and it is the wrong one for type: rows of
-    // different cap heights (or words of different lengths, across) end up with visibly
-    // uneven whitespace between them even though their centres are evenly spread. What
-    // reads as tidy is equal GAPS.
-    //
-    // The outermost two stay put — they are what the run is measured between, and moving
-    // them would drift the whole block across the canvas.
-    const first = items[0];
-    const last = items[items.length - 1];
-    const span = (at(last.box) + extent(last.box)) - at(first.box);
-    const inked = items.reduce((sum, it) => sum + extent(it.box), 0);
-    const gap = (span - inked) / (items.length - 1);
-
-    // A negative gap means the selection overlaps along the axis: the layers are bigger,
-    // added up, than the run they sit in, so there is no spacing to even out and the
-    // arithmetic answers with overlap instead. Acting on that shuffles artwork into a
-    // worse position than it started in — three full-height groups produced a -50 gap and
-    // moved a heading below its contact block. Evening out gaps that do not exist is not a
-    // thing the button can do, so it declines rather than inventing an answer.
-    if (gap < 0) {
-      if (__DEV__) console.log(
-        `[tidy ${axis}] declined — the ${items.length} selected layer(s) overlap ` +
-        `(${inked.toFixed(0)} of ink in a ${span.toFixed(0)} run), so there are no gaps to even`,
-      );
-      return;
-    }
-
-    const shifts: { id: string; delta: number }[] = [];
-    let cursor = at(first.box) + extent(first.box) + gap;
-    for (let i = 1; i < items.length - 1; i++) {
-      shifts.push({ id: items[i].id, delta: cursor - at(items[i].box) });
-      cursor += extent(items[i].box) + gap;
-    }
-    if (shifts.every(({ delta }) => Math.abs(delta) < 0.5)) return;
-
-    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
-    let changed = false;
-    shifts.forEach(({ id, delta }) => {
-      if (Math.abs(delta) < 0.5) return;
-      const docEl = doc.getElementById(id);
-      if (!docEl) return;
-      const existing = docEl.getAttribute('transform') ?? '';
-      const move = axis === 'y' ? `translate(0,${delta.toFixed(2)})` : `translate(${delta.toFixed(2)},0)`;
-      docEl.setAttribute('transform', `${move} ${existing}`.trim());
-      changed = true;
-    });
-    if (!changed) return;
-
-    if (__DEV__) console.log(`[tidy ${axis}] evened ${items.length} layer(s) to a ${gap.toFixed(1)} gap`);
-    snapshotForUndo(activeSvg.content, activeSvg.layers);
-    const content = new XMLSerializer().serializeToString(doc.documentElement);
-    setActiveSvg((prev) => (prev ? { ...prev, content } : null));
-  }, [activeSvg, selectionIds, snapshotForUndo]);
+  const {
+    centerLayersToCanvas, tidySelection, tidySelectionHorizontal, matchRotationToSelected, rotateSelected90,
+  } = useArrangeActions({
+    activeSvg, setActiveSvg, svgCanvasRef, selectionIds, selectedLayers, backgroundLayerId, snapshotForUndo,
+  });
 
   // ── New design: open the selection as a document of its own ───────────────
 
@@ -2882,183 +1663,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     selectOne(null);
   }, [activeSvg, selectionIds, hiddenLayers, snapshotForUndo, selectOne]);
 
-  const tidySelection = useCallback(() => tidySelectionAlong('y'), [tidySelectionAlong]);
-  const tidySelectionHorizontal = useCallback(() => tidySelectionAlong('x'), [tidySelectionAlong]);
-
-  // ── Match every layer's rotation to the selected layer ────────────────────
-  // Reads the selected layer's rotation (relative to the SVG root) and rotates
-  // each other non-background layer about its own centre so its final rotation
-  // matches. Requires exactly one selected layer as the reference.
-
-  const matchRotationToSelected = useCallback(() => {
-    if (!activeSvg || selectedLayers.size !== 1) return;
-    const selId = [...selectedLayers][0];
-    if (selId === backgroundLayerId) return;
-    const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
-    if (!svgEl) return;
-    const rootCtm = svgEl.getScreenCTM();
-    const selEl = svgEl.getElementById(selId) as SVGGraphicsElement | null;
-    const selCtm = selEl?.getScreenCTM();
-    if (!rootCtm || !selEl || !selCtm) return;
-
-    // Rotation of an element relative to root = angle of (root⁻¹ · elementCTM).
-    const rootInv = rootCtm.inverse();
-    const angleOf = (m: DOMMatrix) => Math.atan2(m.b, m.a) * 180 / Math.PI;
-    const targetAngle = angleOf(rootInv.multiply(selCtm));
-
-    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
-    let changed = false;
-    activeSvg.layers.forEach(({ id }) => {
-      if (id === backgroundLayerId || id === selId) return;
-      const liveEl = svgEl.getElementById(id) as SVGGraphicsElement | null;
-      const docEl = doc.getElementById(id);
-      const ctm = liveEl?.getScreenCTM();
-      if (!liveEl || !docEl || !ctm) return;
-      const delta = targetAngle - angleOf(rootInv.multiply(ctm));
-      if (Math.abs(delta) < 0.01) return;
-      const box = bboxInRootSpace(svgEl, liveEl);
-      if (!box) return;
-      const cx = box.x + box.width / 2;
-      const cy = box.y + box.height / 2;
-      const existing = docEl.getAttribute('transform') ?? '';
-      docEl.setAttribute(
-        'transform',
-        `rotate(${delta.toFixed(2)}, ${cx.toFixed(2)}, ${cy.toFixed(2)}) ${existing}`.trim(),
-      );
-      changed = true;
-    });
-
-    if (!changed) return;
-    snapshotForUndo(activeSvg.content, activeSvg.layers);
-    const content = new XMLSerializer().serializeToString(doc.documentElement);
-    setActiveSvg((prev) => (prev ? { ...prev, content } : null));
-  }, [activeSvg, selectedLayers, backgroundLayerId, snapshotForUndo]);
-
-  // ── Rotate the selection 90° (handoff §"Toolbar actions") ─────────────────
-  // Quarter-turn about each selected layer's own centre. No-op for the background.
-
-  const rotateSelected90 = useCallback(() => {
-    if (!activeSvg || !selectedLayers.size) return;
-    const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
-    if (!svgEl) return;
-
-    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
-    let changed = false;
-    [...selectedLayers].forEach((id) => {
-      if (id === backgroundLayerId) return;
-      const liveEl = svgEl.getElementById(id) as SVGGraphicsElement | null;
-      const docEl = doc.getElementById(id);
-      if (!liveEl || !docEl) return;
-      const box = bboxInRootSpace(svgEl, liveEl);
-      if (!box) return;
-      const cx = box.x + box.width / 2;
-      const cy = box.y + box.height / 2;
-      const existing = docEl.getAttribute('transform') ?? '';
-      docEl.setAttribute('transform', `rotate(90, ${cx.toFixed(2)}, ${cy.toFixed(2)}) ${existing}`.trim());
-      changed = true;
-    });
-
-    if (!changed) return;
-    snapshotForUndo(activeSvg.content, activeSvg.layers);
-    const content = new XMLSerializer().serializeToString(doc.documentElement);
-    setActiveSvg((prev) => (prev ? { ...prev, content } : null));
-  }, [activeSvg, selectedLayers, backgroundLayerId, snapshotForUndo]);
-
-  // ── Load + register a Google Font ─────────────────────────────────────────
-
-  const loadGoogleFontLink = useCallback((fontName: string, weight?: number) => {
-    const family = fontName.replace(/\s+/g, '+');
-    const slug = fontName.replace(/\s+/g, '-');
-    const inject = (id: string, href: string) => {
-      if (document.getElementById(id)) return;
-      const link = document.createElement('link');
-      link.id = id; link.rel = 'stylesheet'; link.href = href;
-      document.head.appendChild(link);
-    };
-    inject(`gfont-${slug}`, `https://fonts.googleapis.com/css2?family=${family}:wght@400;700&display=swap`);
-    // A weight outside the base pair goes in its OWN request rather than being appended to
-    // it. Google's css2 endpoint rejects the whole request when any requested weight is
-    // unavailable for the family, so folding an 800 into the base request would take 400
-    // and 700 down with it and leave the family with no faces at all. Split, the worst a
-    // missing weight costs is that one weight, and the browser synthesises it.
-    if (weight && weight !== 400 && weight !== 700) {
-      inject(`gfont-${slug}-${weight}`, `https://fonts.googleapis.com/css2?family=${family}:wght@${weight}&display=swap`);
-    }
-  }, []);
-
-  // A suggestion: offered, not yet applied to anything.
-  const addGoogleFont = useCallback((fontName: string, weight?: number) => {
-    setExtraFonts((prev) => prev.includes(fontName) ? prev : [...prev, fontName]);
-    loadGoogleFontLink(fontName, weight);
-  }, [loadGoogleFontLink]);
-
-  // A face a re-created text row is actually set in. Kept out of the suggestion list so
-  // one can be listed ahead of the other, and so a font in use never reads as a proposal.
-  const addUsedFont = useCallback((fontName: string, weight?: number) => {
-    if (!fontName) return;
-    setUsedFonts((prev) => prev.includes(fontName) ? prev : [...prev, fontName]);
-    loadGoogleFontLink(fontName, weight);
-  }, [loadGoogleFontLink]);
-
-  // ── Image-level font suggestions ──────────────────────────────────────────
-
-  const suggestFontsForImage = useCallback(async () => {
-    if (!activeSvg) return;
-    setImageFontsLoading(true);
-    setShowImageFonts(true);
-    try {
-      const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
-      const root = doc.documentElement;
-      const { w: vw, h: vh } = parseViewBox(root);
-      const scale = Math.min(1, 1024 / Math.max(vw, vh, 1));
-      const pngBase64 = await svgToBase64Png(activeSvg.content, Math.round(vw * scale), Math.round(vh * scale));
-
-      const raw = await callLlmVision({
-        model: 'claude-sonnet-5', maxTokens: 1000, pngBase64, tag: 'suggest-fonts',
-        prompt: `Look at this design image. Suggest ${FONT_SUGGESTION_LIMIT} Google Fonts that would complement its visual style, mood, colour palette, and aesthetic. Consider the overall feel of the design.
-Return JSON only, no markdown: {"suggestions":[{"font":"Font Name","reason":"brief reason"}]}`,
-      });
-      const parsed = JSON.parse(raw) as { suggestions: Array<{ font: string; reason: string }> };
-      // Capped as well as asked for: the model is not bound by the number in the prompt.
-      const suggestions = (parsed.suggestions ?? []).slice(0, FONT_SUGGESTION_LIMIT);
-      suggestions.forEach(({ font }) => loadGoogleFontLink(font));
-      setImageFonts(suggestions);
-    } catch (err) {
-      console.error('Font suggestion failed:', err);
-      setImageFonts([]);
-    } finally {
-      setImageFontsLoading(false);
-    }
-  }, [activeSvg, loadGoogleFontLink]);
-
-
   // ── Customise (strip all text + font suggestions) ─────────────────────────
-
-  // Tell the review host the asset has been customised, once the pass has actually
-  // succeeded. Only meaningful for a /<uuid> deep link — a dropped file or a sample has
-  // no uuid to report against. Fire-and-forget and self-contained: the artwork on the
-  // canvas is already correct, so a failed notification must not surface as a failed
-  // customise. Logged under [review/customised] like the other review calls.
-  const notifyCustomised = useCallback(async () => {
-    // The uuid of whatever is on the canvas, not the one in the URL: an asset opened
-    // from the dev rail's dropdown has no uuid in the path, and keying off `reviewUuid`
-    // meant those runs silently notified nothing.
-    const uuid = openReviewUuidRef.current;
-    if (!uuid) return;
-    // The host rewrites the SVG for a customised asset, so the copy held for this uuid
-    // is no longer the artwork — drop it and let the next open fetch it fresh.
-    reviewCacheRef.current.delete(uuid);
-    try {
-      const res = await fetch(`/api/review/customised/${uuid}`, { method: 'POST' });
-      const data = (await res.json()) as { message?: string; error?: { message?: string } };
-      console.log(`[review/customised] ${uuid} -> ${res.status}`, data);
-      if (!res.ok || data.message !== 'success') {
-        console.log('[review/customised] upstream did not report success');
-      }
-    } catch (err) {
-      console.log(`[review/customised] ${uuid} failed:`, err);
-    }
-  }, []);
 
   const runCustomise = useCallback(async () => {
     if (!activeSvg) return;
@@ -3560,133 +2165,11 @@ Return ONLY valid JSON — no markdown, no explanation:
     }
   }, [activeSvg]);
 
-  // ── Color replace ─────────────────────────────────────────────────────────
+  // ── Colour replace (use-color-replace.ts) ──────────────────────────────────
 
-  // Find & replace one colour across the selected layer (handoff §"Find & replace
-  // colours"): every shape using `from` — attributes, inline styles, class rules and
-  // referenced gradient stops — becomes `to`.
-  //
-  // The picker fires continuously while the user drags, so the first call of a session
-  // records one undo entry and the document as its baseline; every later call replays
-  // the replacement from that baseline instead of stacking edits.
-  const replaceLayerColor = useCallback((from: string, to: string) => {
-    if (!activeSvg || !selectedLayer || !from) return;
-
-    let session = colorEditRef.current;
-    if (!session || session.from !== from) {
-      snapshotForUndo(activeSvg.content, activeSvg.layers);
-      session = { from, baseline: activeSvg.content };
-      colorEditRef.current = session;
-    }
-
-    const applyTo = to;
-    const normalFrom = normalizeColor(from);
-    const doc = new DOMParser().parseFromString(session.baseline, 'image/svg+xml');
-    const layerEl = doc.getElementById(selectedLayer);
-    if (!layerEl) return;
-
-    const COLOR_ATTRS = ['fill', 'stroke', 'color', 'stop-color', 'flood-color', 'lighting-color'];
-
-    // Replace color values in a CSS/style string
-    const replaceInCss = (css: string): { result: string; changed: boolean } => {
-      let changed = false;
-      const result = css.replace(
-        /(fill|stroke|color|stop-color|flood-color|lighting-color)\s*:\s*([^;{}]+)/gi,
-        (_, prop: string, val: string) => {
-          if (normalizeColor(val.trim()) === normalFrom) { changed = true; return `${prop}: ${applyTo}`; }
-          return `${prop}: ${val}`;
-        },
-      );
-      return { result, changed };
-    };
-
-    // Replace on a single element's attributes + inline style
-    const processEl = (el: Element) => {
-      COLOR_ATTRS.forEach((attr) => {
-        const val = el.getAttribute(attr);
-        if (val && normalizeColor(val) === normalFrom) el.setAttribute(attr, applyTo);
-      });
-      const style = el.getAttribute('style');
-      if (style) {
-        const { result, changed } = replaceInCss(style);
-        if (changed) el.setAttribute('style', result);
-      }
-    };
-
-    processEl(layerEl);
-    layerEl.querySelectorAll('*').forEach((el) => processEl(el));
-
-    // Shapes that never declare a fill have nothing to rewrite, yet they do paint —
-    // inherited, or black by default — and that colour is offered as a swatch. Set the
-    // fill on them so picking it actually recolours the shape instead of doing nothing.
-    [layerEl, ...Array.from(layerEl.querySelectorAll('*'))].forEach((el) => {
-      const tag = el.tagName.toLowerCase().replace(/.*:/, '');
-      if (!PAINTABLE_TAGS.has(tag) || declaresOwnFill(el, doc)) return;
-      const fill = effectiveFill(el, doc);
-      if (fill && normalizeColor(fill) === normalFrom) el.setAttribute('fill', applyTo);
-    });
-
-    // For CSS class rules in <style> blocks: the rules are document-scoped, so rewriting
-    // them would affect every layer sharing that class. Instead, add inline style overrides
-    // on the specific elements within this layer — inline styles win specificity, leaving
-    // all other layers untouched.
-    const layerClassNames = new Set<string>();
-    [layerEl, ...Array.from(layerEl.querySelectorAll('[class]'))].forEach((el) => {
-      el.getAttribute('class')?.split(/\s+/).forEach((c) => c && layerClassNames.add(c));
-    });
-
-    // Build map: className → set of CSS property names that carry the "from" color
-    const classProps = new Map<string, Set<string>>();
-    doc.querySelectorAll('style').forEach((styleEl) => {
-      const css = styleEl.textContent ?? '';
-      for (const ruleMatch of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
-        const selectors = ruleMatch[1].split(',');
-        const declarations = ruleMatch[2];
-        [...layerClassNames].forEach((cls) => {
-          if (!selectors.some((s) => s.includes(`.${cls}`))) return;
-          for (const dm of declarations.matchAll(/(fill|stroke|color|stop-color|flood-color|lighting-color)\s*:\s*([^;{}]+)/gi)) {
-            if (normalizeColor(dm[2].trim()) === normalFrom) {
-              if (!classProps.has(cls)) classProps.set(cls, new Set());
-              classProps.get(cls)!.add(dm[1].toLowerCase());
-            }
-          }
-        });
-      }
-    });
-
-    if (classProps.size > 0) {
-      [layerEl, ...Array.from(layerEl.querySelectorAll('*'))].forEach((el) => {
-        const classes = (el.getAttribute('class') ?? '').split(/\s+/).filter(Boolean);
-        const propsToSet = new Set<string>();
-        classes.forEach((cls) => classProps.get(cls)?.forEach((p) => propsToSet.add(p)));
-        if (propsToSet.size === 0) return;
-        // Merge new values into existing inline style without duplicating properties
-        const styleMap = new Map<string, string>();
-        (el.getAttribute('style') ?? '').split(';').forEach((decl) => {
-          const idx = decl.indexOf(':');
-          if (idx === -1) return;
-          styleMap.set(decl.slice(0, idx).trim().toLowerCase(), decl.slice(idx + 1).trim());
-        });
-        propsToSet.forEach((prop) => styleMap.set(prop, applyTo));
-        el.setAttribute('style', [...styleMap.entries()].map(([p, v]) => `${p}: ${v}`).join('; '));
-      });
-    }
-
-    // Replace stop colors in gradients referenced by this layer
-    collectLayerGradientIds(layerEl, layerClassNames, doc).forEach((id) => {
-      const source = resolveGradient(id, doc);
-      source?.querySelectorAll('stop').forEach((stop) => {
-        const sc = stop.getAttribute('stop-color');
-        if (sc && normalizeColor(sc) === normalFrom) stop.setAttribute('stop-color', applyTo);
-      });
-    });
-
-    const content = new XMLSerializer().serializeToString(doc.documentElement);
-    setActiveSvg((prev) => (prev ? { ...prev, content } : null));
-  }, [activeSvg, selectedLayer, snapshotForUndo]);
-
-  // The picker closed — the next pick starts a fresh undo entry and baseline.
-  const endColorEdit = useCallback(() => { colorEditRef.current = null; }, []);
+  const { layerColors, replaceLayerColor, endColorEdit, resetColorEdit } = useColorReplace({
+    activeSvg, setActiveSvg, selectedLayer, snapshotForUndo,
+  });
 
   // ── AI layer actions ───────────────────────────────────────────────────────
 
@@ -3977,20 +2460,16 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     textEditSnappedRef.current = false;
     setAiError(null); setFontSuggestion(null); setSuggestedFontName(null);
     setShowRemoveTextInput(false); setRemoveTextQuery(''); setTextCheckResult(null);
-    colorEditRef.current = null;
+    resetColorEdit();
   }, [selectedLayer]);
 
   useEffect(() => {
-    setImageFonts(null);
-    setShowImageFonts(false);
-    setSelectedImageFont(null);
     setCustomiseFonts([]);
     // Fonts offered for the last artwork say nothing about this one, and left in place
     // they accumulate: the dropdown grew every AI font from every image opened since the
     // tab loaded. The <link> tags stay — a loaded webface costs nothing and may be needed
     // again — but nothing is listed until this artwork's own pass proposes it.
-    setUsedFonts([]);
-    setExtraFonts([]);
+    resetFonts();
     setTaxonomy(null);
     setTaxonomyLoading(false);
     setTaxonomyOpen(false);
@@ -4032,151 +2511,14 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     return () => window.removeEventListener('keydown', onKey);
   }, [undo, redo]);
 
-  // Duplicate a layer: deep-clone it, give the clone fresh ids, nudge it so it's visibly
-  // offset, insert it just above the original in paint order, and select it.
-  const duplicateLayer = useCallback((layerId: string) => {
-    if (!activeSvg) return;
-    const srcLayer = activeSvg.layers.find((l) => l.id === layerId);
-    if (!srcLayer) return;
-    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
-    const el = doc.getElementById(layerId);
-    if (!el) return;
-    snapshotForUndo(activeSvg.content, activeSvg.layers);
-    const clone = el.cloneNode(true) as Element;
-    const newId = `_layer_copy_${Date.now()}`;
-    remapClonedIds(clone, newId, layerId);
-    clone.setAttribute('transform', applyTranslateDelta(clone.getAttribute('transform') ?? '', 12, 12));
-    el.parentNode?.insertBefore(clone, el.nextSibling);
-    const content = new XMLSerializer().serializeToString(doc.documentElement);
-    const newLayer: SvgLayer = { id: newId, label: t('layers.copySuffix', { label: srcLayer.label }) };
-    setActiveSvg((prev) => {
-      if (!prev) return null;
-      const idx = prev.layers.findIndex((l) => l.id === layerId);
-      const layers = [...prev.layers];
-      layers.splice(idx < 0 ? layers.length : idx + 1, 0, newLayer);
-      return { ...prev, content, layers };
+  // ── Layer structure: duplicate, open a group, fold back, delete (use-layer-structure.ts) ──
+
+  const { duplicateLayer, duplicateLayersAsGroup, expandLayer, collapseLayer, deleteLayers, deleteLayer } =
+    useLayerStructure({
+      activeSvg, setActiveSvg, backgroundLayerId, selectedLayers, snapshotForUndo, selectOne,
+      setSelectedLayer, setSelectedLayers, setExpandDepth, setHiddenLayers, setRemovedRecords,
+      expandedLabelsRef, removedIdsRef, removedRecordsRef,
     });
-    setSelectedLayer(newId);
-    setSelectedLayers(new Set([newId]));
-  }, [activeSvg, snapshotForUndo]);
-
-  // Duplicate several layers at once: every selected element is cloned into ONE new <g>,
-  // which becomes a single new layer row. That is what a shift-selection paste should
-  // give — the pieces stay together, so they drag, rotate and scale as one thing, and the
-  // panel gains one row rather than N rows the user has to re-select to move again.
-  //
-  // The group is appended at the end of the root <svg>: with the sources sitting anywhere
-  // in the tree there is no single position that means "just above the originals", so it
-  // goes on top of everything. Hoisting to the root would otherwise strip the wrappers
-  // each source was drawn under, so every clone is re-wrapped in copies of its own
-  // ancestor chain and lands exactly on its original, before the group's nudge.
-  const duplicateLayersAsGroup = useCallback((layerIds: string[]) => {
-    if (!activeSvg) return;
-    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
-    const root = doc.documentElement;
-    const found = layerIds
-      .map((id) => ({ id, el: doc.getElementById(id) as Element | null }))
-      .filter((e): e is { id: string; el: Element } => !!e.el);
-    // Ids that went stale between copy and paste — a layer deleted in between, say — just
-    // drop out. With one element left there is nothing to nest, so it is a plain duplicate.
-    if (found.length < 2) {
-      if (found.length === 1) duplicateLayer(found[0].id);
-      return;
-    }
-    // Paint order, not selection order: the clones have to stack the way the originals do,
-    // and the selection is built in whatever order the rows were shift-clicked.
-    found.sort((a, b) =>
-      a.el.compareDocumentPosition(b.el) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1);
-
-    snapshotForUndo(activeSvg.content, activeSvg.layers);
-    const groupId = `_layer_copy_${Date.now()}`;
-    const group = doc.createElementNS('http://www.w3.org/2000/svg', 'g');
-    group.setAttribute('id', groupId);
-    group.setAttribute('transform', 'translate(12, 12)');
-    found.forEach(({ id, el }, i) => {
-      const clone = el.cloneNode(true) as Element;
-      // A namespace per clone, so two copies of the same sublayer can't collide.
-      remapClonedIds(clone, `${groupId}__${i}`, id);
-      group.appendChild(wrapInAncestorChain(clone, ancestorChain(el, root)));
-    });
-    root.appendChild(group);
-
-    const content = new XMLSerializer().serializeToString(root);
-    const firstLabel = activeSvg.layers.find((l) => l.id === found[0].id)?.label ?? t('layers.defaultLabel');
-    const newLayer: SvgLayer = { id: groupId, label: `${firstLabel} +${found.length - 1} copy` };
-    console.log(`[layers] pasted ${found.length} layers as group ${groupId}`);
-    // Last in document order is topmost, which is where the group was appended.
-    setActiveSvg((prev) => (prev ? { ...prev, content, layers: [...prev.layers, newLayer] } : null));
-    selectOne(groupId);
-  }, [activeSvg, duplicateLayer, snapshotForUndo, selectOne]);
-
-  // Open a layer into its parts: the row is replaced by one row per visual child, in
-  // document order. Files often deliver a whole logo as a single group, which leaves one
-  // row standing for a dozen separable pieces; this drills into it on demand rather than
-  // guessing at load, so a layer list that already suits an asset is never disturbed.
-  //
-  // The DOM is not restructured — the children stay inside their parent, so transforms,
-  // classes and inherited paint go on applying. Only the layer list changes, which is
-  // also why this is one-way: undo puts the single row back.
-  //
-  // `focusIndex` picks which of the new rows to select — the part a canvas double-click
-  // landed on. Without one nothing is selected, since the expanded row no longer exists.
-  const expandLayer = useCallback((layerId: string, focusIndex?: number) => {
-    if (!activeSvg) return;
-    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
-    const el = doc.getElementById(layerId);
-    if (!canExpandLayer(el)) return;
-
-    snapshotForUndo(activeSvg.content, activeSvg.layers);
-    // Through any single-child wrappers, so opening a wrapped group lands on the level
-    // that actually has alternatives rather than on another identical row.
-    const kids = expansionTarget(el);
-    const stamp = Date.now();
-
-    // Remember what this row was called before it stops being one. Backing out folds into
-    // the children's own parent, which is the wrapper the walk above ended on rather than
-    // the element the row pointed at, so the name is recorded against every element in
-    // between — each is a level the list can come back to, and all of them are the same
-    // piece of artwork under the one name. Wrappers are given an id where they have none,
-    // since the id is the only handle that survives the re-parse on the way back.
-    const srcLabel = activeSvg.layers.find((l) => l.id === layerId)?.label;
-    if (srcLabel) {
-      let wrapper: Element | null = kids[0]?.parentElement ?? null;
-      for (let up = 0; wrapper && up < 16; up++, wrapper = wrapper.parentElement) {
-        if (!wrapper.id) wrapper.id = `_grp_${stamp}_${up}`;
-        expandedLabelsRef.current.set(wrapper.id, srcLabel);
-        if (wrapper === el) break;
-      }
-    }
-    // What an AI pass took, keyed by element, so opening the layer it came out of names
-    // it rather than falling through to "g 8". These rows are the way hidden artwork is
-    // switched back on, and a positional label gives no way to tell which is which — on
-    // a diagram of eight stacked labels, eight rows reading "g 1".."g 8" are unusable.
-    const removedByEl = new Map(removedRecordsRef.current.map((r) => [r.id, r]));
-    const newLayers: SvgLayer[] = kids.map((kid, i) => {
-      if (!kid.id) kid.id = `_sub_${stamp}_${i}`;
-      const claimedBy = removedByEl.get(kid.id)?.claimedBy;
-      const label =
-        kid.getAttribute('data-name')?.trim() ||
-        (claimedBy ? `${claimedBy} (original)` : null) ||
-        (!isSyntheticLayerId(kid.id) ? kid.id : null) ||
-        `${kid.tagName.toLowerCase().replace(/.*:/, '')} ${i + 1}`;
-      return { id: kid.id, label };
-    });
-
-    const content = new XMLSerializer().serializeToString(doc.documentElement);
-    console.log(`[layers] expanded ${layerId} into ${newLayers.length} sublayers`);
-    setExpandDepth((d) => d + 1);
-    setActiveSvg((prev) => {
-      if (!prev) return null;
-      const idx = prev.layers.findIndex((l) => l.id === layerId);
-      const layers = [...prev.layers];
-      layers.splice(idx < 0 ? layers.length : idx, idx < 0 ? 0 : 1, ...newLayers);
-      return { ...prev, content, layers };
-    });
-    // The expanded layer no longer exists as a row, so selecting it would dangle.
-    selectOne(focusIndex !== undefined ? newLayers[focusIndex]?.id ?? null : null);
-  }, [activeSvg, snapshotForUndo, selectOne]);
 
   // Double-click on the canvas: go to the Layers tab and open the layer under the pointer
   // into its parts, selecting the part that was clicked — so repeated double-clicks walk
@@ -4207,126 +2549,11 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     expandLayer(hit.id, focus >= 0 ? focus : undefined);
   }, [activeSvg, backgroundLayerId, expandableLayerIds, expandLayer]);
 
-  // The way back out of a group that was drilled into: fold this row and every sibling
-  // row taken from the same group back into one row for the group itself. The inverse of
-  // expandLayer, and equally a layer-list-only change — the elements never moved, so
-  // there is nothing to put back.
-  //
-  // It steps out one level at a time, so repeatedly backing out walks up the wrappers.
-  // That can land on the single wrapper an asset started as; expanding again reopens it.
-  const collapseLayer = useCallback((layerId: string) => {
-    if (!activeSvg) return;
-    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
-    const layerIds = new Set(activeSvg.layers.map((l) => l.id));
-    const parent = collapsibleParent(doc.getElementById(layerId), layerIds);
-    if (!parent) return;
-
-    // Everything currently listed that lives inside this group folds away together —
-    // leaving some of its children as rows and not others would be a half-open group.
-    const absorbed = activeSvg.layers.filter((l) => {
-      const el = doc.getElementById(l.id);
-      return !!el && parent.contains(el);
-    });
-    if (!absorbed.length) return;
-
-    snapshotForUndo(activeSvg.content, activeSvg.layers);
-    if (!parent.id) parent.id = `_grp_${Date.now()}`;
-
-    // Ids this app generated are plumbing, not names — showing one turns "Layer 3" into
-    // "_layer_2" on the way back out. Fall back to the same positional naming parseSvg
-    // uses, which restores the name the row had before it was opened.
-    const firstIdx = activeSvg.layers.findIndex((l) => l.id === absorbed[0].id);
-    const label = groupLabelFor(parent, firstIdx < 0 ? activeSvg.layers.length : firstIdx, expandedLabelsRef.current);
-
-    const content = new XMLSerializer().serializeToString(doc.documentElement);
-    const absorbedIds = new Set(absorbed.map((l) => l.id));
-
-    console.log(`[layers] collapsed ${absorbed.length} row(s) into ${parent.id}`);
-    // Back up one level. Floored at zero so a collapse reached some other way — a row
-    // deleted out from under the list, say — cannot drive it negative and re-offer
-    // back-out at the root.
-    setExpandDepth((d) => Math.max(0, d - 1));
-    setActiveSvg((prev) => {
-      if (!prev) return null;
-      const first = prev.layers.findIndex((l) => absorbedIds.has(l.id));
-      const layers = prev.layers.filter((l) => !absorbedIds.has(l.id));
-      layers.splice(first < 0 ? layers.length : first, 0, { id: parent.id, label });
-      return { ...prev, content, layers };
-    });
-    selectOne(parent.id);
-  }, [activeSvg, snapshotForUndo, selectOne]);
-
   // The Layers tab's breadcrumb. Stable for the memoised control panel; a no-op at the
   // top level, where the breadcrumb isn't rendered at all.
   const onBackOutOfDrill = useCallback(() => {
     if (drillContext) collapseLayer(drillContext.backOutId);
   }, [drillContext, collapseLayer]);
-
-  // Delete layers (their elements and their layers-list entries). Undoable, as one
-  // step: a multi-row delete is one action to the person who asked for it, so one undo
-  // has to put all of it back rather than making them press it once per layer.
-  const deleteLayers = useCallback((requestedIds: string[]) => {
-    if (!activeSvg) return;
-    // The background layer is locked everywhere else — the overlay won't frame it and
-    // the handles won't move it — so it can't be the one thing a delete does reach.
-    const ids = requestedIds.filter((id) => id !== backgroundLayerId);
-    if (!ids.length) return;
-
-    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
-
-    // Removing a group takes its descendants out of the document with it, so they have
-    // to leave the layers list too. Expanding a group lists its children as rows of
-    // their own: without this, deleting the group leaves those rows behind pointing at
-    // elements that no longer exist, and the export count keeps counting them.
-    //
-    // Collected from the document rather than the layers list because the list only
-    // holds what is currently expanded, while the removal takes the whole subtree.
-    const gone = new Set<string>();
-    for (const id of ids) {
-      const el = doc.getElementById(id);
-      if (!el) continue;
-      gone.add(id);
-      for (const child of el.querySelectorAll('[id]')) gone.add(child.id);
-      el.remove();
-    }
-    // Nothing resolved to a real element — don't snapshot an edit that didn't happen,
-    // which would otherwise cost the user an undo press that appears to do nothing.
-    if (!gone.size) return;
-
-    snapshotForUndo(activeSvg.content, activeSvg.layers);
-    const content = new XMLSerializer().serializeToString(doc.documentElement);
-    setActiveSvg((prev) => (
-      prev ? { ...prev, content, layers: prev.layers.filter((l) => !gone.has(l.id)) } : null
-    ));
-
-    const withoutGone = (prev: Set<string>) => {
-      const next = new Set([...prev].filter((id) => !gone.has(id)));
-      return next.size === prev.size ? prev : next;
-    };
-    setSelectedLayer((cur) => (cur && gone.has(cur) ? null : cur));
-    setSelectedLayers(withoutGone);
-    // Hidden ids for elements that are gone would keep the overlay and the export count
-    // reasoning about artwork that no longer exists. Unlike dropSelectionOutside there
-    // is no exemption for AI-hidden nested ids here: those elements have been removed
-    // from the document outright, not merely filtered out of the rows.
-    setHiddenLayers(withoutGone);
-    // A restore entry for a deleted element would offer to bring back something with
-    // nowhere to go. Mirrors the pruning toggleLayer does when a row is shown again.
-    setRemovedRecords((prev) => {
-      if (!prev.some((r) => gone.has(r.id))) return prev;
-      removedIdsRef.current = new Set([...removedIdsRef.current].filter((x) => !gone.has(x)));
-      return prev.filter((r) => !gone.has(r.id));
-    });
-  }, [activeSvg, backgroundLayerId, snapshotForUndo]);
-
-  // The row's trash button. Deleting a row that is part of a multi-row selection takes
-  // the whole selection, matching toggleLayer: with several rows selected, an action on
-  // one of them is read as an action on all of them. Clicking the trash on a row
-  // *outside* the selection still deletes only that row — it isn't what was selected.
-  const deleteLayer = useCallback((layerId: string) => {
-    const ids = selectedLayers.size > 1 && selectedLayers.has(layerId) ? [...selectedLayers] : [layerId];
-    deleteLayers(ids);
-  }, [selectedLayers, deleteLayers]);
 
   // Delete/Backspace removes whatever is selected on the canvas, so a selection made by
   // clicking artwork can be deleted without hunting for its row in the panel.
@@ -4594,17 +2821,6 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
             onScaleHandleMouseDown={handleScaleHandleMouseDown}
           />
 
-          {/* Font suggestions strip (memoised) — see editor-font-suggestions.tsx */}
-          <FontSuggestions
-            open={showImageFonts}
-            onClose={closeImageFonts}
-            loading={imageFontsLoading}
-            fonts={imageFonts}
-            selectedFont={selectedImageFont}
-            onSelectFont={onSelectImageFont}
-            onAddFont={addGoogleFont}
-          />
-
           {activeSvg && (
             <>
               {/* The one control panel — inspector and elements list behind three tabs
@@ -4666,7 +2882,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                     textCheckResult, setTextCheckResult,
                   }}
                   fonts={{
-                    extra: extraFonts, imageFonts, imageFontsLoading,
+                    extra: extraFonts,
                     customiseFonts, customiseLoading, customiseDone,
                   }}
                   taxonomy={{ data: taxonomy, loading: taxonomyLoading, open: taxonomyOpen, setOpen: setTaxonomyOpen }}

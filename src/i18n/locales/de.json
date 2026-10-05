@@ -1,7 +1,5 @@
 {
   "toolbar": {
-    "loading": "Wird geladen…",
-    "unsavedChanges": "Nicht gespeicherte Änderungen",
     "undo": "Rückgängig",
     "undoTitle": "Rückgängig (⌘Z)",
     "redo": "Wiederholen",
@@ -32,10 +30,6 @@
     "colours": "Farben"
   },
   "inspector": {
-    "titleText": "Text bearbeiten",
-    "titleBackground": "Hintergrund",
-    "titleColours": "Vektorfarben",
-    "titleEmpty": "Nichts ausgewählt",
     "customColour": "Eigene Farbe",
     "noBackgroundFill": "Dieser Hintergrund hat keine Füllfarbe, die geändert werden kann.",
     "noColours": "Auf dieser Ebene wurden keine Farben erkannt.",
@@ -143,12 +137,6 @@
     "taxonomy": "Taxonomie",
     "analyseStructure": "Struktur analysieren →",
     "taxonomyFailed": "Struktur konnte nicht analysiert werden"
-  },
-  "fonts": {
-    "title": "Schriftvorschläge",
-    "analysing": "Design wird analysiert…",
-    "add": "Zur Schriftenliste hinzufügen",
-    "close": "Schließen"
   },
   "status": {
     "thinking": "Denkt nach…",

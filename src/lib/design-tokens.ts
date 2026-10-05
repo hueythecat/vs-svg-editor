@@ -90,14 +90,6 @@ export const BG_PALETTE   = ['#ffffff', '#111111', '#eef0f3', '#fff4e6', '#0b2a4
 
 // ─── Shared style objects ────────────────────────────────────────────────────
 
-export const panelStyle: React.CSSProperties = {
-  position: 'absolute',
-  background: C.surface,
-  border: `1px solid ${C.borderPanel}`,
-  borderRadius: 12,
-  fontFamily: FONT_STACK,
-};
-
 // Field label — 11px muted, sits above every input.
 export const labelStyle: React.CSSProperties = {
   display: 'block',
@@ -151,22 +143,6 @@ export const primaryButtonStyle: React.CSSProperties = {
   padding: '9px 17px',
   borderRadius: 8,
   cursor: 'pointer',
-};
-
-// Small toolbar / row button (Center, 90°, icon buttons). Hover from `.ed-ghost:hover`.
-export const toolButtonStyle: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 5,
-  border: 'none',
-  background: 'transparent',
-  color: C.textSecondary,
-  fontSize: 12.5,
-  fontFamily: FONT_STACK,
-  padding: '6px 9px',
-  borderRadius: 8,
-  cursor: 'pointer',
-  whiteSpace: 'nowrap',
 };
 
 // Checkerboard shown on the board when the document has no opaque full-canvas

@@ -19,11 +19,6 @@ const RENDER_W = 1800;                  // px long-edge render
 const PROXY_URL = '/api/svg-text';
 const SHAPES = 'path,rect,circle,ellipse,polygon,polyline,text';
 
-// A gap between neighbouring glyphs wider than this fraction of the line height is a
-// word space. Letter spacing in display type rarely passes ~0.2 of the cap height; a
-// space is usually 0.25–0.35.
-const WORD_GAP_FRAC = 0.24;
-
 // Overlapping shapes only count as faces of one letter when their bboxes are of similar
 // area. An extruded letter's face and side measure 1.0–1.5× each other; a monogram inside
 // its shield frame is 4–30×, and joining those swallows the letter into the ornament.

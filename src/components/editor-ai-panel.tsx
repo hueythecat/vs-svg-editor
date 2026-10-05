@@ -188,7 +188,7 @@ export const AiPanel = React.memo(function AiPanel({
   const t = useT();
   if (!open) return null;
 
-  const busy = ai.loading || fonts.customiseLoading || fonts.imageFontsLoading;
+  const busy = ai.loading || fonts.customiseLoading;
   const layerActionsDisabled = ai.loading || !selectedLayer || selectedLayer === backgroundLayerId;
 
   return (

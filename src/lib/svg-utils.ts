@@ -378,6 +378,21 @@ export function bboxInRootSpace(
   }
 }
 
+// The smallest root-space box containing every one of `ids`. It frames a multi-layer
+// selection and supplies the shared pivot that multi-layer rotate/scale turn about, so
+// the selection transforms as one rigid group. Null when nothing measurable is left.
+export const unionBoxInRootSpace = (svgEl: SVGSVGElement, ids: string[]): DOMRect | null => {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  ids.forEach((id) => {
+    const el = svgEl.querySelector(`#${CSS.escape(id)}`) as SVGGraphicsElement | null;
+    const b = el ? bboxInRootSpace(svgEl, el) : null;
+    if (!b) return;
+    x0 = Math.min(x0, b.x);              y0 = Math.min(y0, b.y);
+    x1 = Math.max(x1, b.x + b.width);    y1 = Math.max(y1, b.y + b.height);
+  });
+  return Number.isFinite(x0) ? new DOMRect(x0, y0, x1 - x0, y1 - y0) : null;
+};
+
 export function applyTranslateDelta(existing: string, dx: number, dy: number): string {
   const m = existing.match(/^translate\(\s*([-\d.]+)(?:[,\s]+([-\d.]+))?\s*\)/);
   if (m) {

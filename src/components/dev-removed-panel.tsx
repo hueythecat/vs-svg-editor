@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import { useMemo } from 'react';
 
 import { C, FONT_STACK, MONO_STACK, SHADOW } from '@/lib/design-tokens';
 import type { RemovedRecord } from './editor-types';

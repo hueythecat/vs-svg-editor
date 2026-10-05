@@ -1,7 +1,5 @@
 {
   "toolbar": {
-    "loading": "Loading…",
-    "unsavedChanges": "Unsaved changes",
     "undo": "Undo",
     "undoTitle": "Undo (⌘Z)",
     "redo": "Redo",
@@ -32,10 +30,6 @@
     "colours": "Colours"
   },
   "inspector": {
-    "titleText": "Editing text",
-    "titleBackground": "Background",
-    "titleColours": "Vector colours",
-    "titleEmpty": "Nothing selected",
     "customColour": "Custom colour",
     "noBackgroundFill": "This background has no fill colour to change.",
     "noColours": "No colours detected on this layer.",
@@ -143,12 +137,6 @@
     "taxonomy": "Taxonomy",
     "analyseStructure": "Analyse structure →",
     "taxonomyFailed": "Could not analyse structure"
-  },
-  "fonts": {
-    "title": "Font suggestions",
-    "analysing": "Analysing design…",
-    "add": "Add to the font list",
-    "close": "Close"
   },
   "status": {
     "thinking": "Thinking…",
