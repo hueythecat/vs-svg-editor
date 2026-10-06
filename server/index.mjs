@@ -227,11 +227,11 @@ const aiConcurrency = (_req, res, next) => {
 // Dev scaffolding. Blocked at the edge in the Caddyfile too — belt and braces, because
 // this layer survives a Caddyfile mistake and the Caddyfile survives an env one.
 if (!DEV_API_ROUTES) {
-  for (const pattern of [/^\/api\/download/, /^\/api\/review\/list/, /^\/api\/review\/test/]) {
+  for (const pattern of [/^\/api\/download/, /^\/api\/review\/list/, /^\/api\/review\/test/, /^\/api\/local/]) {
     app.all(pattern, (_req, res) => res.status(404).end());
   }
 } else {
-  console.warn('[server] DEV_API_ROUTES is on — /api/review/list, /api/review/test and /api/download will answer');
+  console.warn('[server] DEV_API_ROUTES is on — /api/review/list, /api/review/test, /api/download and /api/local will answer');
 }
 
 app.use('/api', bodyLimit(MAX_BODY_BYTES));

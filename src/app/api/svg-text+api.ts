@@ -11,8 +11,13 @@
 // here from a fixed prompt, a capped max_tokens and the validated inputs. The only
 // choices left to the client are the model, from the same allowlist as /api/claude, and
 // the effort; both default to Sonnet 5 at low effort.
+//
+// The one exception to "asks Claude": the dev-only local model (LOCAL_MODEL, the "Local"
+// entry in the AI tools Model dropdown) is answered by Ollama on this machine instead,
+// from the same prompt and through the same parsing — see src/lib/ollama.ts.
 // Spend is bounded in server/index.mjs by the same throttle, budget and concurrency cap.
 import { base64Bytes, isAllowedModel, isCrossSite, MAX_IMAGE_BYTES } from '@/lib/ai-guard';
+import { LOCAL_MODEL, localModelEnabled, ollamaChat, respondWhenDone } from '@/lib/ollama';
 
 const DEFAULT_MODEL = 'claude-sonnet-5';
 const DEFAULT_EFFORT = 'low';
@@ -70,12 +75,27 @@ const extractJson = (raw: string): string => {
   return start >= 0 && end > start ? text.slice(start, end + 1) : text;
 };
 
+// The model's answer as the two things the client wants from it, or why it couldn't be
+// read. Shared by both upstreams, so a region means the same whichever model wrote it.
+const readAnswer = (answer: string, fontCount: number): { regions: unknown[]; fonts: string[] } | { error: string } => {
+  try {
+    const parsed = JSON.parse(extractJson(answer)) as { regions?: unknown; fonts?: unknown };
+    if (!Array.isArray(parsed.regions)) throw new Error('no regions array');
+    // Capped as well as asked for: the model is not bound by the number in the prompt.
+    const fonts = Array.isArray(parsed.fonts)
+      ? [...new Set(parsed.fonts.filter((f): f is string => typeof f === 'string' && f.trim() !== '').map((f) => f.trim()))]
+          .slice(0, fontCount)
+      : [];
+    return { regions: parsed.regions, fonts };
+  } catch (err) {
+    return { error: (err as Error).message };
+  }
+};
+
 const validImage = (v: unknown): v is string =>
   typeof v === 'string' && v.length > 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(v.slice(-64));
 
 export async function POST(request: Request): Promise<Response> {
-  const apiKey = process.env.CLAUDE_API_KEY;
-  if (!apiKey) return bad('CLAUDE_API_KEY is not set on the server', 500);
   if (isCrossSite(request)) return bad('Cross-site requests are not accepted', 403);
 
   let raw: unknown;
@@ -88,7 +108,8 @@ export async function POST(request: Request): Promise<Response> {
   const body = raw as Record<string, unknown>;
 
   const model = body.model ?? DEFAULT_MODEL;
-  if (!isAllowedModel(model)) return bad('Unsupported model');
+  const local = model === LOCAL_MODEL && localModelEnabled();
+  if (!local && !isAllowedModel(model)) return bad('Unsupported model');
   // How hard the model thinks (output_config.effort). Low matched Opus's answers on the
   // reference file with Sonnet 5 at about half the cost — see the model benchmark.
   const effort = body.effort ?? DEFAULT_EFFORT;
@@ -131,6 +152,32 @@ export async function POST(request: Request): Promise<Response> {
     brief.push(out);
   }
 
+  if (local) {
+    // The answer is started for the model, down to the first region's number: that is
+    // what stops this build reasoning for minutes before it writes anything, and a
+    // shorter start (`{"regions":[`) gets closed straight away as an empty list.
+    const prefill = `{"regions":[{"region":${brief[0].region},"is_text":`;
+    const started = Date.now();
+    console.log(`[svg-text] ${LOCAL_MODEL} (local): ${brief.length} regions`);
+    return respondWhenDone(
+      ollamaChat({
+        prompt: PROMPT(brief, fontCount), images: [body.clean as string, body.annotated as string],
+        prefill, maxTokens: MAX_TOKENS,
+      }).then((answer) => {
+        console.log(`[svg-text] ${LOCAL_MODEL} answered in ${((Date.now() - started) / 1000).toFixed(1)}s`);
+        const read = readAnswer(answer, fontCount);
+        if ('error' in read) {
+          console.log('[svg-text] unparseable local answer:', answer.slice(0, 500));
+          throw new Error(`Model returned unparseable JSON (${read.error})`);
+        }
+        return { ...read, model: LOCAL_MODEL };
+      }),
+    );
+  }
+
+  const apiKey = process.env.CLAUDE_API_KEY;
+  if (!apiKey) return bad('CLAUDE_API_KEY is not set on the server', 500);
+
   const upstream = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -169,18 +216,11 @@ export async function POST(request: Request): Promise<Response> {
     console.log(`[svg-text] answer cut off at max_tokens (${MAX_TOKENS}) with ${brief.length} regions`);
     return bad(`Answer cut off at the ${MAX_TOKENS}-token limit — ${brief.length} regions is more than one call can describe`, 502);
   }
-  try {
-    const parsed = JSON.parse(extractJson(answer)) as { regions?: unknown; fonts?: unknown };
-    if (!Array.isArray(parsed.regions)) throw new Error('no regions array');
-    // Capped as well as asked for: the model is not bound by the number in the prompt.
-    const fonts = Array.isArray(parsed.fonts)
-      ? [...new Set(parsed.fonts.filter((f): f is string => typeof f === 'string' && f.trim() !== '').map((f) => f.trim()))]
-          .slice(0, fontCount)
-      : [];
-    // usage alongside the regions so a debug run can price itself; the client ignores it.
-    return Response.json({ regions: parsed.regions, fonts, model: data.model, usage: data.usage });
-  } catch (err) {
+  const read = readAnswer(answer, fontCount);
+  if ('error' in read) {
     console.log('[svg-text] unparseable answer:', data.stop_reason, answer.slice(0, 500));
-    return bad(`Model returned unparseable JSON (${(err as Error).message}, stop_reason ${data.stop_reason})`, 502);
+    return bad(`Model returned unparseable JSON (${read.error}, stop_reason ${data.stop_reason})`, 502);
   }
+  // usage alongside the regions so a debug run can price itself; the client ignores it.
+  return Response.json({ ...read, model: data.model, usage: data.usage });
 }

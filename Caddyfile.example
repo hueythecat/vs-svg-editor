@@ -113,6 +113,9 @@ editor.example.com {
 	handle /api/review/test* {
 		respond 404
 	}
+	handle /api/local* {
+		respond 404
+	}
 
 	# --- Upstream ---------------------------------------------------------------------
 	#

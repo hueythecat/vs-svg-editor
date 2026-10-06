@@ -168,7 +168,7 @@ limit on any one request.
 ### Dev-only API routes
 
 Expo Router exports every `+api.ts` regardless of the build's UI flags, so a production
-export ships the dev rail's routes live unless something says otherwise. Three are gated:
+export ships the dev rail's routes live unless something says otherwise. Four are gated:
 
 - **`/api/review/list`** — returns every asset the review host knows about, each with its
   `edit_uuid`. That uuid *is* the capability the `/<uuid>` deep link rests on, so serving
@@ -176,8 +176,12 @@ export ships the dev rail's routes live unless something says otherwise. Three a
   that matters.
 - **`/api/review/test/<id>`** — makes the upstream create a review entry for any art id.
 - **`/api/download`** — unzips out of `assets/downloads/`.
+- **`/api/local`** — the "Local" model in the AI tools dropdown: forwards an AI pass to
+  Ollama on the same machine (`OLLAMA_HOST`, default `http://127.0.0.1:11434`) instead of
+  the paid API. A server has no Ollama to forward to. `/api/svg-text` takes the same
+  local model id and refuses it under the same switch.
 
-All three 404 in **two** places: `server/index.mjs` (unless `DEV_API_ROUTES` is set to
+All four 404 in **two** places: `server/index.mjs` (unless `DEV_API_ROUTES` is set to
 `1`/`on`/`true`) and the Caddyfile. Neither is load-bearing alone, and the env var fails
 closed — a typo leaves them blocked. A deployment that genuinely wants the dev rail has to
 set the variable *and* remove the Caddyfile block: two deliberate acts.

@@ -411,9 +411,15 @@ export async function detectSvgText(
       }),
     });
     if (!resp.ok) throw new Error(`Text detection failed: ${resp.status} ${await resp.text()}`);
-    const { regions: judged, fonts } = await resp.json() as {
-      regions: Array<{ region: number } & Record<string, unknown>>; fonts?: string[];
+    const answer = await resp.json() as {
+      regions?: Array<{ region: number } & Record<string, unknown>>; fonts?: string[]; error?: { message?: string };
     };
+    // The local model's answer is streamed behind a keep-alive, so its status is sent
+    // before the outcome is known and a failure arrives as a 200 with an `error` body.
+    if (answer.error || !Array.isArray(answer.regions)) {
+      throw new Error(`Text detection failed: ${answer.error?.message ?? 'no regions in the answer'}`);
+    }
+    const { regions: judged, fonts } = answer;
 
     // Render px → the SVG's own user units, which is what the reference reports.
     const vb = svg.viewBox.baseVal;

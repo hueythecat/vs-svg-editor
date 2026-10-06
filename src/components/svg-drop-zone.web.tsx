@@ -45,7 +45,7 @@ import type {
   AiActionType, CustomiseBundle, DocBundle, LlmProvider, RegionBox, RemovedRecord, TextDetectMethod,
   TextLayerAttrs,
 } from './editor-types';
-import { LLM_OPTIONS, OPUS_MODEL, TEXT_DETECT_OPTIONS } from './editor-types';
+import { LLM_OPTIONS, LOCAL_MODEL, OPUS_MODEL, TEXT_DETECT_OPTIONS } from './editor-types';
 import { detectSvgText, type DetectedTextRegion } from '@/lib/svg-text-detect';
 import { EditorControlPanel, type ControlTab } from './editor-control-panel';
 import { AiPanel } from './editor-ai-panel';
@@ -259,15 +259,19 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     () => (hideNonTextRegions ? textDetectBoxes.filter((b) => b.replaceable) : textDetectBoxes),
     [textDetectBoxes, hideNonTextRegions],
   );
-  const llmEndpoint = () => (llmProviderRef.current === 'kimi' ? '/api/kimi' : '/api/claude');
+  const llmEndpoint = () =>
+    llmProviderRef.current === 'kimi' ? '/api/kimi' : llmProviderRef.current === 'local' ? '/api/local' : '/api/claude';
   // Log label. /api/kimi discards the model id we send and pins its own, so naming a
   // Claude model while Kimi is running would be a lie — say who actually answered.
   const llmLabel = (claudeModel: string) =>
-    llmProviderRef.current === 'kimi' ? 'kimi (model pinned in /api/kimi)' : `claude ${llmModel(claudeModel)}`;
+    llmProviderRef.current === 'kimi' ? 'kimi (model pinned in /api/kimi)'
+      : llmProviderRef.current === 'local' ? `local ${LOCAL_MODEL} (Ollama)`
+        : `claude ${llmModel(claudeModel)}`;
   // The model id actually sent. Call sites name the Sonnet they were tuned on; picking
-  // Opus overrides all of them. Also part of the AI cache keys, so switching model
-  // doesn't just replay the other model's cached answer.
-  const llmModel = (model: string) => (llmProviderRef.current === 'claude-opus' ? OPUS_MODEL : model);
+  // Opus overrides all of them, and so does the local model. Also part of the AI cache
+  // keys, so switching model doesn't just replay the other model's cached answer.
+  const llmModel = (model: string) =>
+    llmProviderRef.current === 'claude-opus' ? OPUS_MODEL : llmProviderRef.current === 'local' ? LOCAL_MODEL : model;
 
   // Single image+text turn to the active LLM. Every AI action shared this exact
   // fetch/error/parse skeleton; extracting it here keeps the seven call sites to just
@@ -297,7 +301,10 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       const e = await res.json().catch(() => ({})) as { error?: { message?: string } };
       throw new Error(e.error?.message ?? t('errors.api', { status: res.status }));
     }
-    const data = await res.json() as { content?: Array<{ text?: string }> };
+    const data = await res.json() as { content?: Array<{ text?: string }>; error?: { message?: string } };
+    // /api/local and /api/kimi answer behind a keep-alive stream, so a failure of theirs
+    // arrives as a 200 with an `error` body rather than as a status.
+    if (data.error) throw new Error(data.error.message ?? t('errors.api', { status: res.status }));
     return extractJson(data.content?.[0]?.text ?? '');
   };
   const dragMovedRef            = useRef(false);
@@ -1694,9 +1701,13 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       setAiStatusMsg(t('status.analysingImage'));
       setTextDetectBoxes(NO_REGION_BOXES);
       try {
-        console.log('[text-detect] invoking /api/svg-text:', TEXT_DETECT_MODEL, `effort ${TEXT_DETECT_EFFORT}`);
+        // Text detection runs on its own tuned model whichever Claude the dropdown names;
+        // "Local" is the one choice that overrides it, since the point of picking it is
+        // to make no paid call at all.
+        const detectModel = llmProviderRef.current === 'local' ? LOCAL_MODEL : TEXT_DETECT_MODEL;
+        console.log('[text-detect] invoking /api/svg-text:', detectModel, `effort ${TEXT_DETECT_EFFORT}`);
         const { regions, fonts } = await detectSvgText(svgWithoutHidden(activeSvg.content, hiddenLayers), {
-          model: TEXT_DETECT_MODEL, effort: TEXT_DETECT_EFFORT, layers: activeSvg.layers,
+          model: detectModel, effort: TEXT_DETECT_EFFORT, layers: activeSvg.layers,
           fontSuggestions: FONT_SUGGESTION_LIMIT,
         });
         console.log('[text-detect] result:\n' + JSON.stringify(regions, null, 2));
