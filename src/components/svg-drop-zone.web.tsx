@@ -46,7 +46,7 @@ import type {
   TextLayerAttrs,
 } from './editor-types';
 import { LLM_OPTIONS, LOCAL_MODEL, OPUS_MODEL, TEXT_DETECT_OPTIONS } from './editor-types';
-import { detectSvgText, type DetectedTextRegion } from '@/lib/svg-text-detect';
+import { detectSvgText, type DetectedTextRegion, type TextDetectStats } from '@/lib/svg-text-detect';
 import { EditorControlPanel, type ControlTab } from './editor-control-panel';
 import { AiPanel } from './editor-ai-panel';
 import { ExportPill } from './editor-export-pill';
@@ -213,6 +213,8 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   // The Font dropdown's lists and the stylesheet loader (use-google-fonts.ts).
   const { usedFonts, extraFonts, loadGoogleFontLink, addGoogleFont, addUsedFont, resetFonts } = useGoogleFonts();
   const [customiseFonts, setCustomiseFonts]   = useState<string[]>([]);
+  // What the last text-detection call cost, shown under "This image" in the AI tools.
+  const [callStats, setCallStats]             = useState<TextDetectStats | null>(null);
   const [customiseLoading, setCustomiseLoading] = useState(false);
   const [customiseDone, setCustomiseDone] = useState(false);
   const [taxonomy, setTaxonomy]           = useState<TaxonomyGroup[] | null>(null);
@@ -1700,13 +1702,15 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       setAiError(null);
       setAiStatusMsg(t('status.analysingImage'));
       setTextDetectBoxes(NO_REGION_BOXES);
+      // Cleared up front, so a run that fails doesn't sit under the previous run's figures.
+      setCallStats(null);
       try {
         // Text detection runs on its own tuned model whichever Claude the dropdown names;
         // "Local" is the one choice that overrides it, since the point of picking it is
         // to make no paid call at all.
         const detectModel = llmProviderRef.current === 'local' ? LOCAL_MODEL : TEXT_DETECT_MODEL;
         console.log('[text-detect] invoking /api/svg-text:', detectModel, `effort ${TEXT_DETECT_EFFORT}`);
-        const { regions, fonts } = await detectSvgText(svgWithoutHidden(activeSvg.content, hiddenLayers), {
+        const { regions, fonts, stats } = await detectSvgText(svgWithoutHidden(activeSvg.content, hiddenLayers), {
           model: detectModel, effort: TEXT_DETECT_EFFORT, layers: activeSvg.layers,
           fontSuggestions: FONT_SUGGESTION_LIMIT,
         });
@@ -1717,6 +1721,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
         // for text added afterwards — never written onto fields that already exist.
         fonts.forEach((f) => addGoogleFont(f));
         setCustomiseFonts(fonts);
+        setCallStats(stats);
         if (fonts[0]) setTextForm((f) => ({ ...f, font: fonts[0] }));
         // Kept with the hidden set the detection ran against: region xpaths address the
         // document with those elements removed (svgWithoutHidden above).
@@ -2458,6 +2463,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     // suggestions went with that run, so they go too.
     setCustomiseDone(false);
     setCustomiseFonts([]);
+    setCallStats(null);
   }, [activeSvg, defaultHiddenLayers]);
 
   const cancelReset = useCallback(() => setResetConfirmOpen(false), []);
@@ -2476,6 +2482,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
 
   useEffect(() => {
     setCustomiseFonts([]);
+    setCallStats(null);
     // Fonts offered for the last artwork say nothing about this one, and left in place
     // they accumulate: the dropdown grew every AI font from every image opened since the
     // tab loaded. The <link> tags stay — a loaded webface costs nothing and may be needed
@@ -2894,7 +2901,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                   }}
                   fonts={{
                     extra: extraFonts,
-                    customiseFonts, customiseLoading, customiseDone,
+                    customiseFonts, customiseLoading, customiseDone, callStats,
                   }}
                   taxonomy={{ data: taxonomy, loading: taxonomyLoading, open: taxonomyOpen, setOpen: setTaxonomyOpen }}
                   selectedLayer={selectedLayer}

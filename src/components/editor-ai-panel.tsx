@@ -294,6 +294,44 @@ export const AiPanel = React.memo(function AiPanel({
             {t(fonts.customiseDone ? 'ai.noFontsFound' : 'ai.runCustomiseHint')}
           </p>
         )}
+        {/* What the last detection call cost. Outside the branches above: it belongs to
+            the call, not to whether that call happened to suggest any fonts. Tabular
+            figures so a second run's numbers don't shift sideways under the first's. */}
+        {!fonts.customiseLoading && fonts.callStats && (
+          <div
+            data-ai-call-stats
+            style={{
+              marginTop: 10, fontSize: 11, lineHeight: 1.6, color: C.textMuted,
+              fontVariantNumeric: 'tabular-nums',
+            }}
+          >
+            <div style={{ color: C.textSecondary, fontWeight: 600 }}>
+              {t('ai.statsCall', {
+                model: fonts.callStats.model, seconds: fonts.callStats.seconds.toFixed(1), count: fonts.callStats.regions,
+              })}
+            </div>
+            {fonts.callStats.inputTokens !== null && fonts.callStats.outputTokens !== null && (
+              <div>
+                {t('ai.statsTokens', {
+                  input: fonts.callStats.inputTokens.toLocaleString(),
+                  output: fonts.callStats.outputTokens.toLocaleString(),
+                })}
+              </div>
+            )}
+            {fonts.callStats.phases && (
+              <div>
+                {t('ai.statsPhases', {
+                  load: fonts.callStats.phases.load.toFixed(1),
+                  read: fonts.callStats.phases.read.toFixed(1),
+                  write: fonts.callStats.phases.write.toFixed(1),
+                  rate: fonts.callStats.phases.write > 0 && fonts.callStats.outputTokens
+                    ? (fonts.callStats.outputTokens / fonts.callStats.phases.write).toFixed(1)
+                    : '0',
+                })}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Per-layer actions */}

@@ -122,3 +122,34 @@ export const setHideNonTextRegions = (on: boolean): void => {
     storage()?.setItem(HIDE_NON_TEXT_REGIONS_KEY, on ? '1' : '0');
   } catch { /* preference is best-effort */ }
 };
+
+// The review vectors most recently opened from the dev rail, newest first, so the ones
+// being worked on sit at the top of its dropdown instead of wherever the host lists
+// them. Keys, not uuids: the rail keys a vector by its art id (see dedupeReviewList),
+// which is the one thing about it that doesn't change when the host re-registers it.
+//
+// Not cached in a module variable like the flags above — it is read once when the rail
+// mounts and rewritten whole on every open, so there is nothing to keep in step.
+const RECENT_VECTORS_KEY = 'svg-editor:recent-vectors';
+export const RECENT_VECTORS_MAX = 10;
+
+export const getRecentVectors = (): string[] => {
+  try {
+    const parsed: unknown = JSON.parse(storage()?.getItem(RECENT_VECTORS_KEY) ?? '[]');
+    return Array.isArray(parsed)
+      ? parsed.filter((k): k is string => typeof k === 'string').slice(0, RECENT_VECTORS_MAX)
+      : [];
+  } catch {
+    return [];   // unreadable or hand-edited — start again rather than fail the rail
+  }
+};
+
+// Moves `key` to the front (adding it if new), drops the oldest past the limit, and
+// returns the list as stored.
+export const pushRecentVector = (key: string): string[] => {
+  const next = [key, ...getRecentVectors().filter((k) => k !== key)].slice(0, RECENT_VECTORS_MAX);
+  try {
+    storage()?.setItem(RECENT_VECTORS_KEY, JSON.stringify(next));
+  } catch { /* preference is best-effort */ }
+  return next;
+};

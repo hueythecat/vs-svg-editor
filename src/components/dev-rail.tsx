@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { C, FONT_STACK, SHADOW } from '@/lib/design-tokens';
 import { CODE_VERSION } from '@/lib/env';
@@ -6,7 +6,7 @@ import { clearAiCache, isAiCacheEnabled, setAiCacheEnabled } from '@/lib/ai-cach
 import {
   isIgnoreCanCustomise, isIgnoreCooldownPrompt, isIgnoreHasCustomised,
   setIgnoreCanCustomise as setIgnoreCanCustomiseFlag,
-  setIgnoreCooldownPrompt, setIgnoreHasCustomised,
+  setIgnoreCooldownPrompt, setIgnoreHasCustomised, getRecentVectors, pushRecentVector,
 } from '@/lib/dev-flags';
 import { PADDLE_ENV, openPaddleCheckout, paddleConfigError } from '@/lib/paddle';
 import { ChevronIcon, SettingsIcon } from './svg-icons';
@@ -40,12 +40,16 @@ type ReviewListItem = {
 // The newest row wins, decided by the row id rather than array position so it doesn't
 // rest on the order the host happens to send. Rows sharing a uuid collapse too — those
 // are the same entry outright, and would collide as React keys.
+// art_id is the identity; fall back to the uuid so a row missing one still stands on its
+// own rather than every such row folding into a single entry. Also what the recently-
+// opened list remembers a vector by, since the uuid changes when the host re-registers it.
+const reviewKey = (row: ReviewListItem): string =>
+  row.art_id != null ? `art:${row.art_id}` : `uuid:${row.edit_uuid}`;
+
 const dedupeReviewList = (rows: ReviewListItem[]): ReviewListItem[] => {
   const newest = new Map<string, ReviewListItem>();
   for (const row of rows) {
-    // art_id is the identity; fall back to the uuid so a row missing one still stands
-    // on its own rather than every such row folding into a single entry.
-    const key = row.art_id != null ? `art:${row.art_id}` : `uuid:${row.edit_uuid}`;
+    const key = reviewKey(row);
     const held = newest.get(key);
     if (!held || (row.id ?? 0) > (held.id ?? 0)) newest.set(key, row);
   }
@@ -91,6 +95,13 @@ export function DevRail<S extends Sample>({
 }: DevRailProps<S>) {
   const [selectedDownload, setSelectedDownload] = useState<string>('');
   const [reviewList, setReviewList] = useState<ReviewListItem[]>([]);
+  // Mirrors reviewList for openFromList: the id box opens a row out of a list it has
+  // only just fetched, which state won't show until the next render.
+  const reviewListRef = React.useRef<ReviewListItem[]>([]);
+  // The last vectors opened from here, newest first — they lead the dropdown. Lazy
+  // initial state: reading storage during SSR would throw, and this only renders
+  // client-side.
+  const [recentKeys, setRecentKeys] = useState<string[]>(() => getRecentVectors());
   const [listStatus, setListStatus] = useState<string | null>('Loading…');
   const [reviewId, setReviewId] = useState('');
   const [fetchStatus, setFetchStatus] = useState<string | null>(null);
@@ -143,6 +154,7 @@ export function DevRail<S extends Sample>({
       if (items.length !== data.uuids.length) {
         console.log(`[review/list] ${data.uuids.length} row(s) -> ${items.length} option(s) after de-dupe`);
       }
+      reviewListRef.current = items;
       setReviewList(items);
       setListStatus(items.length ? null : 'No review assets');
       return items;
@@ -167,6 +179,10 @@ export function DevRail<S extends Sample>({
     const sample = await onOpenReviewUuid?.(uuid);
     if (!sample) return;
     setFetchedSamples((prev) => [sample, ...prev.filter((s) => s.name !== sample.name)]);
+    // Remembered only once it has actually opened: a selection that failed isn't one to
+    // offer again first.
+    const row = reviewListRef.current.find((r) => r.edit_uuid === uuid);
+    if (row) setRecentKeys(pushRecentVector(reviewKey(row)));
   }, [onOpenReviewUuid]);
 
   // The id box registers a vectorstock art id for review rather than pulling artwork
@@ -220,6 +236,21 @@ export function DevRail<S extends Sample>({
       setFetching(false);
     }
   };
+
+  // The dropdown's two groups: what was opened lately, in that order, then everything
+  // else as the host lists it. A remembered vector the host no longer lists is skipped
+  // here but kept in storage, so it comes back if the host lists it again.
+  const { recentRows, otherRows } = useMemo(() => {
+    const byKey = new Map(reviewList.map((r) => [reviewKey(r), r]));
+    const recent = recentKeys.flatMap((k) => { const r = byKey.get(k); return r ? [r] : []; });
+    const taken = new Set(recent);
+    return { recentRows: recent, otherRows: reviewList.filter((r) => !taken.has(r)) };
+  }, [reviewList, recentKeys]);
+  const reviewOption = (item: ReviewListItem) => (
+    <option key={item.edit_uuid} value={item.edit_uuid}>
+      {item.art_id} — {item.name}
+    </option>
+  );
 
   // There's an id to send and nothing already in flight — drives the FETCH button's
   // active styling, and matches its disabled condition so the two can't disagree.
@@ -369,11 +400,14 @@ export function DevRail<S extends Sample>({
               }}
             >
               <option value="">{listStatus ?? 'Select a vector…'}</option>
-              {reviewList.map((item) => (
-                <option key={item.edit_uuid} value={item.edit_uuid}>
-                  {item.art_id} — {item.name}
-                </option>
-              ))}
+              {/* Grouped only once there is something recent — a single unlabelled list
+                  reads better than an "All" heading over everything. */}
+              {recentRows.length === 0 ? reviewList.map(reviewOption) : (
+                <>
+                  <optgroup label="Recent">{recentRows.map(reviewOption)}</optgroup>
+                  <optgroup label="All vectors">{otherRows.map(reviewOption)}</optgroup>
+                </>
+              )}
             </select>
             {/* Review id — anything on the review host (API_HOST), not just the bundled zips.
                 Enter submits so an id can be pasted and fired without reaching for the

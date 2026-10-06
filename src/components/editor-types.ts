@@ -1,4 +1,5 @@
 import type { TaxonomyGroup } from '@/lib/svg-utils';
+import type { TextDetectStats } from '@/lib/svg-text-detect';
 import type { Dispatch, SetStateAction } from 'react';
 
 // Shared prop bundles for the editor panels. These used to live in layers-panel.tsx,
@@ -138,6 +139,8 @@ export interface FontBundle {
   customiseFonts: string[];
   customiseLoading: boolean;
   customiseDone: boolean;
+  // The last text-detection call's model, time and tokens; null until one has run.
+  callStats: TextDetectStats | null;
 }
 
 export interface TaxonomyBundle {

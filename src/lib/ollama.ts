@@ -38,9 +38,17 @@ export const localModelEnabled = (): boolean =>
 // to read the images (tens of seconds), then slow to write. fetch gives up after five
 // minutes without headers, and the dev server drops an outbound request that sits idle;
 // a streamed request on a socket with no timeout has neither problem.
+export type OllamaStats = {
+  input_tokens: number;   // prompt + images, as the model counted them
+  output_tokens: number;
+  load_ms: number;        // getting the model into memory (near zero when already loaded)
+  read_ms: number;        // taking in the prompt and images
+  write_ms: number;       // writing the answer
+};
+
 export function ollamaChat(opts: {
   prompt: string; images: string[]; prefill: string; maxTokens: number;
-}): Promise<string> {
+}): Promise<{ text: string; stats: OllamaStats | null }> {
   const payload = JSON.stringify({
     model: LOCAL_MODEL,
     stream: true,
@@ -52,7 +60,7 @@ export function ollamaChat(opts: {
     ],
   });
 
-  return new Promise<string>((resolve, reject) => {
+  return new Promise<{ text: string; stats: OllamaStats | null }>((resolve, reject) => {
     const req = http.request(
       {
         host: OLLAMA_URL.hostname, port: OLLAMA_URL.port || 11434, path: '/api/chat', method: 'POST',
@@ -63,6 +71,7 @@ export function ollamaChat(opts: {
         let text = '';
         let failure: string | null = null;
         let truncated = false;
+        let stats: OllamaStats | null = null;
         res.setEncoding('utf8');
         res.on('data', (chunk: string) => {
           buffer += chunk;
@@ -73,10 +82,22 @@ export function ollamaChat(opts: {
             try {
               const frame = JSON.parse(line) as {
                 error?: string; done?: boolean; done_reason?: string; message?: { content?: string };
+                prompt_eval_count?: number; eval_count?: number;
+                load_duration?: number; prompt_eval_duration?: number; eval_duration?: number;
               };
               if (frame.error) failure = frame.error;
               text += frame.message?.content ?? '';   // `thinking` deltas are deliberately dropped
               if (frame.done && frame.done_reason === 'length') truncated = true;
+              // The closing frame carries the same figures `ollama run --verbose` prints,
+              // durations in nanoseconds.
+              if (frame.done) {
+                const ms = (ns?: number) => Math.round((ns ?? 0) / 1e6);
+                stats = {
+                  input_tokens: frame.prompt_eval_count ?? 0, output_tokens: frame.eval_count ?? 0,
+                  load_ms: ms(frame.load_duration), read_ms: ms(frame.prompt_eval_duration),
+                  write_ms: ms(frame.eval_duration),
+                };
+              }
             } catch { /* a malformed frame is not worth failing the answer over */ }
           }
         });
@@ -91,7 +112,7 @@ export function ollamaChat(opts: {
           } else if (truncated) {
             reject(new Error(`${LOCAL_MODEL} hit the ${opts.maxTokens}-token limit before finishing its answer`));
           } else {
-            resolve(opts.prefill + text);
+            resolve({ text: opts.prefill + text, stats });
           }
         });
       },

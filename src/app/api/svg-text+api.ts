@@ -17,6 +17,7 @@
 // from the same prompt and through the same parsing — see src/lib/ollama.ts.
 // Spend is bounded in server/index.mjs by the same throttle, budget and concurrency cap.
 import { base64Bytes, isAllowedModel, isCrossSite, MAX_IMAGE_BYTES } from '@/lib/ai-guard';
+import { onlyGoogleFonts } from '@/lib/google-fonts';
 import { LOCAL_MODEL, localModelEnabled, ollamaChat, respondWhenDone } from '@/lib/ollama';
 
 const DEFAULT_MODEL = 'claude-sonnet-5';
@@ -30,6 +31,10 @@ const MAX_SVG_TEXT = 2000;
 // Image-level font suggestions asked for alongside the regions. The client sends
 // FONT_SUGGESTION_LIMIT; this bounds what any caller can make the answer carry.
 const MAX_FONT_SUGGESTIONS = 20;
+// The local model is asked for this many more than the caller wants. It names families
+// Google doesn't serve (Avenir Next, Gotham, Arial…) often enough that, once those are
+// filtered out, asking for exactly ten leaves seven or eight.
+const LOCAL_FONT_SPARES = 5;
 
 type BriefRegion = {
   region: number; source: string; fill: string; glyph_paths?: number; subpaths?: number; word_count?: number; svg_text?: string;
@@ -77,20 +82,24 @@ const extractJson = (raw: string): string => {
 
 // The model's answer as the two things the client wants from it, or why it couldn't be
 // read. Shared by both upstreams, so a region means the same whichever model wrote it.
-const readAnswer = (answer: string, fontCount: number): { regions: unknown[]; fonts: string[] } | { error: string } => {
+const readAnswer = (answer: string): { regions: unknown[]; fonts: string[] } | { error: string } => {
   try {
     const parsed = JSON.parse(extractJson(answer)) as { regions?: unknown; fonts?: unknown };
     if (!Array.isArray(parsed.regions)) throw new Error('no regions array');
-    // Capped as well as asked for: the model is not bound by the number in the prompt.
     const fonts = Array.isArray(parsed.fonts)
       ? [...new Set(parsed.fonts.filter((f): f is string => typeof f === 'string' && f.trim() !== '').map((f) => f.trim()))]
-          .slice(0, fontCount)
       : [];
     return { regions: parsed.regions, fonts };
   } catch (err) {
     return { error: (err as Error).message };
   }
 };
+
+// The image-level suggestions as they are handed back: only families Google actually
+// serves, and no more than were asked for — the model is not bound by the number in the
+// prompt, and not by "Google Fonts" either.
+const offeredFonts = async (fonts: string[], fontCount: number): Promise<string[]> =>
+  fontCount > 0 ? (await onlyGoogleFonts(fonts)).slice(0, fontCount) : [];
 
 const validImage = (v: unknown): v is string =>
   typeof v === 'string' && v.length > 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(v.slice(-64));
@@ -161,16 +170,21 @@ export async function POST(request: Request): Promise<Response> {
     console.log(`[svg-text] ${LOCAL_MODEL} (local): ${brief.length} regions`);
     return respondWhenDone(
       ollamaChat({
-        prompt: PROMPT(brief, fontCount), images: [body.clean as string, body.annotated as string],
+        prompt: PROMPT(brief, fontCount > 0 ? fontCount + LOCAL_FONT_SPARES : 0),
+        images: [body.clean as string, body.annotated as string],
         prefill, maxTokens: MAX_TOKENS,
-      }).then((answer) => {
+      }).then(async ({ text: answer, stats }) => {
         console.log(`[svg-text] ${LOCAL_MODEL} answered in ${((Date.now() - started) / 1000).toFixed(1)}s`);
-        const read = readAnswer(answer, fontCount);
+        const read = readAnswer(answer);
         if ('error' in read) {
           console.log('[svg-text] unparseable local answer:', answer.slice(0, 500));
           throw new Error(`Model returned unparseable JSON (${read.error})`);
         }
-        return { ...read, model: LOCAL_MODEL };
+        // usage in the shape Anthropic's takes (input_tokens / output_tokens), plus the
+        // phase timings only a local run has, so the panel can show one or the other.
+        return {
+          regions: read.regions, fonts: await offeredFonts(read.fonts, fontCount), model: LOCAL_MODEL, usage: stats,
+        };
       }),
     );
   }
@@ -216,11 +230,13 @@ export async function POST(request: Request): Promise<Response> {
     console.log(`[svg-text] answer cut off at max_tokens (${MAX_TOKENS}) with ${brief.length} regions`);
     return bad(`Answer cut off at the ${MAX_TOKENS}-token limit — ${brief.length} regions is more than one call can describe`, 502);
   }
-  const read = readAnswer(answer, fontCount);
+  const read = readAnswer(answer);
   if ('error' in read) {
     console.log('[svg-text] unparseable answer:', data.stop_reason, answer.slice(0, 500));
     return bad(`Model returned unparseable JSON (${read.error}, stop_reason ${data.stop_reason})`, 502);
   }
   // usage alongside the regions so a debug run can price itself; the client ignores it.
-  return Response.json({ ...read, model: data.model, usage: data.usage });
+  return Response.json({
+    regions: read.regions, fonts: await offeredFonts(read.fonts, fontCount), model: data.model, usage: data.usage,
+  });
 }

@@ -121,6 +121,12 @@
     "chooseFont": "Schriftart wählen…",
     "noFontsFound": "Die Anpassung hat keine anwendbaren Schriftarten gefunden.",
     "runCustomiseHint": "Führe „Anpassen“ über die Schaltfläche aus, um Text zu erkennen und Schriftarten vorzuschlagen.",
+    "statsCall": {
+      "one": "%{model} · %{seconds} s · %{count} Bereich",
+      "other": "%{model} · %{seconds} s · %{count} Bereiche"
+    },
+    "statsTokens": "%{input} Tokens ein · %{output} aus",
+    "statsPhases": "Laden %{load} s · Lesen %{read} s · Schreiben %{write} s (%{rate} Tokens/s)",
     "selectedLayer": "Ausgewählte Ebene",
     "processing": "Wird verarbeitet…",
     "selectLayerFirst": "Zuerst eine Ebene auswählen",

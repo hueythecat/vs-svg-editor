@@ -44,9 +44,9 @@ export async function POST(request: Request): Promise<Response> {
   const started = Date.now();
   console.log(`[local] ${LOCAL_MODEL}: ${prompt.length} prompt chars, ${images.length} image(s)`);
   return respondWhenDone(
-    ollamaChat({ prompt, images, prefill: PREFILL, maxTokens: max_tokens }).then((text) => {
+    ollamaChat({ prompt, images, prefill: PREFILL, maxTokens: max_tokens }).then(({ text, stats }) => {
       console.log(`[local] answered in ${((Date.now() - started) / 1000).toFixed(1)}s, ${text.length} chars`);
-      return { content: [{ type: 'text', text }], model: LOCAL_MODEL };
+      return { content: [{ type: 'text', text }], model: LOCAL_MODEL, usage: stats };
     }),
   );
 }

@@ -121,6 +121,12 @@
     "chooseFont": "Choose a font…",
     "noFontsFound": "Customise found no fonts to apply.",
     "runCustomiseHint": "Run Customise from the pill to detect text and suggest fonts.",
+    "statsCall": {
+      "one": "%{model} · %{seconds}s · %{count} region",
+      "other": "%{model} · %{seconds}s · %{count} regions"
+    },
+    "statsTokens": "%{input} tokens in · %{output} out",
+    "statsPhases": "load %{load}s · read %{read}s · write %{write}s (%{rate} tokens/s)",
     "selectedLayer": "Selected layer",
     "processing": "Processing…",
     "selectLayerFirst": "Select a layer first",

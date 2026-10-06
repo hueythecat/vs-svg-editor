@@ -364,10 +364,22 @@ async function renderPngs(svg: SVGSVGElement, regions: Region[]): Promise<{ clea
 // `layers` is the editor's layer list, which names each region's layer. `model` picks
 // among /api/svg-text's allowlist (the same as /api/claude's) and `effort` how hard it
 // thinks; the route defaults to Sonnet 5 at low effort when they are omitted.
+// What one detection call cost, for the AI tools panel. Tokens are whatever the upstream
+// reported; the phase timings exist only for the local model, which is the one slow
+// enough for "where did the time go" to be a question.
+export type TextDetectStats = {
+  model: string;
+  seconds: number;          // the call as the browser saw it, request to answer
+  regions: number;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  phases: { load: number; read: number; write: number } | null;   // seconds
+};
+
 export async function detectSvgText(
   svgString: string,
   opts: { layers?: LayerRef[]; model?: string; effort?: 'low' | 'medium' | 'high'; fontSuggestions?: number } = {},
-): Promise<{ regions: DetectedTextRegion[]; fonts: string[] }> {
+): Promise<{ regions: DetectedTextRegion[]; fonts: string[]; stats: TextDetectStats | null }> {
   const layers = opts.layers ?? [];
   const layerLabel = new Map(layers.map((l) => [l.id, l.label]));
   const { host, svg } = mountSvg(svgString);
@@ -393,7 +405,7 @@ export async function detectSvgText(
       candidates = candidates.filter((_, i) => keep.has(i));
     }
     const regions: Region[] = candidates.map((r, i) => ({ ...r, region: i + 1 }));
-    if (!regions.length) return { regions: [], fonts: [] };
+    if (!regions.length) return { regions: [], fonts: [], stats: null };
 
     const images = await renderPngs(svg, regions);
     const brief = regions.map((r) => ({
@@ -402,6 +414,7 @@ export async function detectSvgText(
       ...(r.svgText ? { svg_text: r.svgText } : {}),
     }));
 
+    const startedAt = performance.now();
     const resp = await fetch(PROXY_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -413,7 +426,10 @@ export async function detectSvgText(
     if (!resp.ok) throw new Error(`Text detection failed: ${resp.status} ${await resp.text()}`);
     const answer = await resp.json() as {
       regions?: Array<{ region: number } & Record<string, unknown>>; fonts?: string[]; error?: { message?: string };
+      model?: string;
+      usage?: { input_tokens?: number; output_tokens?: number; load_ms?: number; read_ms?: number; write_ms?: number } | null;
     };
+    const seconds = (performance.now() - startedAt) / 1000;
     // The local model's answer is streamed behind a keep-alive, so its status is sent
     // before the outcome is known and a failure arrives as a 200 with an `error` body.
     if (answer.error || !Array.isArray(answer.regions)) {
@@ -460,7 +476,18 @@ export async function detectSvgText(
       }
       return out;
     });
-    return { regions: merged, fonts: Array.isArray(fonts) ? fonts : [] };
+    const usage = answer.usage ?? null;
+    const stats: TextDetectStats = {
+      model: answer.model ?? opts.model ?? '',
+      seconds,
+      regions: regions.length,
+      inputTokens: usage?.input_tokens ?? null,
+      outputTokens: usage?.output_tokens ?? null,
+      phases: usage && typeof usage.write_ms === 'number'
+        ? { load: (usage.load_ms ?? 0) / 1000, read: (usage.read_ms ?? 0) / 1000, write: usage.write_ms / 1000 }
+        : null,
+    };
+    return { regions: merged, fonts: Array.isArray(fonts) ? fonts : [], stats };
   } finally {
     host.remove();
   }
