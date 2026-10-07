@@ -12,13 +12,13 @@
 // choices left to the client are the model, from the same allowlist as /api/claude, and
 // the effort; both default to Sonnet 5 at low effort.
 //
-// The one exception to "asks Claude": the dev-only local model (LOCAL_MODEL, the "Local"
-// entry in the AI tools Model dropdown) is answered by Ollama on this machine instead,
+// The one exception to "asks Claude": the dev-only local models (the "Local" entries in
+// the AI tools Model dropdown) are answered by Ollama on this machine instead,
 // from the same prompt and through the same parsing — see src/lib/ollama.ts.
 // Spend is bounded in server/index.mjs by the same throttle, budget and concurrency cap.
 import { base64Bytes, isAllowedModel, isCrossSite, MAX_IMAGE_BYTES } from '@/lib/ai-guard';
 import { onlyGoogleFonts } from '@/lib/google-fonts';
-import { LOCAL_MODEL, localModelEnabled, ollamaChat, respondWhenDone } from '@/lib/ollama';
+import { isLocalModel, localModelEnabled, ollamaChat, respondWhenDone } from '@/lib/ollama';
 
 const DEFAULT_MODEL = 'claude-sonnet-5';
 const DEFAULT_EFFORT = 'low';
@@ -117,7 +117,7 @@ export async function POST(request: Request): Promise<Response> {
   const body = raw as Record<string, unknown>;
 
   const model = body.model ?? DEFAULT_MODEL;
-  const local = model === LOCAL_MODEL && localModelEnabled();
+  const local = isLocalModel(model) && localModelEnabled() ? model : null;
   if (!local && !isAllowedModel(model)) return bad('Unsupported model');
   // How hard the model thinks (output_config.effort). Low matched Opus's answers on the
   // reference file with Sonnet 5 at about half the cost — see the model benchmark.
@@ -163,18 +163,20 @@ export async function POST(request: Request): Promise<Response> {
 
   if (local) {
     // The answer is started for the model, down to the first region's number: that is
-    // what stops this build reasoning for minutes before it writes anything, and a
-    // shorter start (`{"regions":[`) gets closed straight away as an empty list.
+    // what stops the reasoning build thinking for minutes before it writes anything, and
+    // a shorter start (`{"regions":[`) gets closed straight away as an empty list.
+    // ollamaChat leaves it off for a build that answers directly.
     const prefill = `{"regions":[{"region":${brief[0].region},"is_text":`;
     const started = Date.now();
-    console.log(`[svg-text] ${LOCAL_MODEL} (local): ${brief.length} regions`);
+    console.log(`[svg-text] ${local} (local): ${brief.length} regions`);
     return respondWhenDone(
       ollamaChat({
+        model: local,
         prompt: PROMPT(brief, fontCount > 0 ? fontCount + LOCAL_FONT_SPARES : 0),
         images: [body.clean as string, body.annotated as string],
         prefill, maxTokens: MAX_TOKENS,
       }).then(async ({ text: answer, stats }) => {
-        console.log(`[svg-text] ${LOCAL_MODEL} answered in ${((Date.now() - started) / 1000).toFixed(1)}s`);
+        console.log(`[svg-text] ${local} answered in ${((Date.now() - started) / 1000).toFixed(1)}s`);
         const read = readAnswer(answer);
         if ('error' in read) {
           console.log('[svg-text] unparseable local answer:', answer.slice(0, 500));
@@ -183,7 +185,7 @@ export async function POST(request: Request): Promise<Response> {
         // usage in the shape Anthropic's takes (input_tokens / output_tokens), plus the
         // phase timings only a local run has, so the panel can show one or the other.
         return {
-          regions: read.regions, fonts: await offeredFonts(read.fonts, fontCount), model: LOCAL_MODEL, usage: stats,
+          regions: read.regions, fonts: await offeredFonts(read.fonts, fontCount), model: local, usage: stats,
         };
       }),
     );

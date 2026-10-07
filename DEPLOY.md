@@ -176,7 +176,7 @@ export ships the dev rail's routes live unless something says otherwise. Four ar
   that matters.
 - **`/api/review/test/<id>`** — makes the upstream create a review entry for any art id.
 - **`/api/download`** — unzips out of `assets/downloads/`.
-- **`/api/local`** — the "Local" model in the AI tools dropdown: forwards an AI pass to
+- **`/api/local`** — the "Local" models in the AI tools dropdown: forwards an AI pass to
   Ollama on the same machine (`OLLAMA_HOST`, default `http://127.0.0.1:11434`) instead of
   the paid API. A server has no Ollama to forward to. `/api/svg-text` takes the same
   local model id and refuses it under the same switch.

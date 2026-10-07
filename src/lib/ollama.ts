@@ -1,5 +1,5 @@
 /// <reference types="node" />
-// Server side of the "Local" entry in the AI tools Model dropdown: one vision turn to an
+// Server side of the "Local" entries in the AI tools Model dropdown: one vision turn to an
 // Ollama model running on this machine, in place of the paid API.
 //
 // Dev tooling, not a product path. Measured on an M2 Air against Sonnet 5 on the
@@ -9,7 +9,23 @@
 // for free, and it only answers where the dev routes do.
 import http from 'node:http';
 
-export const LOCAL_MODEL = 'qwen3-vl:8b';
+// The models this will run, and whether each needs its answer started for it (see
+// ollamaChat). Two builds of the same model: the default tag reasons before it answers
+// and the -instruct one answers directly. Against Sonnet 5 on four samples the instruct
+// build scored a little higher overall (159 of 192 fields to 143) but they fail on
+// different artwork — it placed a badge's single letter where the other could not, and
+// missed a business card's monogram the other read — so both are offered.
+//
+// The ids are repeated in components/editor-types.ts for the dropdown, which can't import
+// this module (node:http); the two lists must match.
+const LOCAL_MODELS = {
+  'qwen3-vl:8b': { prefill: true },
+  'qwen3-vl:8b-instruct': { prefill: false },
+} as const;
+export type LocalModel = keyof typeof LOCAL_MODELS;
+
+export const isLocalModel = (model: unknown): model is LocalModel =>
+  typeof model === 'string' && Object.hasOwn(LOCAL_MODELS, model);
 
 const OLLAMA_URL = new URL(process.env.OLLAMA_HOST || 'http://127.0.0.1:11434');
 
@@ -27,12 +43,14 @@ export const localModelEnabled = (): boolean =>
 
 // One user turn — text plus base64 images — answered as plain text.
 //
-// `prefill` is the start of the answer, written for the model. It is not a nicety: this
-// build reasons before it answers whatever it is told (`think: false` and /no_think are
-// both ignored), which on the text-detection call was seventeen minutes of reasoning that
-// then used up the token budget before any JSON appeared. Starting the answer skips the
-// reasoning entirely. It has to commit the model to the shape, too — a bare
-// `{"regions":[` was closed straight away as an empty list.
+// `prefill` is the start of the answer, written for the model, and is used only for a
+// build that needs it. For the reasoning build it is not a nicety: that build reasons
+// before it answers whatever it is told (`think: false` and /no_think are both ignored),
+// which on the text-detection call was seventeen minutes of reasoning that then used up
+// the token budget before any JSON appeared. Starting the answer skips the reasoning
+// entirely. It has to commit the model to the shape, too — a bare `{"regions":[` was
+// closed straight away as an empty list. The instruct build gets the bare prompt, which
+// is how it was measured.
 //
 // node:http rather than fetch, and streamed: the model is silent for as long as it takes
 // to read the images (tens of seconds), then slow to write. fetch gives up after five
@@ -47,16 +65,17 @@ export type OllamaStats = {
 };
 
 export function ollamaChat(opts: {
-  prompt: string; images: string[]; prefill: string; maxTokens: number;
+  model: LocalModel; prompt: string; images: string[]; prefill: string; maxTokens: number;
 }): Promise<{ text: string; stats: OllamaStats | null }> {
+  const prefill = LOCAL_MODELS[opts.model].prefill ? opts.prefill : '';
   const payload = JSON.stringify({
-    model: LOCAL_MODEL,
+    model: opts.model,
     stream: true,
     think: false,
     options: { temperature: 0, num_ctx: NUM_CTX, num_predict: opts.maxTokens },
     messages: [
       { role: 'user', content: opts.prompt, images: opts.images },
-      { role: 'assistant', content: opts.prefill },
+      ...(prefill ? [{ role: 'assistant', content: prefill }] : []),
     ],
   });
 
@@ -107,12 +126,12 @@ export function ollamaChat(opts: {
             // Ollama's own wording for a model that was never pulled is accurate but
             // doesn't say what to do about it.
             reject(new Error(/not found/i.test(failure)
-              ? `${LOCAL_MODEL} is not installed — run: ollama pull ${LOCAL_MODEL}`
+              ? `${opts.model} is not installed — run: ollama pull ${opts.model}`
               : `Ollama: ${failure}`));
           } else if (truncated) {
-            reject(new Error(`${LOCAL_MODEL} hit the ${opts.maxTokens}-token limit before finishing its answer`));
+            reject(new Error(`${opts.model} hit the ${opts.maxTokens}-token limit before finishing its answer`));
           } else {
-            resolve({ text: opts.prefill + text, stats });
+            resolve({ text: prefill + text, stats });
           }
         });
       },

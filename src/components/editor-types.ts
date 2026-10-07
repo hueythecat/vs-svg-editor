@@ -84,22 +84,27 @@ export type RemovedRecord = {
 // Which LLM backs every AI action. Labels are what the model dropdown shows; the
 // concrete model ids live server-side in the matching /api route. 'claude-opus' also
 // goes to /api/claude, but swaps every call site's Sonnet id for OPUS_MODEL.
-export type LlmProvider = 'claude' | 'claude-opus' | 'kimi' | 'local';
+export type LlmProvider = 'claude' | 'claude-opus' | 'kimi' | 'local' | 'local-instruct';
 
 export const OPUS_MODEL = 'claude-opus-5-5';
 
-// The 'local' provider: an Ollama model on the developer's own machine, answered by
+// The 'local' providers: Ollama models on the developer's own machine, answered by
 // /api/local (and by /api/svg-text for text detection) — free, a minute or two a call,
-// and well short of Sonnet on busy artwork. Must match LOCAL_MODEL in src/lib/ollama.ts,
-// which can't be imported here: that module is server-only (node:http).
-export const LOCAL_MODEL = 'qwen3-vl:8b';
+// and well short of Sonnet on busy artwork. Two builds of one model that get different
+// artwork wrong, which is why both are here. The ids must match LOCAL_MODELS in
+// src/lib/ollama.ts, which can't be imported: that module is server-only (node:http).
+export const LOCAL_MODELS: Partial<Record<LlmProvider, string>> = {
+  local: 'qwen3-vl:8b',
+  'local-instruct': 'qwen3-vl:8b-instruct',
+};
 
 // Kimi is off the menu for now; the 'kimi' provider and its /api/kimi route are
 // still wired up, so re-adding the entry below is all it takes to bring it back.
 export const LLM_OPTIONS: Array<{ value: LlmProvider; label: string }> = [
   { value: 'claude', label: 'Claude — Sonnet 5' },
   { value: 'claude-opus', label: 'Claude — Opus 5.5' },
-  { value: 'local', label: `Local — ${LOCAL_MODEL}` },
+  { value: 'local', label: `Local — ${LOCAL_MODELS.local}` },
+  { value: 'local-instruct', label: `Local — ${LOCAL_MODELS['local-instruct']}` },
 ];
 
 // How the Customise pass finds the text in the artwork. 'current' is the vision pass

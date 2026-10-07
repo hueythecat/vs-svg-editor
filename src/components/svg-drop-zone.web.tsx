@@ -45,7 +45,7 @@ import type {
   AiActionType, CustomiseBundle, DocBundle, LlmProvider, RegionBox, RemovedRecord, TextDetectMethod,
   TextLayerAttrs,
 } from './editor-types';
-import { LLM_OPTIONS, LOCAL_MODEL, OPUS_MODEL, TEXT_DETECT_OPTIONS } from './editor-types';
+import { LLM_OPTIONS, LOCAL_MODELS, OPUS_MODEL, TEXT_DETECT_OPTIONS } from './editor-types';
 import { detectSvgText, type DetectedTextRegion, type TextDetectStats } from '@/lib/svg-text-detect';
 import { EditorControlPanel, type ControlTab } from './editor-control-panel';
 import { AiPanel } from './editor-ai-panel';
@@ -261,19 +261,21 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     () => (hideNonTextRegions ? textDetectBoxes.filter((b) => b.replaceable) : textDetectBoxes),
     [textDetectBoxes, hideNonTextRegions],
   );
+  // The Ollama model id when one of the "Local" entries is selected, else null.
+  const localModel = () => LOCAL_MODELS[llmProviderRef.current] ?? null;
   const llmEndpoint = () =>
-    llmProviderRef.current === 'kimi' ? '/api/kimi' : llmProviderRef.current === 'local' ? '/api/local' : '/api/claude';
+    llmProviderRef.current === 'kimi' ? '/api/kimi' : localModel() ? '/api/local' : '/api/claude';
   // Log label. /api/kimi discards the model id we send and pins its own, so naming a
   // Claude model while Kimi is running would be a lie — say who actually answered.
   const llmLabel = (claudeModel: string) =>
     llmProviderRef.current === 'kimi' ? 'kimi (model pinned in /api/kimi)'
-      : llmProviderRef.current === 'local' ? `local ${LOCAL_MODEL} (Ollama)`
+      : localModel() ? `local ${localModel()} (Ollama)`
         : `claude ${llmModel(claudeModel)}`;
   // The model id actually sent. Call sites name the Sonnet they were tuned on; picking
   // Opus overrides all of them, and so does the local model. Also part of the AI cache
   // keys, so switching model doesn't just replay the other model's cached answer.
   const llmModel = (model: string) =>
-    llmProviderRef.current === 'claude-opus' ? OPUS_MODEL : llmProviderRef.current === 'local' ? LOCAL_MODEL : model;
+    llmProviderRef.current === 'claude-opus' ? OPUS_MODEL : localModel() ?? model;
 
   // Single image+text turn to the active LLM. Every AI action shared this exact
   // fetch/error/parse skeleton; extracting it here keeps the seven call sites to just
@@ -1708,7 +1710,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
         // Text detection runs on its own tuned model whichever Claude the dropdown names;
         // "Local" is the one choice that overrides it, since the point of picking it is
         // to make no paid call at all.
-        const detectModel = llmProviderRef.current === 'local' ? LOCAL_MODEL : TEXT_DETECT_MODEL;
+        const detectModel = localModel() ?? TEXT_DETECT_MODEL;
         console.log('[text-detect] invoking /api/svg-text:', detectModel, `effort ${TEXT_DETECT_EFFORT}`);
         const { regions, fonts, stats } = await detectSvgText(svgWithoutHidden(activeSvg.content, hiddenLayers), {
           model: detectModel, effort: TEXT_DETECT_EFFORT, layers: activeSvg.layers,
