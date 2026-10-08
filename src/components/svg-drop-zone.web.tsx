@@ -237,8 +237,8 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   // Which LLM every AI action calls. Picking 'kimi' diverts each request to
   // /api/kimi, which re-shapes the same Anthropic-style body for Moonshot. Mirrored
   // into a ref so the AI callbacks below read the live choice, never a stale closure.
-  const [llmProvider, setLlmProvider] = useState<LlmProvider>('claude-opus');
-  const llmProviderRef = useRef<LlmProvider>('claude-opus');
+  const [llmProvider, setLlmProvider] = useState<LlmProvider>('claude');
+  const llmProviderRef = useRef<LlmProvider>('claude');
   const selectLlmProvider = (p: LlmProvider) => { llmProviderRef.current = p; setLlmProvider(p); };
   // Which text-detection call Customise makes. Ref-mirrored like the provider, so
   // runCustomise reads the live choice without taking it as a dependency.
@@ -2466,7 +2466,20 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     setCustomiseDone(false);
     setCustomiseFonts([]);
     setCallStats(null);
-  }, [activeSvg, defaultHiddenLayers]);
+    resetFonts();
+    setAiError(null);
+    // And everything else a pass leaves behind. The region boxes and their dots address
+    // shapes by position in the document the detection saw; over the reverted document
+    // they would still be drawn, and a dot would act on whatever now sits at that
+    // address. What a pass hid is back in the artwork, so the record of it is void too.
+    setTextDetectBoxes(NO_REGION_BOXES);
+    detectedRegionsRef.current = null;
+    setRemovedRecords([]);
+    removedIdsRef.current = new Set();
+    setPreviewRemovedId(null);
+    setExpandDepth(0);
+    setEditingTextId(null);
+  }, [activeSvg, defaultHiddenLayers, resetFonts]);
 
   const cancelReset = useCallback(() => setResetConfirmOpen(false), []);
 
@@ -2674,6 +2687,12 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     hiddenLayers.size !== defaultHiddenLayers.size ||
     [...hiddenLayers].some((id) => !defaultHiddenLayers.has(id));
   const isDirty = !!activeSvg && (visibilityChanged || activeSvg.content !== activeSvg.originalContent);
+  // Revert is offered for an unchanged document too once a Customise call has run on it:
+  // the regions it drew, the fonts it suggested and its figures are all still on screen,
+  // and reverting is the way back to the artwork as it opened.
+  const canRevert = isDirty || (!!activeSvg && (
+    textDetectBoxes.length > 0 || customiseFonts.length > 0 || callStats !== null || customiseDone
+  ));
   const selectionIsBackground = !!selectedLayer && selectedLayer === backgroundLayerId;
   // The AI panel's "Use this font": applies to the selected text layer if there is one,
   // otherwise it becomes the default for the next text layer added.
@@ -2684,7 +2703,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
   // Tools tab. Memoised because the panel is memoised — a fresh object every render
   // would defeat that.
   const docBundle: DocBundle = useMemo(() => ({
-    isDirty,
+    isDirty, canRevert,
     undoCount, onUndo: undo,
     redoCount, onRedo: redo,
     onReset: requestReset,
@@ -2708,7 +2727,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     // gap and nothing to even it against.
     tidyDisabled: selectionIds.length < 3,
   }), [
-    activeSvg, isDirty, undoCount, undo, redoCount, redo, requestReset,
+    activeSvg, isDirty, canRevert, undoCount, undo, redoCount, redo, requestReset,
     hiddenRowCount, openRating, centerLayersToCanvas, rotateSelected90,
     selectedLayers.size, selectionIsBackground, matchRotationToSelected, tidySelection,
     tidySelectionHorizontal, newDesignFromSelection,

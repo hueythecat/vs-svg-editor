@@ -159,7 +159,7 @@ export const ToolsTab = React.memo(function ToolsTab({
         </ActionButton>
         <ActionButton
           onClick={doc.onReset}
-          disabled={!doc.isDirty}
+          disabled={!doc.canRevert}
           title={t('toolbar.revertTitle')}
           label={t('toolbar.revert')}
         >

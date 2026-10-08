@@ -17,6 +17,9 @@ export type TextLayerAttrs = {
 // Tools tab, so they travel as one bundle rather than a dozen separate props.
 export type DocBundle = {
   isDirty: boolean;
+  // Whether Revert has anything to take back. Wider than isDirty: a Customise call that
+  // only drew its regions leaves the document untouched but the editor full of its output.
+  canRevert: boolean;
   undoCount: number;
   onUndo: () => void;
   redoCount: number;
