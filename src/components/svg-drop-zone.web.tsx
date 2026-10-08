@@ -2099,7 +2099,9 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
       yFraction: ((y0 + y1) / 2 - vb.y) / vb.h, xFraction: ((x0 + x1) / 2 - vb.x) / vb.w,
       leftFraction: (x0 - vb.x) / vb.w, rightFraction: (x1 - vb.x) / vb.w,
       sizeFraction: (y1 - y0) / vb.h,
-      font, weight, color, content: region.text_content, letterSpacing: 0, removeIds: sids,
+      // Only a line joined from separately boxed letters carries a measured tracking.
+      font, weight, color, content: region.text_content,
+      letterSpacing: typeof region.letter_spacing === 'number' ? region.letter_spacing : 0, removeIds: sids,
     };
     addUsedFont(font, weight);
     await ensureRowFontsReady([row]);

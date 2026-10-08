@@ -4,7 +4,7 @@
 // live <text> elements, and clusters of outlined glyph paths — and numbered them. It
 // posts two renders (clean, and annotated with a numbered magenta box per region) plus
 // a short brief per region. This route asks Claude to read each numbered region and
-// returns { regions: [{ region, is_text, text_content, role, words, ... }] } — the model
+// returns { regions: [{ region, is_text, text_content, role, words, ... }], lines } — the model
 // half of the reference format; the client adds the DOM half (layer, xpaths, bbox, …).
 //
 // Unlike /api/claude, the caller never supplies a prompt: the upstream body is built
@@ -55,7 +55,7 @@ Candidate regions:
 ${JSON.stringify(brief)}
 
 For EVERY numbered region, look at it in both images and describe it. Return JSON only, no markdown, in exactly this shape:
-{"regions":[{"region":1,"is_text":true,"text_content":"…","font_weight":"light|regular|medium|bold|black","italic":false,"font_category":"sans|serif|script|display|mono|handwritten","font_guess":"short description of the typeface, e.g. Geometric sans (Gotham / Montserrat style)","google_font":"Montserrat","google_font_weight":700,"color":"#1a2b3c","effects":["…"],"role":"logo|headline|subheading|tagline|body|placeholder|decorative","replaceable":true,"confidence":0.0,"words":[{"text_content":"…","font_weight":"…"}]}]${fontCount > 0 ? ',"fonts":["…"]' : ''}}
+{"regions":[{"region":1,"is_text":true,"text_content":"…","font_weight":"light|regular|medium|bold|black","italic":false,"font_category":"sans|serif|script|display|mono|handwritten","font_guess":"short description of the typeface, e.g. Geometric sans (Gotham / Montserrat style)","google_font":"Montserrat","google_font_weight":700,"color":"#1a2b3c","effects":["…"],"role":"logo|headline|subheading|tagline|body|placeholder|decorative","replaceable":true,"confidence":0.0,"words":[{"text_content":"…","font_weight":"…"}]}],"lines":[{"regions":[4,5,6],"text_content":"…"}]${fontCount > 0 ? ',"fonts":["…"]' : ''}}
 
 Rules:
 - One entry per numbered region, using its number. Do not add regions that are not boxed.
@@ -68,7 +68,8 @@ Rules:
 - effects lists visible styling: all caps, 3D extrusion, outline, shadow, gradient, arc, mixed weights, and so on; [] when plain.
 - role "placeholder" is template filler text (lorem ipsum, 1234-5678, example emails/URLs); replaceable is whether a user would want to retype it — true for names, contact details, placeholders and logo lettering (people swap in their own initial or brand), false for icons and ornaments.
 - words: include ONLY when the words of the region differ in weight or style — one entry per word, in reading order. Otherwise omit it. When words is present, the region's own font_weight is the first word's.
-- confidence is 0–1 for is_text and the reading together.${fontCount > 0 ? `
+- confidence is 0–1 for is_text and the reading together.
+- lines: use ONLY when one line of text has been boxed as several regions — usually widely spaced lettering where each letter, or each word, got a box of its own. Give one entry per such line: regions is the numbers of its boxes in reading order (left to right as drawn, which is often not numerical order), and text_content is the whole line as it reads, with its spaces. Group only boxes that share a baseline, size, colour and typeface — words in different colours or styles stay separate regions. Every box is still described on its own in "regions" as well. Use [] when no line is split across boxes.${fontCount > 0 ? `
 - fonts: ${fontCount} Google Fonts families (exact names as Google lists them) that suit the style, mood and colour palette of the whole design — alternatives someone customising it might switch the text to. Names only, no duplicates.` : ''}`;
 
 // The model sometimes wraps its JSON in a ```json fence despite being told not to.
@@ -82,14 +83,27 @@ const extractJson = (raw: string): string => {
 
 // The model's answer as the two things the client wants from it, or why it couldn't be
 // read. Shared by both upstreams, so a region means the same whichever model wrote it.
-const readAnswer = (answer: string): { regions: unknown[]; fonts: string[] } | { error: string } => {
+type LineOut = { regions: number[]; text_content: string };
+
+const readAnswer = (answer: string): { regions: unknown[]; fonts: string[]; lines: LineOut[] } | { error: string } => {
   try {
-    const parsed = JSON.parse(extractJson(answer)) as { regions?: unknown; fonts?: unknown };
+    const parsed = JSON.parse(extractJson(answer)) as { regions?: unknown; fonts?: unknown; lines?: unknown };
     if (!Array.isArray(parsed.regions)) throw new Error('no regions array');
     const fonts = Array.isArray(parsed.fonts)
       ? [...new Set(parsed.fonts.filter((f): f is string => typeof f === 'string' && f.trim() !== '').map((f) => f.trim()))]
       : [];
-    return { regions: parsed.regions, fonts };
+    // Shape only. Whether the numbers are real regions, and whether the line reads as
+    // its boxes do, is checked by the client, which is the side that knows the regions.
+    const lines = Array.isArray(parsed.lines)
+      ? parsed.lines.flatMap((l): LineOut[] => {
+          const line = l as { regions?: unknown; text_content?: unknown } | null;
+          return line && Array.isArray(line.regions) && line.regions.every((n) => Number.isInteger(n))
+            && typeof line.text_content === 'string' && line.text_content.trim() !== ''
+            ? [{ regions: line.regions as number[], text_content: line.text_content }]
+            : [];
+        })
+      : [];
+    return { regions: parsed.regions, fonts, lines };
   } catch (err) {
     return { error: (err as Error).message };
   }
@@ -185,7 +199,8 @@ export async function POST(request: Request): Promise<Response> {
         // usage in the shape Anthropic's takes (input_tokens / output_tokens), plus the
         // phase timings only a local run has, so the panel can show one or the other.
         return {
-          regions: read.regions, fonts: await offeredFonts(read.fonts, fontCount), model: local, usage: stats,
+          regions: read.regions, lines: read.lines, fonts: await offeredFonts(read.fonts, fontCount),
+          model: local, usage: stats,
         };
       }),
     );
@@ -239,6 +254,7 @@ export async function POST(request: Request): Promise<Response> {
   }
   // usage alongside the regions so a debug run can price itself; the client ignores it.
   return Response.json({
-    regions: read.regions, fonts: await offeredFonts(read.fonts, fontCount), model: data.model, usage: data.usage,
+    regions: read.regions, lines: read.lines, fonts: await offeredFonts(read.fonts, fontCount),
+    model: data.model, usage: data.usage,
   });
 }

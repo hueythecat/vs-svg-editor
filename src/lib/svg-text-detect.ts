@@ -178,6 +178,33 @@ function collect(svg: SVGSVGElement, layerIds: Set<string>): Collected[] {
   return out;
 }
 
+// Clusters in the order they would be read: by row, left to right within a row.
+//
+// Sorting on the top edge alone does not give that. Letters on one baseline do not share
+// a top — round ones overshoot, so a G or an O starts a fraction above a T — and a
+// spaced-out line whose letters are each their own cluster came out numbered 7, 5, 9, 10,
+// 8, 6, 4 from left to right. The model reads the numbers off the image, and with boxes
+// that small and numbers that scrambled it put letters on the wrong boxes.
+//
+// A cluster joins a row when its vertical centre falls inside the row's first (topmost)
+// member and the two are of comparable height, so a tall mark beside a line of small
+// lettering stays a row of its own instead of swallowing every line it spans.
+function inReadingOrder(clusters: Collected[][]): Collected[][] {
+  const boxed = clusters.map((els) => ({ els, box: unionBox(els) }))
+    .sort((a, b) => a.box[1] - b.box[1] || a.box[0] - b.box[0]);
+  const rows: Array<typeof boxed> = [];
+  for (const c of boxed) {
+    const cy = (c.box[1] + c.box[3]) / 2;
+    const h = Math.max(1, c.box[3] - c.box[1]);
+    const row = rows.find(([first]) => {
+      const fh = Math.max(1, first.box[3] - first.box[1]);
+      return cy >= first.box[1] && cy <= first.box[3] && h <= fh * 2 && fh <= h * 2;
+    });
+    if (row) row.push(c); else rows.push([c]);
+  }
+  return rows.flatMap((row) => row.sort((a, b) => a.box[0] - b.box[0]).map((c) => c.els));
+}
+
 const unionBox = (els: Collected[]): BBox => [
   Math.min(...els.map((e) => e.bbox[0])), Math.min(...els.map((e) => e.bbox[1])),
   Math.max(...els.map((e) => e.bbox[2])), Math.max(...els.map((e) => e.bbox[3])),
@@ -269,11 +296,9 @@ function clusterGlyphs(paths: Collected[], canvasH: number, maxGlyphFrac = 0.5, 
 
   const clusters = new Map<number, Collected[]>();
   glyphs.forEach((g, i) => { const r = find(i); clusters.set(r, [...(clusters.get(r) ?? []), g]); });
-  // Top to bottom, then left to right — region numbers read like the artwork. Glyphs
-  // within a region go left to right, so its xpaths do too.
-  const list = [...clusters.values()]
-    .map((els) => els.sort((a, b) => a.bbox[0] - b.bbox[0]))
-    .sort((a, b) => unionBox(a)[1] - unionBox(b)[1] || unionBox(a)[0] - unionBox(b)[0]);
+  // Row by row, then left to right — region numbers read like the artwork. Glyphs within
+  // a region go left to right, so its xpaths do too.
+  const list = inReadingOrder([...clusters.values()].map((els) => els.sort((a, b) => a.bbox[0] - b.bbox[0])));
 
   // The original kept clusters of 2+; a lone shape is kept too when it sits in the same
   // layer as a real cluster, which is how the reference picks up the contact icons.
@@ -376,6 +401,120 @@ export type TextDetectStats = {
   phases: { load: number; read: number; write: number } | null;   // seconds
 };
 
+// Joins the regions that make up one line of text into a single region.
+//
+// The candidates come from measuring the SVG, and widely tracked lettering defeats that:
+// each letter of a spaced-out tagline is far enough from its neighbours to be boxed on
+// its own, so "YOUR TAGLINE" arrives as eleven one-letter regions and would become eleven
+// one-letter text fields. Tuning the clustering to reach across those gaps has broken
+// other artwork every time it was tried. The model, though, can see it is one line — so
+// it is asked to say so (`lines` in the route's prompt).
+//
+// What the model is trusted for is narrow: THAT there is a split line, roughly where, and
+// what it reads. Which boxes belong to it is decided here, from geometry. The model's own
+// list can't be used for that — on the artwork this was built for it left a box out and
+// re-read its neighbours so the letters still spelled the line, which any check on the
+// spelling passes. So its list is only a pointer to the row:
+//
+//   • the row is every outlined region in the same colour as the boxes it named, on their
+//     baseline band and of comparable height;
+//   • read left to right, that row must hold exactly as many shapes as the line has
+//     letters. One shape per letter is what split lettering looks like, and it is the
+//     test a wrong answer fails: a row that also took in an icon, or a line the model
+//     misread, does not count out.
+//
+// A line that fails is dropped and its regions stay as they were — the worst outcome is
+// the behaviour from before this existed.
+//
+// The joined region takes its styling from the model's description of the first box, the
+// line's text, every box's shapes in reading order, their combined bbox, and the lowest
+// of their numbers.
+const letterCount = (s: string): number => s.replace(/\s+/g, '').length;
+
+function joinLines(
+  regions: DetectedTextRegion[],
+  lines: Array<{ regions?: unknown; text_content?: unknown }> | undefined,
+  // Each region's individual shapes, as [x0, y0, x1, y1] in any one consistent unit.
+  shapesOf: Map<number, BBox[]>,
+): DetectedTextRegion[] {
+  if (!Array.isArray(lines) || lines.length === 0) return regions;
+  const byNum = new Map(regions.map((r) => [r.region, r]));
+  const taken = new Set<number>();
+  const joined: DetectedTextRegion[] = [];
+  const mid = (r: DetectedTextRegion) => (r.bbox[1] + r.bbox[3]) / 2;
+  const height = (r: DetectedTextRegion) => Math.max(1e-6, r.bbox[3] - r.bbox[1]);
+  const median = (v: number[]) => [...v].sort((a, b) => a - b)[Math.floor(v.length / 2)];
+
+  for (const line of lines) {
+    const text = typeof line.text_content === 'string' ? line.text_content.trim() : '';
+    const named = (Array.isArray(line.regions) ? [...new Set(line.regions as number[])] : [])
+      .flatMap((n) => { const r = byNum.get(n); return r && r.source === 'outlined_paths' ? [r] : []; });
+    const skip = (reason: string) => console.log(`[text-detect] ignoring line ${JSON.stringify(line)} — ${reason}`);
+    if (!text) { skip('no text'); continue; }
+    if (named.length < 2) { skip('names fewer than two outlined regions'); continue; }
+
+    // The row the named boxes sit on, in their commonest colour.
+    const fills = named.map((r) => r.fill);
+    const fill = [...new Set(fills)].sort((a, b) => fills.filter((f) => f === b).length - fills.filter((f) => f === a).length)[0];
+    const seeds = named.filter((r) => r.fill === fill);
+    const top = median(seeds.map((r) => r.bbox[1]));
+    const bottom = median(seeds.map((r) => r.bbox[3]));
+    const h = median(seeds.map(height));
+    const row = regions
+      .filter((r) => r.source === 'outlined_paths' && r.fill === fill && !taken.has(r.region)
+        && mid(r) >= top && mid(r) <= bottom && height(r) <= h * 2 && h <= height(r) * 2)
+      .sort((a, b) => a.bbox[0] - b.bbox[0]);
+
+    const shapes = row.reduce((n, r) => n + r.glyph_paths, 0);
+    if (row.length < 2) { skip('its row holds a single region'); continue; }
+    if (shapes !== letterCount(text)) {
+      skip(`its row holds ${shapes} shape(s) but the line has ${letterCount(text)} letter(s)`);
+      continue;
+    }
+
+    const nums = row.map((r) => r.region);
+    nums.forEach((n) => taken.add(n));
+    // How far apart the letters are set, in ems, so the field that replaces them can be
+    // tracked out to match instead of collapsing to normal spacing. Measured between the
+    // individual letter shapes, not between the regions: a line split into two words has
+    // one gap between its regions and that gap is the word space, which says nothing
+    // about tracking. Across every shape in the row the letter gaps outnumber the word
+    // gaps, so the median is a letter gap. Taken against the font size, with capitals as
+    // ~0.72 of it; ~0.08em of every gap is the side bearings any font has, not tracking.
+    const letters = row.flatMap((r) => shapesOf.get(r.region) ?? []).sort((a, b) => a[0] - b[0]);
+    const letterGaps = letters.slice(1).map((b, i) => b[0] - letters[i][2]);
+    const capHeight = letters.length ? median(letters.map((b) => b[3] - b[1])) : 0;
+    const tracking = letterGaps.length && capHeight > 0
+      ? Math.max(0, +(median(letterGaps) / (capHeight / 0.72) - 0.08).toFixed(2))
+      : 0;
+    // Styling from the leftmost box the model actually called text; the row's first box
+    // as a fallback, with the fields a text region needs filled in.
+    const { words: _words, ...first } = row.find((r) => r.is_text === true) ?? row[0];
+    const confidences = row.map((r) => r.confidence).filter((c): c is number => typeof c === 'number');
+    joined.push({
+      ...first,
+      region: Math.min(...nums),
+      is_text: true,
+      text_content: text,
+      xpaths: row.flatMap((r) => r.xpaths),
+      glyph_paths: shapes,
+      class_uuids: [...new Set(row.flatMap((r) => r.class_uuids))].sort(),
+      bbox: [
+        Math.min(...row.map((r) => r.bbox[0])), Math.min(...row.map((r) => r.bbox[1])),
+        Math.max(...row.map((r) => r.bbox[2])), Math.max(...row.map((r) => r.bbox[3])),
+      ],
+      replaceable: row.some((r) => r.replaceable === true),
+      letter_spacing: tracking,
+      ...(confidences.length ? { confidence: Math.min(...confidences) } : {}),
+      // Kept so a result can be traced back to the boxes the model was shown.
+      joined_regions: nums,
+    });
+    console.log(`[text-detect] joined regions ${nums.join(', ')} into one line: ${JSON.stringify(text)} (tracking ~${tracking}em)`);
+  }
+  if (joined.length === 0) return regions;
+  return [...regions.filter((r) => !taken.has(r.region)), ...joined].sort((a, b) => a.region - b.region);
+}
+
 export async function detectSvgText(
   svgString: string,
   opts: { layers?: LayerRef[]; model?: string; effort?: 'low' | 'medium' | 'high'; fontSuggestions?: number } = {},
@@ -426,6 +565,7 @@ export async function detectSvgText(
     if (!resp.ok) throw new Error(`Text detection failed: ${resp.status} ${await resp.text()}`);
     const answer = await resp.json() as {
       regions?: Array<{ region: number } & Record<string, unknown>>; fonts?: string[]; error?: { message?: string };
+      lines?: Array<{ regions?: unknown; text_content?: unknown }>;
       model?: string;
       usage?: { input_tokens?: number; output_tokens?: number; load_ms?: number; read_ms?: number; write_ms?: number } | null;
     };
@@ -487,7 +627,8 @@ export async function detectSvgText(
         ? { load: (usage.load_ms ?? 0) / 1000, read: (usage.read_ms ?? 0) / 1000, write: usage.write_ms / 1000 }
         : null,
     };
-    return { regions: merged, fonts: Array.isArray(fonts) ? fonts : [], stats };
+    const shapesOf = new Map(regions.map((r) => [r.region, r.els.map((e) => e.bbox)]));
+    return { regions: joinLines(merged, answer.lines, shapesOf), fonts: Array.isArray(fonts) ? fonts : [], stats };
   } finally {
     host.remove();
   }

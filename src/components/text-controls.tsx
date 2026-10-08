@@ -23,7 +23,7 @@ const WEIGHTS: Array<[number, string]> = [
   [800, 'text.weight800'],
 ];
 
-const LETTER_SPACING = [-0.1, -0.05, 0, 0.05, 0.1, 0.15, 0.2, 0.3] as const;
+const LETTER_SPACING = [-0.1, -0.05, 0, 0.05, 0.1, 0.15, 0.2, 0.3, 0.5, 0.75, 1] as const;
 
 const fieldRow: React.CSSProperties = { display: 'flex', gap: 10, marginBottom: 12 };
 

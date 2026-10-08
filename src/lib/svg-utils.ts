@@ -893,7 +893,7 @@ export function setTextX(textEl: Element, x: number): void {
 
 // Letter-spacing steps the inspector's slider offers. AI estimates are snapped onto
 // them so a re-created field can still be adjusted by hand afterwards.
-const LS_OPTIONS = [-0.1, -0.05, 0, 0.05, 0.1, 0.15, 0.2, 0.3];
+const LS_OPTIONS = [-0.1, -0.05, 0, 0.05, 0.1, 0.15, 0.2, 0.3, 0.5, 0.75, 1];
 const snapLetterSpacing = (v: number) =>
   LS_OPTIONS.reduce((a, b) => (Math.abs(b - v) < Math.abs(a - v) ? b : a));
 
