@@ -30,6 +30,7 @@ import {
   setTextLines,
 } from '@/lib/svg-utils';
 import { C, EDITOR_CSS, FONT_STACK, SHADOW } from '@/lib/design-tokens';
+import { useLocalLlmStatus } from '@/hooks/use-local-llm-status';
 import { FONT_SUGGESTION_LIMIT, SHOW_DEV_UI } from '@/lib/env';
 import { readAiCache, writeAiCache } from '@/lib/ai-cache';
 // Two entry points into the same catalogue: `t` for the imperative side — status text,
@@ -272,6 +273,17 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     () => (hideNonTextRegions ? textDetectBoxes.filter((b) => b.replaceable) : textDetectBoxes),
     [textDetectBoxes, hideNonTextRegions],
   );
+  // The Model dropdown names who would answer: a "Local" entry the AWS vLLM server is
+  // serving right now reads "vLLM — …", and goes back to "Local — …" (Ollama on this
+  // machine) when the server stops answering. Asked only while the AI tools panel is open.
+  const localLlm = useLocalLlmStatus(SHOW_DEV_UI && aiPanelOpen);
+  const llmOptions = useMemo(
+    () => LLM_OPTIONS.map((o) => {
+      const model = LOCAL_MODELS[o.value];
+      return model && localLlm?.models.includes(model) ? { ...o, label: `vLLM — ${model}` } : o;
+    }),
+    [localLlm],
+  );
   // The local model id when one of the "Local" entries is selected, else null.
   const localModel = () => LOCAL_MODELS[llmProviderRef.current] ?? null;
   const llmEndpoint = () =>
@@ -455,6 +467,9 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       const { content, layers } = parseSvg(cleaned);
       setActiveSvg((prev) => { revokePrev(prev); return { name, src, content, originalContent: content, layers, objectUrl, edit }; });
       setTextDetectBoxes(NO_REGION_BOXES);
+      // New artwork opens on the Tools tab, whichever tab the last one was left on — the
+      // Text and Layers tabs describe a selection, and nothing is selected yet.
+      setControlTab('tools');
       // A plain white canvas layer starts hidden, so artwork opens on the transparency
       // checkerboard and exports transparent unless it's switched on. A coloured or
       // patterned background is part of the design, so it stays visible.
@@ -2918,7 +2933,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                   open={aiPanelOpen}
                   onClose={closeAiPanel}
                   llmProvider={llmProvider}
-                  llmOptions={LLM_OPTIONS}
+                  llmOptions={llmOptions}
                   onSelectLlmProvider={selectLlmProvider}
                   textDetectMethod={textDetectMethod}
                   textDetectOptions={TEXT_DETECT_OPTIONS}

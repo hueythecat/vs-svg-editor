@@ -8,6 +8,7 @@ import {
   setIgnoreCanCustomise as setIgnoreCanCustomiseFlag,
   setIgnoreCooldownPrompt, setIgnoreHasCustomised, getRecentVectors, pushRecentVector,
 } from '@/lib/dev-flags';
+import { useLocalLlmStatus } from '@/hooks/use-local-llm-status';
 import { PADDLE_ENV, openPaddleCheckout, paddleConfigError } from '@/lib/paddle';
 import { ChevronIcon, SettingsIcon } from './svg-icons';
 
@@ -89,8 +90,6 @@ interface DevRailProps<S extends Sample> {
   onSetHideNonTextRegions: (on: boolean) => void;
 }
 
-const LOCAL_LLM_POLL_MS = 10_000;
-
 export function DevRail<S extends Sample>({
   samples, activeSample, isLoading, open, onSetOpen, onOpenSample, onOpenFetched,
   onOpenReviewUuid, onReviewListLoaded, hideNonTextRegions, onSetHideNonTextRegions,
@@ -124,9 +123,9 @@ export function DevRail<S extends Sample>({
   const paddleError = paddleConfigError();
   const [buying, setBuying] = useState(false);
   const [buyStatus, setBuyStatus] = useState<string | null>(null);
-  // Where the "Local" models would be answered right now (GET /api/local). Null until the
-  // first answer, and whenever the route can't be asked — the section then hides.
-  const [localLlm, setLocalLlm] = useState<{ host: string; up: boolean; models: string[]; fallback: boolean } | null>(null);
+  // Where the "Local" models would be answered right now. Asked only while the rail is
+  // expanded; null until the first answer, and the section hides until then.
+  const localLlm = useLocalLlmStatus(open);
 
   // The dropdown's contents come from the review host, not a hardcoded list, so it
   // always reflects what's actually there to open. Fetched once the rail is expanded —
@@ -175,26 +174,6 @@ export function DevRail<S extends Sample>({
     listLoadedRef.current = true;
     void loadList();
   }, [open, loadList]);
-
-  // Asked while the rail is expanded, and again every few seconds: the server is a tunnel
-  // that comes and goes, and the point of the line is to say which it is before a call
-  // is spent finding out.
-  useEffect(() => {
-    if (!open) return;
-    let stop = false;
-    const check = async () => {
-      try {
-        const res = await fetch('/api/local');
-        if (stop) return;
-        setLocalLlm(res.ok ? await res.json() : null);
-      } catch {
-        if (!stop) setLocalLlm(null);
-      }
-    };
-    const timer = setInterval(check, LOCAL_LLM_POLL_MS);
-    void check();
-    return () => { stop = true; clearInterval(timer); };
-  }, [open]);
 
   // Picking from the list dropdown. The parent owns the open — it runs the same check /
   // download / cooldown path as a /<uuid> deep link — and hands back what it opened, so
