@@ -261,7 +261,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     () => (hideNonTextRegions ? textDetectBoxes.filter((b) => b.replaceable) : textDetectBoxes),
     [textDetectBoxes, hideNonTextRegions],
   );
-  // The Ollama model id when one of the "Local" entries is selected, else null.
+  // The local model id when one of the "Local" entries is selected, else null.
   const localModel = () => LOCAL_MODELS[llmProviderRef.current] ?? null;
   const llmEndpoint = () =>
     llmProviderRef.current === 'kimi' ? '/api/kimi' : localModel() ? '/api/local' : '/api/claude';
@@ -269,7 +269,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   // Claude model while Kimi is running would be a lie — say who actually answered.
   const llmLabel = (claudeModel: string) =>
     llmProviderRef.current === 'kimi' ? 'kimi (model pinned in /api/kimi)'
-      : localModel() ? `local ${localModel()} (Ollama)`
+      : localModel() ? `local ${localModel()} (AWS vLLM, else Ollama)`
         : `claude ${llmModel(claudeModel)}`;
   // The model id actually sent. Call sites name the Sonnet they were tuned on; picking
   // Opus overrides all of them, and so does the local model. Also part of the AI cache

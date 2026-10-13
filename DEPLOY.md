@@ -168,7 +168,7 @@ limit on any one request.
 ### Dev-only API routes
 
 Expo Router exports every `+api.ts` regardless of the build's UI flags, so a production
-export ships the dev rail's routes live unless something says otherwise. Four are gated:
+export ships the dev rail's routes live unless something says otherwise. Three are gated:
 
 - **`/api/review/list`** — returns every asset the review host knows about, each with its
   `edit_uuid`. That uuid *is* the capability the `/<uuid>` deep link rests on, so serving
@@ -176,18 +176,27 @@ export ships the dev rail's routes live unless something says otherwise. Four ar
   that matters.
 - **`/api/review/test/<id>`** — makes the upstream create a review entry for any art id.
 - **`/api/download`** — unzips out of `assets/downloads/`.
-- **`/api/local`** — the "Local" models in the AI tools dropdown: forwards an AI pass to
-  Ollama on the same machine (`OLLAMA_HOST`, default `http://127.0.0.1:11434`) instead of
-  the paid API. A server has no Ollama to forward to. `/api/svg-text` takes the same
-  local model id and refuses it under the same switch.
 
-All four 404 in **two** places: `server/index.mjs` (unless `DEV_API_ROUTES` is set to
+All three 404 in **two** places: `server/index.mjs` (unless `DEV_API_ROUTES` is set to
 `1`/`on`/`true`) and the Caddyfile. Neither is load-bearing alone, and the env var fails
 closed — a typo leaves them blocked. A deployment that genuinely wants the dev rail has to
 set the variable *and* remove the Caddyfile block: two deliberate acts.
 
 The 404s are registered ahead of the rate limiters, so hammering a blocked route costs
 nothing and cannot exhaust a real user's budget.
+
+**`/api/local` is not one of them.** It answers in production: it serves the "Local" models
+in the AI tools dropdown from our own vLLM server on a GPU instance, so no per-call bill
+and no key. The address is picked by where the code is running: `http://172.30.3.230:8000`
+on an EC2 instance (detected from the machine, nothing to set), `http://127.0.0.1:9006` —
+the `ssh vs-svg` tunnel to the same server — anywhere else. `LOCAL_LLM_HOST` overrides
+both. `POST` is throttled per IP and counted against `AI_MAX_CONCURRENT` like the paid
+routes, but not against `AI_DAILY_LIMIT`; `GET` reports whether the server is up, for the
+dev rail's status line. `/api/svg-text` takes the same local model ids. A Caddyfile copied
+from an older `Caddyfile.example` still has a `handle /api/local*` block that 404s it at
+the edge — delete that block and reload Caddy. Under the dev server on a laptop a model
+the vLLM server can't take goes to Ollama (`OLLAMA_HOST`, default
+`http://127.0.0.1:11434`); a deployed build never tries Ollama and fails the call instead.
 
 ### Build-time vs runtime env
 

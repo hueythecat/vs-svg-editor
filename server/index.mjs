@@ -227,17 +227,22 @@ const aiConcurrency = (_req, res, next) => {
 // Dev scaffolding. Blocked at the edge in the Caddyfile too — belt and braces, because
 // this layer survives a Caddyfile mistake and the Caddyfile survives an env one.
 if (!DEV_API_ROUTES) {
-  for (const pattern of [/^\/api\/download/, /^\/api\/review\/list/, /^\/api\/review\/test/, /^\/api\/local/]) {
+  for (const pattern of [/^\/api\/download/, /^\/api\/review\/list/, /^\/api\/review\/test/]) {
     app.all(pattern, (_req, res) => res.status(404).end());
   }
 } else {
-  console.warn('[server] DEV_API_ROUTES is on — /api/review/list, /api/review/test, /api/download and /api/local will answer');
+  console.warn('[server] DEV_API_ROUTES is on — /api/review/list, /api/review/test and /api/download will answer');
 }
 
 app.use('/api', bodyLimit(MAX_BODY_BYTES));
 app.use('/api/claude', aiLimiter, aiBudget, aiConcurrency);
 app.use('/api/kimi', aiLimiter, aiBudget, aiConcurrency);
 app.use('/api/svg-text', aiLimiter, aiBudget, aiConcurrency);
+// /api/local forwards to our own GPU server rather than a paid API, so it has no place in
+// the daily budget — but one GPU is easier to swamp than Anthropic is, so a pass is
+// throttled and counted like the others. POST only: GET is the dev rail's status poll,
+// which asks every few seconds and would spend the per-minute allowance on its own.
+app.post('/api/local', aiLimiter, aiConcurrency);
 app.use('/api/review', reviewLimiter);
 app.use('/api', apiLimiter);
 

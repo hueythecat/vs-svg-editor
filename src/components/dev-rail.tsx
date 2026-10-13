@@ -89,6 +89,8 @@ interface DevRailProps<S extends Sample> {
   onSetHideNonTextRegions: (on: boolean) => void;
 }
 
+const LOCAL_LLM_POLL_MS = 10_000;
+
 export function DevRail<S extends Sample>({
   samples, activeSample, isLoading, open, onSetOpen, onOpenSample, onOpenFetched,
   onOpenReviewUuid, onReviewListLoaded, hideNonTextRegions, onSetHideNonTextRegions,
@@ -122,6 +124,9 @@ export function DevRail<S extends Sample>({
   const paddleError = paddleConfigError();
   const [buying, setBuying] = useState(false);
   const [buyStatus, setBuyStatus] = useState<string | null>(null);
+  // Where the "Local" models would be answered right now (GET /api/local). Null until the
+  // first answer, and whenever the route can't be asked — the section then hides.
+  const [localLlm, setLocalLlm] = useState<{ host: string; up: boolean; models: string[]; fallback: boolean } | null>(null);
 
   // The dropdown's contents come from the review host, not a hardcoded list, so it
   // always reflects what's actually there to open. Fetched once the rail is expanded —
@@ -170,6 +175,26 @@ export function DevRail<S extends Sample>({
     listLoadedRef.current = true;
     void loadList();
   }, [open, loadList]);
+
+  // Asked while the rail is expanded, and again every few seconds: the server is a tunnel
+  // that comes and goes, and the point of the line is to say which it is before a call
+  // is spent finding out.
+  useEffect(() => {
+    if (!open) return;
+    let stop = false;
+    const check = async () => {
+      try {
+        const res = await fetch('/api/local');
+        if (stop) return;
+        setLocalLlm(res.ok ? await res.json() : null);
+      } catch {
+        if (!stop) setLocalLlm(null);
+      }
+    };
+    const timer = setInterval(check, LOCAL_LLM_POLL_MS);
+    void check();
+    return () => { stop = true; clearInterval(timer); };
+  }, [open]);
 
   // Picking from the list dropdown. The parent owns the open — it runs the same check /
   // download / cooldown path as a /<uuid> deep link — and hands back what it opened, so
@@ -574,6 +599,38 @@ export function DevRail<S extends Sample>({
               Hide non-text region borders
             </label>
           </div>
+
+          {/* AWS LLM — whether the vLLM server the "Local" models try first is there, and
+              which of them it takes. On a laptop anything it doesn't take is answered by
+              Ollama; on a server there is nothing else. */}
+          {localLlm && (
+            <div style={{ padding: '0 12px 10px' }}>
+              <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: '.6px', color: C.devTextDim }}>
+                AWS LLM
+              </span>
+              <div
+                title={localLlm.up
+                  ? `vLLM at ${localLlm.host} is answering.${localLlm.fallback ? ' Local models it does not serve go to Ollama.' : ''}`
+                  : `Nothing is answering at ${localLlm.host}${localLlm.fallback ? ' — every local model goes to Ollama.' : ' — the local models will fail.'}`}
+                style={{ display: 'flex', alignItems: 'center', gap: 7, marginTop: 7 }}
+              >
+                <span
+                  style={{
+                    width: 7, height: 7, borderRadius: '50%', flex: 'none',
+                    background: localLlm.up && localLlm.models.length ? '#3fb950' : localLlm.up ? C.devAccent : C.danger,
+                  }}
+                />
+                <span style={{ fontSize: 10, color: C.devTextMuted }}>
+                  vLLM {localLlm.host.replace(/^(127\.0\.0\.1|localhost)/, '')} {localLlm.up ? 'connected' : localLlm.fallback ? 'down — using Ollama' : 'down'}
+                </span>
+              </div>
+              {localLlm.up && (
+                <span style={{ display: 'block', marginTop: 5, fontSize: 9, color: C.devTextFaint, lineHeight: 1.5, wordBreak: 'break-word' }}>
+                  {localLlm.models.length ? localLlm.models.join(', ') : `Serves none of the local models${localLlm.fallback ? ' — using Ollama' : ''}`}
+                </span>
+              )}
+            </div>
+          )}
 
           {/* Billing — opens Paddle's hosted overlay and stops there. Nothing records the
               result: a completed payment reaches nothing in this app (see lib/paddle.ts). */}

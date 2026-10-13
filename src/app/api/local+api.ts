@@ -1,19 +1,25 @@
-// Dev-only: the "Local" entries in the AI tools Model dropdown, for every AI action that
+// The "Local" entries in the AI tools Model dropdown, for every AI action that
 // goes through callLlmVision. Same contract as /api/claude and /api/kimi — the browser
 // POSTs an Anthropic Messages body and reads `data.content[0].text` — answered by an
-// Ollama model on this machine instead (src/lib/ollama.ts), so nothing is billed.
+// model that isn't billed per call instead — the vLLM server in AWS if it can be reached,
+// else Ollama on this machine (src/lib/ollama.ts).
 //
 // The text-detection call has its own route (/api/svg-text), which takes the same model
-// id and branches to Ollama itself.
+// id and branches to the local model itself.
 import { guardAiRequest, isCrossSite } from '@/lib/ai-guard';
-import { isLocalModel, localModelEnabled, ollamaChat, respondWhenDone } from '@/lib/ollama';
+import { isLocalModel, localChat, localStatus, respondWhenDone } from '@/lib/ollama';
 
 // Every prompt sent here asks for one JSON object and nothing else, so the answer can be
 // started for the model — which is what stops it reasoning for minutes first.
 const PREFILL = '{';
 
+// Whether the first-choice server is up and which local models it would answer — the dev
+// rail's status line. Nothing is sent to a model.
+export async function GET(): Promise<Response> {
+  return Response.json(await localStatus(), { headers: { 'Cache-Control': 'no-store' } });
+}
+
 export async function POST(request: Request): Promise<Response> {
-  if (!localModelEnabled()) return new Response(null, { status: 404 });
   if (isCrossSite(request)) {
     return Response.json({ error: { message: 'Cross-site requests are not accepted' } }, { status: 403 });
   }
@@ -45,8 +51,8 @@ export async function POST(request: Request): Promise<Response> {
   const started = Date.now();
   console.log(`[local] ${model}: ${prompt.length} prompt chars, ${images.length} image(s)`);
   return respondWhenDone(
-    ollamaChat({ model, prompt, images, prefill: PREFILL, maxTokens: max_tokens }).then(({ text, stats }) => {
-      console.log(`[local] answered in ${((Date.now() - started) / 1000).toFixed(1)}s, ${text.length} chars`);
+    localChat({ model, prompt, images, prefill: PREFILL, maxTokens: max_tokens }).then(({ text, stats, backend }) => {
+      console.log(`[local] ${backend} answered in ${((Date.now() - started) / 1000).toFixed(1)}s, ${text.length} chars`);
       return { content: [{ type: 'text', text }], model, usage: stats };
     }),
   );
