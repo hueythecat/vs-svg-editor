@@ -515,6 +515,75 @@ function joinLines(
   return [...regions.filter((r) => !taken.has(r.region)), ...joined].sort((a, b) => a.region - b.region);
 }
 
+// Split lines the model read box by box but did not report in `lines`.
+//
+// joinLines only acts on a line the model names, and a small model does not name them
+// reliably: asked the same question eight times about one tagline, qwen3-vl:8b-instruct
+// read all eleven letters correctly every time and reported the line in five. So after
+// the call the row is looked for here as well, from what the model said about each box
+// and where the boxes are:
+//
+//   • every box is outlined shapes the model read as text, with one letter per shape —
+//     a reading that doesn't account for its shapes is not one to build a line from;
+//   • they share a colour, role, weight and slant, sit on one baseline band and are of
+//     comparable height;
+//   • they are typically no more than LINE_GAP_EM apart, and no gap is wider than a word
+//     space at that tracking (WORD_GAP × the typical gap).
+//
+// The limit is 1.25em rather than 1: the tagline this was written for is tracked at
+// about 1em, and edge to edge its letters measure 0.86–1.07em apart because narrow
+// letters (I, L) leave more room than wide ones. Its word space is 2.16em.
+//
+// What comes out is a line for joinLines, not a joined region, so the same count — the
+// row's shapes against the line's letters — still decides whether anything is joined.
+const LINE_GAP_EM = 1.25;
+const WORD_GAP = 2.5;    // widest gap still inside a line, in typical gaps
+const SPACE_GAP = 1.5;   // a gap this much wider than typical is a word space
+
+function unreportedLines(regions: DetectedTextRegion[]): Array<{ regions: number[]; text_content: string }> {
+  const height = (r: DetectedTextRegion) => Math.max(1e-6, r.bbox[3] - r.bbox[1]);
+  const mid = (r: DetectedTextRegion) => (r.bbox[1] + r.bbox[3]) / 2;
+  const median = (v: number[]) => [...v].sort((a, b) => a - b)[Math.floor(v.length / 2)];
+  const pool = regions
+    .filter((r) => r.source === 'outlined_paths' && r.is_text === true && !r.joined_regions
+      && typeof r.text_content === 'string' && letterCount(r.text_content) === r.glyph_paths)
+    .sort((a, b) => a.bbox[0] - b.bbox[0]);
+
+  const lines: Array<{ regions: number[]; text_content: string }> = [];
+  const used = new Set<number>();
+  for (const seed of pool) {
+    if (used.has(seed.region)) continue;
+    const row = pool.filter((r) => !used.has(r.region)
+      && r.fill === seed.fill && r.role === seed.role
+      && r.font_weight === seed.font_weight && r.italic === seed.italic
+      && mid(r) >= seed.bbox[1] && mid(r) <= seed.bbox[3]
+      && height(r) <= height(seed) * 2 && height(seed) <= height(r) * 2);
+    row.forEach((r) => used.add(r.region));
+    if (row.length < 2) continue;
+
+    // Capitals as ~0.72 of the font size, as in joinLines.
+    const em = median(row.map(height)) / 0.72;
+    const gaps = row.slice(1).map((r, i) => r.bbox[0] - row[i].bbox[2]);
+    const typical = median(gaps);
+    const nums = row.map((r) => r.region);
+    if (typical > LINE_GAP_EM * em || Math.max(...gaps) > WORD_GAP * Math.max(typical, 1e-6)) {
+      console.log(`[text-detect] regions ${nums.join(', ')} share a row but are too far apart to be one line `
+        + `(typically ${(typical / em).toFixed(2)}em, at most ${(Math.max(...gaps) / em).toFixed(2)}em)`);
+      continue;
+    }
+    // A box holding several letters is a word, so the gap beside it is a word space;
+    // between single letters only a gap clearly wider than the rest is.
+    const text = row.map((r, i) => {
+      const spaced = i > 0
+        && (r.glyph_paths > 1 || row[i - 1].glyph_paths > 1 || gaps[i - 1] > SPACE_GAP * typical);
+      return (spaced ? ' ' : '') + (r.text_content as string).trim();
+    }).join('');
+    console.log(`[text-detect] regions ${nums.join(', ')} read as one line the model did not report: ${JSON.stringify(text)}`);
+    lines.push({ regions: nums, text_content: text });
+  }
+  return lines;
+}
+
 export async function detectSvgText(
   svgString: string,
   opts: { layers?: LayerRef[]; model?: string; effort?: 'low' | 'medium' | 'high'; fontSuggestions?: number } = {},
@@ -628,7 +697,10 @@ export async function detectSvgText(
         : null,
     };
     const shapesOf = new Map(regions.map((r) => [r.region, r.els.map((e) => e.bbox)]));
-    return { regions: joinLines(merged, answer.lines, shapesOf), fonts: Array.isArray(fonts) ? fonts : [], stats };
+    // The lines the model reported first, then any it read letter by letter and left out.
+    const reported = joinLines(merged, answer.lines, shapesOf);
+    const joined = joinLines(reported, unreportedLines(reported), shapesOf);
+    return { regions: joined, fonts: Array.isArray(fonts) ? fonts : [], stats };
   } finally {
     host.remove();
   }

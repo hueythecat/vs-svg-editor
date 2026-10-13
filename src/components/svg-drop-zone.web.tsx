@@ -39,7 +39,8 @@ import { readAiCache, writeAiCache } from '@/lib/ai-cache';
 import { t } from '@/i18n';
 import { useT } from '@/i18n/provider';
 import {
-  isHideNonTextRegions, isIgnoreCooldownPrompt, setHideNonTextRegions,
+  isDevRailOpen, isHideNonTextRegions, isIgnoreCooldownPrompt, setDevRailOpen as storeDevRailOpen,
+  setHideNonTextRegions,
 } from '@/lib/dev-flags';
 import type {
   AiActionType, CustomiseBundle, DocBundle, LlmProvider, RegionBox, RemovedRecord, TextDetectMethod,
@@ -253,6 +254,16 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   // Dev rail flag: box only the regions the model read as text. Persisted in dev-flags;
   // mirrored here because it changes what the canvas draws.
   const [hideNonTextRegions, setHideNonTextRegionsState] = useState(() => isHideNonTextRegions());
+  // The rail stays how it was left (persisted in dev-flags). Restored after mounting
+  // rather than as initial state: the page is server-rendered with the rail collapsed,
+  // and starting expanded on the client would not match the markup being hydrated.
+  useEffect(() => {
+    if (isDevRailOpen()) setDevRailOpen(true);
+  }, []);
+  const onSetDevRailOpen = useCallback((on: boolean) => {
+    storeDevRailOpen(on);
+    setDevRailOpen(on);
+  }, []);
   const onSetHideNonTextRegions = useCallback((on: boolean) => {
     setHideNonTextRegions(on);
     setHideNonTextRegionsState(on);
@@ -449,9 +460,6 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       // patterned background is part of the design, so it stays visible.
       // Kept as the baseline too, so starting this way doesn't read as "unsaved
       // changes" and Revert restores it rather than revealing the canvas.
-      // Artwork is on the canvas now — collapse the dev rail so it isn't sitting over
-      // the thing you just opened. Covers every load path, not just the rail's own.
-      setDevRailOpen(false);
       const bgId = detectBackgroundLayerId(content, layers);
       const hideCanvas = !!bgId && isPlainWhiteLayer(content, bgId);
       const defaultHidden = new Set(hideCanvas ? [bgId] : []);
@@ -2998,7 +3006,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
           activeSample={activeSample}
           isLoading={isLoading}
           open={devRailOpen}
-          onSetOpen={setDevRailOpen}
+          onSetOpen={onSetDevRailOpen}
           onOpenSample={openSample}
           onOpenFetched={openSample}
           onOpenReviewUuid={openReviewUuid}

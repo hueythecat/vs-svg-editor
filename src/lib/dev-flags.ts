@@ -123,6 +123,22 @@ export const setHideNonTextRegions = (on: boolean): void => {
   } catch { /* preference is best-effort */ }
 };
 
+// Whether the dev rail is expanded, so it comes back the way it was left — across a
+// reload and across opening artwork — instead of collapsing to its pill each time.
+//
+// Defaults OFF (collapsed). Not cached in a module variable: the editor mirrors it in
+// state, reads it once after mounting and writes it on every toggle.
+const DEV_RAIL_OPEN_KEY = 'svg-editor:dev-rail-open';
+
+export const isDevRailOpen = (): boolean =>
+  !IS_PRODUCTION_UI && storage()?.getItem(DEV_RAIL_OPEN_KEY) === '1';   // absent ⇒ collapsed
+
+export const setDevRailOpen = (open: boolean): void => {
+  try {
+    storage()?.setItem(DEV_RAIL_OPEN_KEY, open ? '1' : '0');
+  } catch { /* preference is best-effort */ }
+};
+
 // The review vectors most recently opened from the dev rail, newest first, so the ones
 // being worked on sit at the top of its dropdown instead of wherever the host lists
 // them. Keys, not uuids: the rail keys a vector by its art id (see dedupeReviewList),
