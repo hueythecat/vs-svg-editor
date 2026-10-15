@@ -613,7 +613,7 @@ export function DevRail<S extends Sample>({
             </div>
           )}
 
-          {/* Text service — the svg-text service behind "Qwen — AI MCP tools", and the model
+          {/* Python text service — the svg-text service behind "Qwen — AI MCP tools", and the model
               server it reads with. Both have to be up: the service's own health check passes
               without a model server, and every Customise then fails. */}
           {textTools && (() => {
@@ -622,7 +622,7 @@ export function DevRail<S extends Sample>({
             return (
               <div style={{ padding: '0 12px 10px' }}>
                 <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: '.6px', color: C.devTextDim }}>
-                  TEXT SERVICE
+                  PYTHON TEXT SERVICE
                 </span>
                 <div
                   title={!textTools.up
