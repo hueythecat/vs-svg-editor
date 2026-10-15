@@ -173,7 +173,9 @@ export const AiPanel = React.memo(function AiPanel({
   llmOptions: ReadonlyArray<{ value: LlmProvider; label: string }>;
   onSelectLlmProvider: (provider: LlmProvider) => void;
   textDetectMethod: TextDetectMethod;
-  textDetectOptions: ReadonlyArray<{ value: TextDetectMethod; labelKey: string }>;
+  // `unavailable` greys an option out: the Python text service, when its health check or
+  // its model server is failing, so it is not picked only to fail on click.
+  textDetectOptions: ReadonlyArray<{ value: TextDetectMethod; labelKey: string; unavailable?: boolean }>;
   onSelectTextDetectMethod: (method: TextDetectMethod) => void;
   ai: AiBundle;
   fonts: FontBundle;
@@ -256,7 +258,9 @@ export const AiPanel = React.memo(function AiPanel({
           style={{ ...inputStyle, cursor: busy ? 'default' : 'pointer', opacity: busy ? 0.5 : 1 }}
         >
           {textDetectOptions.map((o) => (
-            <option key={o.value} value={o.value}>{t(o.labelKey)}</option>
+            <option key={o.value} value={o.value} disabled={o.unavailable && o.value !== textDetectMethod}>
+              {o.unavailable ? t('ai.unavailable', { label: t(o.labelKey) }) : t(o.labelKey)}
+            </option>
           ))}
         </select>
       </div>

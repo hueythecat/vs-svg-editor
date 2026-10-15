@@ -44,6 +44,15 @@
     "emptyAfter": " to swap its colours, or drag anything to move, resize and rotate it."
   },
   "text": {
+    "suggestFonts": "Suggest fonts",
+    "suggestingFonts": "Suggesting fonts…",
+    "suggestFontsNone": "No suggestions came back for this design.",
+    "suggestFontsFailed": "The text service didn't answer — try again shortly.",
+    "checkIsText": "Check this is text",
+    "checkFont": "Font is a guess — try the alternatives",
+    "showOriginal": "Show original",
+    "notText": "Not text",
+    "notTextTitle": "Not text: put the original outlines back and remove this text",
     "words": "Words",
     "wordsPlaceholder": "Type something…",
     "font": "Font",
@@ -121,6 +130,7 @@
     "textDetect": "Text detection",
     "textDetectCurrent": "Current — vision + source",
     "textDetectDomRegions": "New — DOM regions (debug)",
+    "unavailable": "%{label} (unavailable)",
     "textDetectAiTools": "Qwen — AI MCP tools",
     "thisImage": "This image",
     "analysing": "Analysing…",

@@ -7,6 +7,10 @@ import { t } from '@/i18n';
 export interface SvgLayer {
   id: string;
   label: string;
+  // Set on a text layer the Python text service made when it wants a second look: 'font'
+  // when the matched face is a guess, 'text' when the item came from its safety-net pass
+  // and may not be lettering at all. The layer row shows it as an amber dot.
+  review?: 'font' | 'text';
 }
 
 export interface ActiveSvg {

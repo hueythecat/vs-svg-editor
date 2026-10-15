@@ -5,7 +5,7 @@ import {
   BG_PALETTE, C, FONT_STACK, MONO_STACK, sectionLabelStyle,
 } from '@/lib/design-tokens';
 import { useT } from '@/i18n/provider';
-import type { CustomiseBundle, DocBundle, TextLayerAttrs } from './editor-types';
+import type { CustomiseBundle, DocBundle, SuggestFontsState, TextLayerAttrs } from './editor-types';
 import { ColorSwatchRow } from './color-swatches';
 import { CustomiseButton } from './editor-ai-panel';
 import {
@@ -346,6 +346,7 @@ export const ToolsTab = React.memo(function ToolsTab({
 export const TextTab = React.memo(function TextTab({
   textProps, textContentRef, usedFonts, extraFonts,
   onUpdateTextLayer, onAddTextLayer,
+  detected, onShowDetectedOriginal, onRejectDetected, onSuggestFonts, suggestFontsState,
 }: {
   // Never null: with a text layer selected these are its live attributes, with nothing
   // selected they are the draft Add text layer will use. The tab has no empty state —
@@ -356,16 +357,64 @@ export const TextTab = React.memo(function TextTab({
   extraFonts: string[];
   onUpdateTextLayer: (attrs: Partial<TextLayerAttrs>) => void;
   onAddTextLayer: () => void;
+  // Set when the selected layer is text the Python text service put in place of outlines:
+  // whether it wants a second look, and whether the outlines are showing instead of it.
+  detected: { review?: 'font' | 'text'; showingOriginal: boolean } | null;
+  onShowDetectedOriginal: (original: boolean) => void;
+  onRejectDetected: () => void;
+  onSuggestFonts?: () => void;
+  suggestFontsState: SuggestFontsState;
 }) {
   const t = useT();
   return (
     <div>
+      {detected && (
+        <div
+          style={{
+            marginBottom: 12, padding: '9px 10px', borderRadius: 8,
+            border: `1px solid ${detected.review ? C.review : C.borderInput}`,
+            fontFamily: FONT_STACK,
+          }}
+        >
+          {detected.review && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, fontSize: 11.5, fontWeight: 600, color: C.review }}>
+              <span style={{ width: 7, height: 7, borderRadius: '50%', background: C.review, flex: 'none' }} />
+              {t(detected.review === 'text' ? 'text.checkIsText' : 'text.checkFont')}
+            </div>
+          )}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: C.textSecondary, cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                checked={detected.showingOriginal}
+                onChange={(e) => onShowDetectedOriginal(e.target.checked)}
+                style={{ accentColor: C.accent, margin: 0 }}
+              />
+              {t('text.showOriginal')}
+            </label>
+            <button
+              type="button"
+              className="ed-ghost"
+              onClick={onRejectDetected}
+              title={t('text.notTextTitle')}
+              style={{
+                border: `1px solid ${C.borderInput}`, background: C.surface, color: C.textSecondary,
+                fontSize: 11.5, fontFamily: FONT_STACK, padding: '4px 9px', borderRadius: 6, cursor: 'pointer',
+              }}
+            >
+              {t('text.notText')}
+            </button>
+          </div>
+        </div>
+      )}
       <TextControls
         selectedTextProps={textProps}
         textContentRef={textContentRef}
         usedFonts={usedFonts}
         extraFonts={extraFonts}
         onUpdateTextLayer={onUpdateTextLayer}
+        onSuggestFonts={onSuggestFonts}
+        suggestFontsState={suggestFontsState}
       />
 
       {/* Commits the draft above when nothing is selected; adds a fresh layer from those

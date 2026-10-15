@@ -1,9 +1,9 @@
 import React, { RefObject } from 'react';
 
 import type { SelectedTextProps } from '@/lib/svg-utils';
-import { C, TEXT_PALETTE, inputStyle, labelStyle } from '@/lib/design-tokens';
+import { C, FONT_STACK, TEXT_PALETTE, inputStyle, labelStyle } from '@/lib/design-tokens';
 import { useT } from '@/i18n/provider';
-import type { TextLayerAttrs } from './editor-types';
+import type { SuggestFontsState, TextLayerAttrs } from './editor-types';
 import { ColorSwatchRow } from './color-swatches';
 
 // Inspector body for a selected text layer (handoff §1.6, "Text selected"): Words /
@@ -29,7 +29,7 @@ const fieldRow: React.CSSProperties = { display: 'flex', gap: 10, marginBottom: 
 
 export const TextControls = React.memo(function TextControls({
   selectedTextProps, textContentRef, usedFonts, extraFonts,
-  onUpdateTextLayer,
+  onUpdateTextLayer, onSuggestFonts, suggestFontsState = 'idle',
 }: {
   selectedTextProps: SelectedTextProps;
   textContentRef: RefObject<HTMLInputElement | null>;
@@ -38,6 +38,10 @@ export const TextControls = React.memo(function TextControls({
   // Faces the AI proposed for the artwork that nothing is using yet.
   extraFonts: string[];
   onUpdateTextLayer: (attrs: Partial<TextLayerAttrs>) => void;
+  // Asks the Python text service for fonts that suit the design; they land in the
+  // Suggested group above. Absent when there is no artwork to ask about.
+  onSuggestFonts?: () => void;
+  suggestFontsState?: SuggestFontsState;
 }) {
   const t = useT();
   const curve = selectedTextProps.curve ?? 0;
@@ -95,6 +99,31 @@ export const TextControls = React.memo(function TextControls({
             ))}
           </optgroup>
         </select>
+        {onSuggestFonts && (
+          <>
+            <button
+              type="button"
+              className="ed-ghost"
+              onClick={onSuggestFonts}
+              disabled={suggestFontsState === 'busy'}
+              style={{
+                width: '100%', marginTop: 6,
+                border: `1px solid ${C.borderInput}`, background: C.surface,
+                color: C.textSecondary, fontSize: 12, fontFamily: FONT_STACK,
+                padding: '6px 10px', borderRadius: 8,
+                cursor: suggestFontsState === 'busy' ? 'default' : 'pointer',
+                opacity: suggestFontsState === 'busy' ? 0.6 : 1,
+              }}
+            >
+              {t(suggestFontsState === 'busy' ? 'text.suggestingFonts' : 'text.suggestFonts')}
+            </button>
+            {(suggestFontsState === 'none' || suggestFontsState === 'failed') && (
+              <span style={{ display: 'block', marginTop: 5, fontSize: 11, color: C.textMuted }}>
+                {t(suggestFontsState === 'none' ? 'text.suggestFontsNone' : 'text.suggestFontsFailed')}
+              </span>
+            )}
+          </>
+        )}
       </div>
 
       {/* Size + Weight */}

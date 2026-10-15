@@ -44,6 +44,15 @@
     "emptyAfter": ", um seine Farben zu tauschen, oder ziehe ein Element, um es zu verschieben, zu skalieren und zu drehen."
   },
   "text": {
+    "suggestFonts": "Schriften vorschlagen",
+    "suggestingFonts": "Schriften werden vorgeschlagen…",
+    "suggestFontsNone": "Für dieses Design kamen keine Vorschläge zurück.",
+    "suggestFontsFailed": "Der Textdienst hat nicht geantwortet — bitte gleich noch einmal versuchen.",
+    "checkIsText": "Prüfen, ob das Text ist",
+    "checkFont": "Schrift ist geraten — Alternativen ausprobieren",
+    "showOriginal": "Original zeigen",
+    "notText": "Kein Text",
+    "notTextTitle": "Kein Text: ursprüngliche Konturen zurück und diesen Text entfernen",
     "words": "Text",
     "wordsPlaceholder": "Etwas eingeben…",
     "font": "Schriftart",
@@ -121,6 +130,7 @@
     "textDetect": "Texterkennung",
     "textDetectCurrent": "Aktuell — Bild + Quelltext",
     "textDetectDomRegions": "Neu — DOM-Regionen (Debug)",
+    "unavailable": "%{label} (nicht verfügbar)",
     "textDetectAiTools": "Qwen — KI-MCP-Tools",
     "thisImage": "Dieses Bild",
     "analysing": "Wird analysiert…",

@@ -202,8 +202,12 @@ the vLLM server can't take goes to Ollama (`OLLAMA_HOST`, default
 the AI tools Text detection dropdown, and forwards the artwork to the svg-text service
 (`assets/ai-tools/INTEGRATION.md`) at `SVGTEXT_URL`, default `http://127.0.0.1:8010`. That
 service has to be running where `SVGTEXT_URL` points, with its own route to the vLLM server;
-without it the option fails with "The text service at … is not answering". `POST` is
-throttled and counted like `/api/local`.
+without it the option fails with "The text service at … is not answering", and the
+dropdown marks it "(unavailable)" while the service or its model server is down. `POST` is
+throttled and counted like `/api/local`; that covers `POST /api/text-tools?op=design-fonts`
+too, the font-suggestion call the editor makes alongside each Customise. The editor's
+server proxies the service, so the `EXPO_PUBLIC_SVGTEXT_API` build setting in the service's
+own notes is not needed here.
 
 ### Build-time vs runtime env
 

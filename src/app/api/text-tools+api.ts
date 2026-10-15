@@ -58,6 +58,9 @@ export async function GET(): Promise<Response> {
 
 export async function POST(request: Request): Promise<Response> {
   if (isCrossSite(request)) return fail(403, 'Cross-site requests are not accepted');
+  // ?op=design-fonts asks the service's /design-fonts instead: the font suggestions for the
+  // design as a whole, a short model call of their own that runs alongside /detect.
+  const op = new URL(request.url).searchParams.get('op') === 'design-fonts' ? 'design-fonts' : 'detect';
 
   let svg: unknown, filename: unknown;
   try {
@@ -72,10 +75,10 @@ export async function POST(request: Request): Promise<Response> {
     typeof filename === 'string' && filename ? filename : 'design.svg');
 
   const started = Date.now();
-  console.log(`[text-tools] ${SVGTEXT_URL}/detect: ${svg.length} chars`);
+  console.log(`[text-tools] ${SVGTEXT_URL}/${op}: ${svg.length} chars`);
   let res: Response;
   try {
-    res = await fetch(`${SVGTEXT_URL}/detect`, {
+    res = await fetch(`${SVGTEXT_URL}/${op}`, {
       method: 'POST', body: form, signal: AbortSignal.timeout(TIMEOUT_MS),
     });
   } catch (err) {
@@ -92,8 +95,14 @@ export async function POST(request: Request): Promise<Response> {
     console.log(`[text-tools] ${res.status}:`, detail ?? '(no detail)');
     return fail(res.status,
       res.status === 502 ? "The text service can't reach the vision model" :
-      res.status === 415 ? "That file isn't a valid SVG" :
-      res.status === 413 ? 'The SVG is too large for the text service (20 MB max)' :
+      res.status === 415 ? (detail?.includes('entity')
+        ? 'SVGs that declare XML entities are not accepted'
+        : "That file isn't a valid SVG") :
+      // Either the file is over 20 MB, or it has more outline pieces than the service will
+      // take on (SVGTEXT_MAX_PIECES) — the detail says which.
+      res.status === 413 ? (detail && detail !== 'SVG too large'
+        ? `The SVG is too complex for the text service (${detail})`
+        : 'The SVG is too large for the text service (20 MB max)') :
       detail ?? `Text service error ${res.status}`);
   }
 

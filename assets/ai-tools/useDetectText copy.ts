@@ -20,8 +20,17 @@ export type DetectedItem = {
   source: "crop" | "fullpage";       // "fullpage" = found by the safety-net pass, worth a review
   font: DetectedFont | null;
 };
+export type DesignFont = {
+  family: string;                    // Google Fonts family name
+  weight: number;                    // suggested weight, 100–900
+  category: "serif" | "sans-serif" | "display" | "handwriting" | "monospace" | null;
+  reason: string | null;             // e.g. "elegant vintage headline"
+  matchedInDesign: boolean;          // true if a detected text item was matched to this font
+};
 export type DetectResult = {
+  // items that could not be placed are left as outlines and listed in `rejected`
   items: DetectedItem[];
+  designFonts: DesignFont[];         // [] from /detect now: get them with fetchDesignFonts() (separate, faster)
   editableSvg: string;               // load this into the canvas
   rejected: string[];
   timing: Record<string, number>;
@@ -52,20 +61,42 @@ export function useDetectText() {
         const msg =
           res.status === 502 ? "Text service can't reach the vision model (tunnel down?)" :
           res.status === 415 ? "That file isn't a valid SVG" :
-          res.status === 413 ? "SVG is too large (20 MB max)" :
+          res.status === 413 ? (body.detail && body.detail !== "SVG too large"
+                                  ? `SVG is too complex to process (${body.detail})` : "SVG is too large (20 MB max)") :
           body.detail || `Text service error ${res.status}`;
         throw new Error(msg);
       }
       return (await res.json()) as DetectResult;
     } catch (e: any) {
+      // superseded by a newer detect(): stay quiet, that request owns busy/error now
+      if (ctrl.current !== ac) return null;
       setError(e?.name === "AbortError" ? "Timed out or cancelled" : e?.message ?? String(e));
       return null;
     } finally {
       clearTimeout(timer);
-      setBusy(false);
+      if (ctrl.current === ac) {
+        ctrl.current = null;
+        setBusy(false);
+      }
     }
   }, []);
 
   const cancel = useCallback(() => ctrl.current?.abort(), []);
   return { detect, cancel, busy, error };
+}
+
+/** Design-wide Google Font suggestions (one short model call, ~5-10 s, cached by the service).
+ *  Independent of detect(): start it alongside Customise, or when the font picker first opens.
+ *  Resolves to [] on any failure — suggestions are a nice-to-have, never an error for the user. */
+export async function fetchDesignFonts(svg: string, signal?: AbortSignal): Promise<DesignFont[]> {
+  try {
+    const form = new FormData();
+    form.append("file", new Blob([svg], { type: "image/svg+xml" }), "design.svg");
+    const res = await fetch(`${API}/design-fonts`, { method: "POST", body: form, signal });
+    if (!res.ok) return [];
+    const body = (await res.json()) as { designFonts?: DesignFont[] };
+    return body.designFonts ?? [];
+  } catch {
+    return [];
+  }
 }

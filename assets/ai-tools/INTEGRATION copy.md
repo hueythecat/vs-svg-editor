@@ -38,6 +38,15 @@ const [sourceSvg, setSourceSvg] = useState<string | null>(null);   // set on fil
 If the canvas renders the SVG as real DOM (inline `<svg>`), you can also use
 `new XMLSerializer().serializeToString(svgEl)` *before* any edits — but the stored source is safest.
 
+**Layers hidden in the editor:** the service skips any element with `display="none"`,
+`style="display:none"` or `visibility="hidden"`. If the editor keeps layer visibility in its
+own state (not in the SVG), mark those layers in a copy of the source before sending — set
+`display="none"` on the matching elements, keeping all elements in place so document order
+(and the mapping back to paths) is unchanged. Don't remove them.
+
+Same-line words ("YOUR" + "TAGLINE", "SURABAYA - EAST JAVA") are joined by the service itself,
+so the editor doesn't need its own grouping for service results.
+
 ## 3. The Customise button
 
 ```tsx
@@ -81,6 +90,10 @@ If nothing is found, `result.items` is empty and `editableSvg` is the original d
               "lowConfidence": false, "alternatives": ["Playfair Display 600", "Libre Baskerville 400"],
               "visionSuggestion": "Playfair Display" }
   }],
+  "designFonts": [                    // up to 10 fonts suiting the whole design (vision model)
+    { "family": "Cinzel", "weight": 600, "category": "serif",
+      "reason": "classic roman capitals", "matchedInDesign": true }
+  ],
   "editableSvg": "<?xml …><svg …>…</svg>",
   "rejected": [], "timing": { "total": 6.1, … }
 }
@@ -118,7 +131,47 @@ onChange={hex => setItemFill(svgEl, item.id, hex)}
 <Button title="Not text" onPress={() => rejectItem(svgEl, item.id)} />
 ```
 
-Flag for review in the UI when `item.font?.lowConfidence` or `item.source === "fullpage"`.
+Flag for review in the UI when `item.font?.lowConfidence` or `item.source === "fullpage"`
+(e.g. an amber dot plus "check font" / "check this is text" on the item row, not just a console log):
+
+```tsx
+const needsReview = item.font?.lowConfidence || item.source === "fullpage";
+{needsReview && <Text style={{ color: "#c77700" }}>
+  {item.source === "fullpage" ? "Check this is text" : "Font is a guess — pick from alternatives"}
+</Text>}
+```
+
+The "Show original" switch and "Not text" button must be wired to `showOriginal` / `rejectItem`
+above; after `rejectItem`, also drop the item from the panel's list
+(`setTextItems(xs => xs.filter(x => x.id !== item.id))`).
+
+**Design fonts come from a separate call.** `/detect` no longer waits for them, which makes Customise
+about twice as fast. Start the suggestions alongside it (or when the font picker first opens):
+
+```tsx
+import { useDetectText, fetchDesignFonts, DesignFont } from "./textService/useDetectText";
+
+const [designFonts, setDesignFonts] = useState<DesignFont[]>([]);
+async function onCustomise() {
+  if (!sourceSvg) return;
+  fetchDesignFonts(sourceSvg).then(setDesignFonts);       // runs in parallel, never throws
+  const result = await detect(sourceSvg, currentFileName);
+  ...
+}
+```
+
+(`POST /detect?fonts=1` still returns them in the same response, at the old, slower speed.)
+
+**Using them:** `designFonts` is a "Suggested for this design" list. Use it in every
+font picker (after the item's own match and alternatives) and as the default list when the user
+adds new text. Load the fonts on demand with `ensureGoogleFont(f.family, f.weight)` and show
+`reason` as a hint. The names come from the model and aren't checked against Google Fonts, so
+if a font fails to load, drop it from the list. Tesseract mode returns `[]`.
+
+```tsx
+const suggested = result.designFonts.map(f => `${f.family} ${f.weight}`);
+const choices = [...new Set([...itemChoices, ...suggested])];
+```
 
 Notes:
 - `setItemText` removes the fitted `textLength`, so edited text uses natural width (the
@@ -143,9 +196,18 @@ self-contained exports, converting the text back to outlines at export time woul
 | status | `error` message shown by the hook | cause |
 |---|---|---|
 | 502 | Text service can't reach the vision model | autossh tunnel to vs-svg down, or qwen not running |
-| 415 | That file isn't a valid SVG | |
-| 413 | SVG is too large | > 20 MB |
+| 415 | That file isn't a valid SVG | also: SVG declares XML entities (refused for safety) |
+| 413 | SVG is too large / too complex | > 20 MB, or more than `SVGTEXT_MAX_PIECES` outline pieces |
 | 422 | could not process SVG: … | unusual SVG structure — send the file over for a look |
 | — | Timed out or cancelled | > 90 s, or the user pressed Cancel |
 
 Quick checks: `curl localhost:8010/health` on the Pi5; `pm2 logs svg-text`.
+
+## 8. Production
+
+The feature only works where the service is reachable. Deploy it next to the editor (Pi5) with
+`README.md` → `pm2 start ecosystem.config.js` (starts uvicorn on 8010 and the autossh tunnel to
+vs-svg for the model), add `Caddyfile.snippet` to the site, and build the editor with
+`EXPO_PUBLIC_SVGTEXT_API=/api/text` (and set `SVGTEXT_URL` to the same base if the editor's own
+server proxies it). If the service is down, hide or disable the Customise option after a failed
+`/health` check rather than letting it fail on click.

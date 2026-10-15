@@ -370,6 +370,15 @@ export const LayerList = React.memo(function LayerList({
                 {isCanvas ? t('layers.canvas') : layer.label}
               </span>
 
+              {/* The Python text service wants this one checked: its font is a guess, or
+                  it may not be text at all. The Text tab says which, and offers Not text. */}
+              {layer.review && (
+                <span
+                  title={t(layer.review === 'text' ? 'text.checkIsText' : 'text.checkFont')}
+                  style={{ width: 7, height: 7, borderRadius: '50%', background: C.review, flex: 'none' }}
+                />
+              )}
+
               {/*
                 Artwork an AI pass took is hidden where it sits rather than deleted, and
                 what it takes is usually nested inside a layer rather than being one. So

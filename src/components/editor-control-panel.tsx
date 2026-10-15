@@ -3,7 +3,7 @@ import React, { Dispatch, RefObject, SetStateAction } from 'react';
 import type { SelectedTextProps, SvgLayer } from '@/lib/svg-utils';
 import { C, FONT_STACK, SHADOW } from '@/lib/design-tokens';
 import { useT } from '@/i18n/provider';
-import type { CustomiseBundle, DocBundle, TextLayerAttrs } from './editor-types';
+import type { CustomiseBundle, DocBundle, SuggestFontsState, TextLayerAttrs } from './editor-types';
 import { ToolsTab, TextTab } from './editor-inspector';
 import { LayersTab } from './editor-layers-panel';
 import { DownloadIcon } from './svg-icons';
@@ -53,6 +53,7 @@ export const EditorControlPanel = React.memo(function EditorControlPanel({
   onReplaceColor, onEndColorEdit,
   // Text
   textProps, textContentRef, usedFonts, extraFonts, onUpdateTextLayer, onAddTextLayer,
+  detected, onShowDetectedOriginal, onRejectDetected, onSuggestFonts, suggestFontsState,
   // Layers
   layers, hiddenLayers, selectedLayers, backgroundLayerId, textLayerIds, expandableLayerIds,
   hiddenInsideCounts, drillLabel, drillMarks, onBackOut, onReorderLayers,
@@ -78,6 +79,11 @@ export const EditorControlPanel = React.memo(function EditorControlPanel({
   extraFonts: string[];
   onUpdateTextLayer: (attrs: Partial<TextLayerAttrs>) => void;
   onAddTextLayer: () => void;
+  detected: { review?: 'font' | 'text'; showingOriginal: boolean } | null;
+  onShowDetectedOriginal: (original: boolean) => void;
+  onRejectDetected: () => void;
+  onSuggestFonts?: () => void;
+  suggestFontsState: SuggestFontsState;
 
   layers: SvgLayer[];
   hiddenLayers: Set<string>;
@@ -198,6 +204,11 @@ export const EditorControlPanel = React.memo(function EditorControlPanel({
               extraFonts={extraFonts}
               onUpdateTextLayer={onUpdateTextLayer}
               onAddTextLayer={onAddTextLayer}
+              detected={detected}
+              onShowDetectedOriginal={onShowDetectedOriginal}
+              onRejectDetected={onRejectDetected}
+              onSuggestFonts={onSuggestFonts}
+              suggestFontsState={suggestFontsState}
             />
           )}
         </div>

@@ -31,6 +31,7 @@ import {
 } from '@/lib/svg-utils';
 import { C, EDITOR_CSS, FONT_STACK, SHADOW } from '@/lib/design-tokens';
 import { useLocalLlmStatus } from '@/hooks/use-local-llm-status';
+import { useTextToolsStatus } from '@/hooks/use-text-tools-status';
 import { FONT_SUGGESTION_LIMIT, SHOW_DEV_UI } from '@/lib/env';
 import { readAiCache, writeAiCache } from '@/lib/ai-cache';
 // Two entry points into the same catalogue: `t` for the imperative side — status text,
@@ -44,12 +45,15 @@ import {
   setHideNonTextRegions,
 } from '@/lib/dev-flags';
 import type {
-  AiActionType, CustomiseBundle, DocBundle, LlmProvider, RegionBox, RemovedRecord, TextDetectMethod,
+  AiActionType, CustomiseBundle, DocBundle, LlmProvider, RegionBox, RemovedRecord, SuggestFontsState, TextDetectMethod,
   TextLayerAttrs,
 } from './editor-types';
 import { LLM_OPTIONS, LOCAL_MODELS, OPUS_MODEL, TEXT_DETECT_OPTIONS } from './editor-types';
 import { detectSvgText, type DetectedTextRegion, type TextDetectStats } from '@/lib/svg-text-detect';
-import { detectWithTextTools, liftEditableText } from '@/lib/svg-text-tools';
+import {
+  detectWithTextTools, detectedSourceOf, fetchDesignFonts, liftEditableText, markHiddenForService,
+  rejectDetected, servedGoogleFamilies, showDetectedOriginal,
+} from '@/lib/svg-text-tools';
 import { EditorControlPanel, type ControlTab } from './editor-control-panel';
 import { AiPanel } from './editor-ai-panel';
 import { DevRail, SAMPLE_DRAG_MIME } from './dev-rail';
@@ -253,6 +257,14 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   const [textDetectMethod, setTextDetectMethod] = useState<TextDetectMethod>('ai-tools');
   const textDetectMethodRef = useRef<TextDetectMethod>('ai-tools');
   const selectTextDetectMethod = (m: TextDetectMethod) => { textDetectMethodRef.current = m; setTextDetectMethod(m); };
+  // Which Python-text-service run is current. Its font suggestions arrive on their own
+  // call, after the run may have been replaced by another or by a different artwork.
+  const textToolsRunRef = useRef(0);
+  // Bumped whenever a different artwork is opened. Suggest fonts compares it before
+  // applying an answer, which can arrive after the user has moved on.
+  const artworkGenRef = useRef(0);
+  // The Text tab's Suggest fonts button: idle, asking, or how the last ask ended.
+  const [suggestFontsState, setSuggestFontsState] = useState<SuggestFontsState>('idle');
   // The regions the last DOM-regions run returned, boxed and numbered on the canvas like
   // the annotated render the model saw. Debug only: cleared on the next run or a new file.
   const [textDetectBoxes, setTextDetectBoxes] = useState<RegionBox[]>(NO_REGION_BOXES);
@@ -290,6 +302,13 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     }),
     [localLlm],
   );
+  // The Python text service's option is marked unavailable while its health check or its
+  // model server is failing. Asked only while the AI tools panel is open, like the above.
+  const textTools = useTextToolsStatus(aiPanelOpen);
+  const textDetectOptions = useMemo(() => {
+    const down = !!textTools && (!textTools.up || textTools.modelUp === false);
+    return TEXT_DETECT_OPTIONS.map((o) => (o.value === 'ai-tools' && down ? { ...o, unavailable: true } : o));
+  }, [textTools]);
   // The local model id when one of the "Local" entries is selected, else null.
   const localModel = () => LOCAL_MODELS[llmProviderRef.current] ?? null;
   const llmEndpoint = () =>
@@ -471,6 +490,9 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     (raw: string, name: string, src: string, objectUrl?: string, edit?: 0 | 1) => {
       const cleaned = stripScripts(raw);
       const { content, layers } = parseSvg(cleaned);
+      textToolsRunRef.current++;
+      artworkGenRef.current++;
+      setSuggestFontsState('idle');
       setActiveSvg((prev) => { revokePrev(prev); return { name, src, content, originalContent: content, layers, objectUrl, edit }; });
       setTextDetectBoxes(NO_REGION_BOXES);
       // New artwork opens on the Tools tab, whichever tab the last one was left on — the
@@ -1790,8 +1812,9 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     }
     // The svg-text service does the whole pass — find, read, font-match, and swap the
     // outlines for text — and returns the edited artwork, so this branch only loads it.
-    // It is sent the document as it stands: the service maps what it finds back onto the
-    // elements by document order, and the layer ids in it are the ones the panel lists.
+    // It is sent the document as it stands, layers the user switched off marked hidden in
+    // the copy: the service maps what it finds back onto the elements by document order,
+    // and the layer ids in it are the ones the panel lists.
     if (textDetectMethodRef.current === 'ai-tools') {
       setCustomiseLoading(true);
       setAiLoading(true);
@@ -1799,35 +1822,19 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       setAiStatusMsg(t('status.analysingImage'));
       setTextDetectBoxes(NO_REGION_BOXES);
       setCallStats(null);
+      const runId = ++textToolsRunRef.current;
+      const sent = markHiddenForService(activeSvg.content, hiddenLayers);
+      console.log('[text-tools] invoking /api/text-tools');
+      // Font suggestions are not part of this: they are their own model call, made only
+      // when the Text tab's Suggest fonts button asks for them (suggestFonts below).
+      const detecting = detectWithTextTools(sent, activeSvg.name);
       try {
-        console.log('[text-tools] invoking /api/text-tools');
-        const result = await detectWithTextTools(activeSvg.content, activeSvg.name);
+        const result = await detecting;
         console.log(`[text-tools] ${result.items.length} item(s) in ${result.timing.total ?? '?'}s:`,
           result.items.map((it) => `${it.id} ${it.kind} "${it.text}" ${it.font ? `${it.font.family} ${it.font.weight}` : '-'}` +
-            (it.font?.lowConfidence || it.source === 'fullpage' ? ' (review)' : '')).join(', '));
-        if (result.rejected.length) console.log('[text-tools] rejected:', result.rejected.join(', '));
-        // The suggestions are the service's designFonts, handled as the other passes handle
-        // theirs: listed in the Font list and the AI panel, the first becoming the default
-        // for text added afterwards. Any it says are already in the artwork lead, since
-        // those are the safest pick. A service too old to send them falls back to the faces
-        // it matched per item. Taken before the no-text check below: artwork with no text
-        // still gets suggestions, and they are what the user needs to add some.
-        const design = [...(result.designFonts ?? [])]
-          .filter((f) => typeof f?.family === 'string' && f.family)
-          .sort((a, b) => Number(b.matchedInDesign) - Number(a.matchedInDesign));
-        if (design.length) {
-          console.log('[text-tools] design fonts: ' + design.map((f) =>
-            `${f.family} ${f.weight}${f.matchedInDesign ? ' (in design)' : ''} — ${f.reason}`).join('; '));
-        }
-        const fonts = (design.length
-          ? Array.from(new Set(design.map((f) => f.family)))
-          : Array.from(new Set(result.items.flatMap((it) => it.font ? [it.font.family] : []))))
-          .slice(0, FONT_SUGGESTION_LIMIT);
-        for (const name of fonts) {
-          addGoogleFont(name, design.find((f) => f.family === name)?.weight);
-        }
-        setCustomiseFonts(fonts);
-        if (fonts[0]) setTextForm((f) => ({ ...f, font: fonts[0] }));
+            (it.source === 'fullpage' ? ' (check this is text)' : it.font?.lowConfidence ? ' (font is a guess)' : '')).join(', '));
+        if (result.rejected.length) console.log('[text-tools] left as outlines:', result.rejected.join(', '));
+        if (textToolsRunRef.current !== runId) return;
         const lifted = result.items.length ? liftEditableText(stripScripts(result.editableSvg), result.items) : null;
         if (!lifted || lifted.textLayers.length === 0) {
           // An empty answer comes back with the artwork untouched; keep the canvas as it was.
@@ -2135,7 +2142,70 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
       setAiLoading(false);
       setAiStatusMsg(t('status.thinking'));
     }
-  }, [activeSvg, addGoogleFont, loadGoogleFontLink, snapshotForUndo, notifyCustomised, cooldownActive, selectOne]);
+  }, [activeSvg, hiddenLayers, addGoogleFont, loadGoogleFontLink, snapshotForUndo, notifyCustomised, cooldownActive, selectOne]);
+
+  // ── Suggest fonts (Text tab button) ───────────────────────────────────────
+  //
+  // The Python text service's /design-fonts: the vision model looks at the whole design
+  // and proposes Google Fonts for it. Asked only from this button, never by Customise, so a
+  // Customise run costs one model call. Handled as the other passes handle suggestions:
+  // listed in the Font list and the AI panel, the first becoming the default for text
+  // added afterwards. Any the service says are already in the artwork lead, since those
+  // are the safest pick; names Google Fonts doesn't serve are dropped.
+  const suggestFonts = useCallback(async () => {
+    if (!activeSvg) return;
+    if (activeSvg.edit === 0) { setShowUpsell(true); return; }
+    const gen = artworkGenRef.current;
+    setSuggestFontsState('busy');
+    console.log('[text-tools] invoking /api/text-tools?op=design-fonts');
+    const design = await fetchDesignFonts(markHiddenForService(activeSvg.content, hiddenLayers));
+    if (artworkGenRef.current !== gen) return;
+    if (design === null) { setSuggestFontsState('failed'); return; }
+    const sorted = [...design].sort((a, b) => Number(b.matchedInDesign) - Number(a.matchedInDesign));
+    if (sorted.length) {
+      console.log('[text-tools] design fonts: ' + sorted.map((f) =>
+        `${f.family} ${f.weight}${f.matchedInDesign ? ' (in design)' : ''}${f.reason ? ` — ${f.reason}` : ''}`).join('; '));
+    }
+    const named = Array.from(new Set(sorted.map((f) => f.family)));
+    const fonts = (await servedGoogleFamilies(named)).slice(0, FONT_SUGGESTION_LIMIT);
+    if (fonts.length < named.length) {
+      console.log('[text-tools] not on Google Fonts, dropped: ' + named.filter((f) => !fonts.includes(f)).join(', '));
+    }
+    if (artworkGenRef.current !== gen) return;
+    if (fonts.length === 0) { setSuggestFontsState('none'); return; }
+    for (const name of fonts) addGoogleFont(name, sorted.find((f) => f.family === name)?.weight);
+    setCustomiseFonts(fonts);
+    setTextForm((f) => ({ ...f, font: fonts[0] }));
+    setSuggestFontsState('idle');
+  }, [activeSvg, hiddenLayers, addGoogleFont]);
+
+  // ── Python text service items: Show original / Not text (Text tab) ─────────
+
+  // The selected layer, when it is a field the Python text service put in place of
+  // outlines. Its review flag lives on the layer row, where the Layers panel reads it too.
+  const detectedSelection = useMemo(() => {
+    if (!activeSvg || !selectedLayer) return null;
+    const found = detectedSourceOf(activeSvg.content, selectedLayer);
+    if (!found) return null;
+    const review = activeSvg.layers.find((l) => l.id === selectedLayer)?.review;
+    return { review, showingOriginal: found.showingOriginal };
+  }, [activeSvg, selectedLayer]);
+
+  const showSelectedOriginal = useCallback((original: boolean) => {
+    if (!activeSvg || !selectedLayer) return;
+    snapshotForUndo(activeSvg.content, activeSvg.layers);
+    const content = showDetectedOriginal(activeSvg.content, selectedLayer, original);
+    setActiveSvg((prev) => (prev ? { ...prev, content } : null));
+  }, [activeSvg, selectedLayer, snapshotForUndo]);
+
+  const rejectSelectedDetected = useCallback(() => {
+    if (!activeSvg || !selectedLayer) return;
+    snapshotForUndo(activeSvg.content, activeSvg.layers);
+    const id = selectedLayer;
+    const content = rejectDetected(activeSvg.content, id);
+    setActiveSvg((prev) => (prev ? { ...prev, content, layers: prev.layers.filter((l) => l.id !== id) } : null));
+    selectOne(null);
+  }, [activeSvg, selectedLayer, snapshotForUndo, selectOne]);
 
   // ── Replace one detected region with editable text (canvas dot) ───────────
   //
@@ -2981,6 +3051,11 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                 extraFonts={suggestedFonts}
                 onUpdateTextLayer={updateTextLayerOrDraft}
                 onAddTextLayer={addTextLayer}
+                detected={detectedSelection}
+                onShowDetectedOriginal={showSelectedOriginal}
+                onRejectDetected={rejectSelectedDetected}
+                onSuggestFonts={activeSvg ? suggestFonts : undefined}
+                suggestFontsState={suggestFontsState}
                 layers={activeSvg.layers}
                 hiddenLayers={hiddenLayers}
                 selectedLayers={selectedLayers}
@@ -3012,7 +3087,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                   llmOptions={llmOptions}
                   onSelectLlmProvider={selectLlmProvider}
                   textDetectMethod={textDetectMethod}
-                  textDetectOptions={TEXT_DETECT_OPTIONS}
+                  textDetectOptions={textDetectOptions}
                   onSelectTextDetectMethod={selectTextDetectMethod}
                   ai={{
                     loading: aiLoading, error: aiError,

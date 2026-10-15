@@ -22,6 +22,9 @@ export const C = {
   disabled:     '#c3c9d2',
   disabledIcon: '#d3d7dd',
   textHidden:   '#b6bcc6',
+  // Something the user should check before trusting: a text-service item whose font is a
+  // guess or that may not be text at all.
+  review:       '#c77700',
 
   accent:       '#5b6cff',
   accentHover:  '#4453d6',

@@ -165,3 +165,7 @@ export interface TaxonomyBundle {
   open: boolean;
   setOpen: Dispatch<SetStateAction<boolean>>;
 }
+
+// The Text tab's Suggest fonts button: idle, waiting on the Python text service, or why the
+// last ask came back empty-handed ('none': no usable fonts; 'failed': no answer at all).
+export type SuggestFontsState = 'idle' | 'busy' | 'none' | 'failed';
