@@ -10,8 +10,8 @@ import type {
 import { ChevronIcon, CloseIcon, SparklesIcon } from './svg-icons';
 
 // The AI surface of the design (handoff §1.8). Customise was a gradient pill floating
-// bottom-right of the canvas; it now sits in the Tools tab under Arrange, and Export has
-// that corner instead. It keeps the gradient — it is still the one AI action, and it
+// bottom-right of the canvas; it now sits in the Tools tab under Arrange (Export, which
+// held that corner for a while, is the control panel's footer). It keeps the gradient — it is still the one AI action, and it
 // should not read as another outlined tool button.
 //
 // In the prototype the button only ever opens the upsell. Here it keeps that behaviour
@@ -195,7 +195,7 @@ export const AiPanel = React.memo(function AiPanel({
     <div
       className="ed-scroll"
       style={{
-        position: 'absolute', right: 16, bottom: 66, width: 252, zIndex: 16,
+        position: 'absolute', right: 16, bottom: 16, width: 252, zIndex: 16,
         background: C.surface,
         border: `1px solid ${C.borderPanel}`,
         borderRadius: 12,

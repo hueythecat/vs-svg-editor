@@ -49,9 +49,9 @@ import type {
 } from './editor-types';
 import { LLM_OPTIONS, LOCAL_MODELS, OPUS_MODEL, TEXT_DETECT_OPTIONS } from './editor-types';
 import { detectSvgText, type DetectedTextRegion, type TextDetectStats } from '@/lib/svg-text-detect';
+import { detectWithTextTools, liftEditableText } from '@/lib/svg-text-tools';
 import { EditorControlPanel, type ControlTab } from './editor-control-panel';
 import { AiPanel } from './editor-ai-panel';
-import { ExportPill } from './editor-export-pill';
 import { DevRail, SAMPLE_DRAG_MIME } from './dev-rail';
 import { DevRemovedPanel } from './dev-removed-panel';
 import { UpsellModal, CooldownModal, RatingModal, AbortReasonModal, ConfirmModal } from './editor-modals';
@@ -235,17 +235,23 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   const [editingTextId, setEditingTextId]     = useState<string | null>(null);
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false); // "Revert changes?" overlay
   const [devRailOpen, setDevRailOpen]           = useState(false); // dev rail expanded
+  // How far the board is enlarged past its default size (0–1, Tools tab slider). A view
+  // setting like zoom: it changes nothing in the document and is not undoable.
+  const [workspaceScale, setWorkspaceScale]     = useState(0);
   const [removedPanelOpen, setRemovedPanelOpen] = useState(false); // dev hidden-by-AI ledger
   // Which LLM every AI action calls. Picking 'kimi' diverts each request to
   // /api/kimi, which re-shapes the same Anthropic-style body for Moonshot. Mirrored
   // into a ref so the AI callbacks below read the live choice, never a stale closure.
-  const [llmProvider, setLlmProvider] = useState<LlmProvider>('claude');
-  const llmProviderRef = useRef<LlmProvider>('claude');
+  // Defaults to qwen3-vl:8b-instruct, the model the AWS vLLM server serves: no per-call
+  // bill. Off the tunnel, on a laptop, the same entry falls back to Ollama.
+  const [llmProvider, setLlmProvider] = useState<LlmProvider>('local-instruct');
+  const llmProviderRef = useRef<LlmProvider>('local-instruct');
   const selectLlmProvider = (p: LlmProvider) => { llmProviderRef.current = p; setLlmProvider(p); };
   // Which text-detection call Customise makes. Ref-mirrored like the provider, so
-  // runCustomise reads the live choice without taking it as a dependency.
-  const [textDetectMethod, setTextDetectMethod] = useState<TextDetectMethod>('dom-regions');
-  const textDetectMethodRef = useRef<TextDetectMethod>('dom-regions');
+  // runCustomise reads the live choice without taking it as a dependency. Defaults to the
+  // svg-text service ("Qwen — AI MCP tools"), the one choice that applies its result.
+  const [textDetectMethod, setTextDetectMethod] = useState<TextDetectMethod>('ai-tools');
+  const textDetectMethodRef = useRef<TextDetectMethod>('ai-tools');
   const selectTextDetectMethod = (m: TextDetectMethod) => { textDetectMethodRef.current = m; setTextDetectMethod(m); };
   // The regions the last DOM-regions run returned, boxed and numbered on the canvas like
   // the annotated render the model saw. Debug only: cleared on the next run or a new file.
@@ -1259,6 +1265,9 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   // being torn down and recreated on every render.
   const positionOverlayRef = useRef(positionSelectionOverlay);
   useEffect(() => { positionOverlayRef.current = positionSelectionOverlay; });
+  // The board changes size under the selection when the workspace is scaled; the overlay
+  // is positioned in screen pixels, so it is measured again against the resized board.
+  useLayoutEffect(() => { positionOverlayRef.current(); }, [workspaceScale]);
 
   useLayoutEffect(() => {
     positionSelectionOverlay();
@@ -1771,6 +1780,71 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
         }));
       } catch (err) {
         console.error('[text-detect] failed:', err);
+        setAiError(err instanceof Error ? err.message : t('errors.customiseFailed'));
+      } finally {
+        setCustomiseLoading(false);
+        setAiLoading(false);
+        setAiStatusMsg(t('status.thinking'));
+      }
+      return;
+    }
+    // The svg-text service does the whole pass — find, read, font-match, and swap the
+    // outlines for text — and returns the edited artwork, so this branch only loads it.
+    // It is sent the document as it stands: the service maps what it finds back onto the
+    // elements by document order, and the layer ids in it are the ones the panel lists.
+    if (textDetectMethodRef.current === 'ai-tools') {
+      setCustomiseLoading(true);
+      setAiLoading(true);
+      setAiError(null);
+      setAiStatusMsg(t('status.analysingImage'));
+      setTextDetectBoxes(NO_REGION_BOXES);
+      setCallStats(null);
+      try {
+        console.log('[text-tools] invoking /api/text-tools');
+        const result = await detectWithTextTools(activeSvg.content, activeSvg.name);
+        console.log(`[text-tools] ${result.items.length} item(s) in ${result.timing.total ?? '?'}s:`,
+          result.items.map((it) => `${it.id} ${it.kind} "${it.text}" ${it.font ? `${it.font.family} ${it.font.weight}` : '-'}` +
+            (it.font?.lowConfidence || it.source === 'fullpage' ? ' (review)' : '')).join(', '));
+        if (result.rejected.length) console.log('[text-tools] rejected:', result.rejected.join(', '));
+        // The suggestions are the service's designFonts, handled as the other passes handle
+        // theirs: listed in the Font list and the AI panel, the first becoming the default
+        // for text added afterwards. Any it says are already in the artwork lead, since
+        // those are the safest pick. A service too old to send them falls back to the faces
+        // it matched per item. Taken before the no-text check below: artwork with no text
+        // still gets suggestions, and they are what the user needs to add some.
+        const design = [...(result.designFonts ?? [])]
+          .filter((f) => typeof f?.family === 'string' && f.family)
+          .sort((a, b) => Number(b.matchedInDesign) - Number(a.matchedInDesign));
+        if (design.length) {
+          console.log('[text-tools] design fonts: ' + design.map((f) =>
+            `${f.family} ${f.weight}${f.matchedInDesign ? ' (in design)' : ''} — ${f.reason}`).join('; '));
+        }
+        const fonts = (design.length
+          ? Array.from(new Set(design.map((f) => f.family)))
+          : Array.from(new Set(result.items.flatMap((it) => it.font ? [it.font.family] : []))))
+          .slice(0, FONT_SUGGESTION_LIMIT);
+        for (const name of fonts) {
+          addGoogleFont(name, design.find((f) => f.family === name)?.weight);
+        }
+        setCustomiseFonts(fonts);
+        if (fonts[0]) setTextForm((f) => ({ ...f, font: fonts[0] }));
+        const lifted = result.items.length ? liftEditableText(stripScripts(result.editableSvg), result.items) : null;
+        if (!lifted || lifted.textLayers.length === 0) {
+          // An empty answer comes back with the artwork untouched; keep the canvas as it was.
+          setAiError(t('errors.noTextDetected'));
+          return;
+        }
+        snapshotForUndo(activeSvg.content, activeSvg.layers);
+        for (const it of result.items) if (it.font) addUsedFont(it.font.family, it.font.weight);
+        const doc = new DOMParser().parseFromString(lifted.content, 'image/svg+xml');
+        const kept = pruneMissingLayers(doc, activeSvg.layers);
+        setActiveSvg((prev) => (prev ? { ...prev, content: lifted.content, layers: [...kept, ...lifted.textLayers] } : null));
+        dropSelectionOutside(kept, lifted.textLayers);
+        setSelectedLayer(lifted.textLayers[0].id);
+        setCustomiseDone(true);
+        void notifyCustomised();
+      } catch (err) {
+        console.error('[text-tools] failed:', err);
         setAiError(err instanceof Error ? err.message : t('errors.customiseFailed'));
       } finally {
         setCustomiseLoading(false);
@@ -2739,6 +2813,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
         })
       : tr('toolbar.export'),
     onExport: openRating,
+    workspaceScale, onSetWorkspaceScale: setWorkspaceScale,
     onCenter: centerLayersToCanvas,
     onRotate90: rotateSelected90,
     transformDisabled: !selectedLayers.size || selectionIsBackground,
@@ -2756,7 +2831,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     hiddenRowCount, openRating, centerLayersToCanvas, rotateSelected90,
     selectedLayers.size, selectionIsBackground, matchRotationToSelected, tidySelection,
     tidySelectionHorizontal, newDesignFromSelection,
-    selectionIds.length, tr,
+    selectionIds.length, tr, workspaceScale,
   ]);
 
   // Customise, as the Tools tab needs it. Memoised for the same reason docBundle is: the
@@ -2865,6 +2940,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
             aiStatusMsg={aiStatusMsg}
             isLoading={isLoading}
             activeSvg={activeSvg}
+            workspaceScale={workspaceScale}
             hiddenLayers={hiddenLayers}
             previewIds={previewIds}
             previewOutlineId={previewRemovedId ?? peekedLayerId}
@@ -2958,8 +3034,6 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                   onRunTaxonomy={runTaxonomyAnalysis}
                 />
               )}
-              {/* Export, in the corner the Customise pill used to hold. */}
-              <ExportPill label={docBundle.exportLabel} onExport={docBundle.onExport} />
             </>
           )}
         </>

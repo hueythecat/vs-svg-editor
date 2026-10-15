@@ -27,7 +27,11 @@
     "tabLayers": "Layers",
     "history": "History",
     "arrange": "Arrange",
-    "colours": "Colours"
+    "colours": "Colours",
+    "workspace": "Workspace",
+    "canvasSizeTitle": "Canvas size on screen — does not change the artwork or its export",
+    "canvasSizeDefault": "Default",
+    "canvasSizeMax": "Max"
   },
   "inspector": {
     "customColour": "Custom colour",
@@ -89,6 +93,8 @@
     "copySuffix": "%{label} copy"
   },
   "canvas": {
+    "copyArtworkId": "Copy the artwork id",
+    "artworkIdCopied": "Copied",
     "replaceRegionWithText": "Replace with editable text",
     "beta": "Beta",
     "rotateHandle": "Drag to rotate (hold Shift to snap to 15°)",
@@ -115,6 +121,7 @@
     "textDetect": "Text detection",
     "textDetectCurrent": "Current — vision + source",
     "textDetectDomRegions": "New — DOM regions (debug)",
+    "textDetectAiTools": "Qwen — AI MCP tools",
     "thisImage": "This image",
     "analysing": "Analysing…",
     "applyFontGlobally": "Apply font globally",

@@ -27,6 +27,10 @@ export type DocBundle = {
   onReset: () => void;
   exportLabel: string;
   onExport: () => void;
+  // How far the board is enlarged past its default size: 0 is the default, 1 fills the
+  // working area between the floating panels. A view setting — never part of the document.
+  workspaceScale: number;
+  onSetWorkspaceScale: (scale: number) => void;
   onCenter: () => void;
   onRotate90: () => void;
   transformDisabled: boolean;
@@ -114,12 +118,16 @@ export const LLM_OPTIONS: Array<{ value: LlmProvider; label: string }> = [
 // over the marked source (TEXT_PARSING_PROMPT). 'dom-regions' is its replacement,
 // src/lib/svg-text-detect.ts — DOM-measured regions plus an annotated render, judged by
 // /api/svg-text. For now Customise only runs it and logs the JSON; nothing is applied.
-// 'dom-regions' is the default (svg-drop-zone.web.tsx), and so is Opus for the model.
-export type TextDetectMethod = 'current' | 'dom-regions';
+// 'ai-tools' hands the whole job to the svg-text service (assets/ai-tools, via
+// /api/text-tools), which finds, reads and font-matches the text with qwen and returns an
+// editable SVG; the Model dropdown has no say in it. 'ai-tools' is the default
+// (svg-drop-zone.web.tsx), and the vLLM qwen3-vl:8b-instruct entry is the default model.
+export type TextDetectMethod = 'current' | 'dom-regions' | 'ai-tools';
 
 export const TEXT_DETECT_OPTIONS: Array<{ value: TextDetectMethod; labelKey: string }> = [
   { value: 'current', labelKey: 'ai.textDetectCurrent' },
   { value: 'dom-regions', labelKey: 'ai.textDetectDomRegions' },
+  { value: 'ai-tools', labelKey: 'ai.textDetectAiTools' },
 ];
 
 // One region from a DOM-regions text-detection run, as fractions (0–1) of the viewBox so

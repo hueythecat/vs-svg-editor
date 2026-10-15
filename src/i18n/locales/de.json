@@ -27,7 +27,11 @@
     "tabLayers": "Ebenen",
     "history": "Verlauf",
     "arrange": "Anordnen",
-    "colours": "Farben"
+    "colours": "Farben",
+    "workspace": "Arbeitsbereich",
+    "canvasSizeTitle": "Größe der Arbeitsfläche auf dem Bildschirm – ändert weder die Grafik noch den Export",
+    "canvasSizeDefault": "Standard",
+    "canvasSizeMax": "Max."
   },
   "inspector": {
     "customColour": "Eigene Farbe",
@@ -89,6 +93,8 @@
     "copySuffix": "%{label} Kopie"
   },
   "canvas": {
+    "copyArtworkId": "Artwork-ID kopieren",
+    "artworkIdCopied": "Kopiert",
     "replaceRegionWithText": "Durch bearbeitbaren Text ersetzen",
     "beta": "Beta",
     "rotateHandle": "Zum Drehen ziehen (Umschalt halten für 15°-Schritte)",
@@ -115,6 +121,7 @@
     "textDetect": "Texterkennung",
     "textDetectCurrent": "Aktuell — Bild + Quelltext",
     "textDetectDomRegions": "Neu — DOM-Regionen (Debug)",
+    "textDetectAiTools": "Qwen — KI-MCP-Tools",
     "thisImage": "Dieses Bild",
     "analysing": "Wird analysiert…",
     "applyFontGlobally": "Schriftart global anwenden",

@@ -9,6 +9,7 @@ import {
   setIgnoreCooldownPrompt, setIgnoreHasCustomised, getRecentVectors, pushRecentVector,
 } from '@/lib/dev-flags';
 import { useLocalLlmStatus } from '@/hooks/use-local-llm-status';
+import { useTextToolsStatus } from '@/hooks/use-text-tools-status';
 import { PADDLE_ENV, openPaddleCheckout, paddleConfigError } from '@/lib/paddle';
 import { ChevronIcon, SettingsIcon } from './svg-icons';
 
@@ -126,6 +127,7 @@ export function DevRail<S extends Sample>({
   // Where the "Local" models would be answered right now. Asked only while the rail is
   // expanded; null until the first answer, and the section hides until then.
   const localLlm = useLocalLlmStatus(open);
+  const textTools = useTextToolsStatus(open);
 
   // The dropdown's contents come from the review host, not a hardcoded list, so it
   // always reflects what's actually there to open. Fetched once the rail is expanded —
@@ -610,6 +612,44 @@ export function DevRail<S extends Sample>({
               )}
             </div>
           )}
+
+          {/* Text service — the svg-text service behind "Qwen — AI MCP tools", and the model
+              server it reads with. Both have to be up: the service's own health check passes
+              without a model server, and every Customise then fails. */}
+          {textTools && (() => {
+            const ready = textTools.up && textTools.modelUp !== false;
+            const short = (url: string) => url.replace(/^https?:\/\//, '').replace(/^(127\.0\.0\.1|localhost)/, '');
+            return (
+              <div style={{ padding: '0 12px 10px' }}>
+                <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: '.6px', color: C.devTextDim }}>
+                  TEXT SERVICE
+                </span>
+                <div
+                  title={!textTools.up
+                    ? `Nothing is answering at ${textTools.host} — "Qwen — AI MCP tools" will fail.`
+                    : textTools.modelUp === false
+                      ? `The service at ${textTools.host} is up, but its model server ${textTools.modelServer} is not answering${textTools.model ? ` with ${textTools.model}` : ''} — every Customise will fail. Is the ssh vs-svg tunnel up?`
+                      : `The service at ${textTools.host} and its model server are answering.`}
+                  style={{ display: 'flex', alignItems: 'center', gap: 7, marginTop: 7 }}
+                >
+                  <span
+                    style={{
+                      width: 7, height: 7, borderRadius: '50%', flex: 'none',
+                      background: ready ? '#3fb950' : textTools.up ? C.devAccent : C.danger,
+                    }}
+                  />
+                  <span style={{ fontSize: 10, color: C.devTextMuted }}>
+                    {short(textTools.host)} {!textTools.up ? 'down' : textTools.modelUp === false ? 'up — model server down' : 'connected'}
+                  </span>
+                </div>
+                {textTools.up && textTools.modelServer && (
+                  <span style={{ display: 'block', marginTop: 5, fontSize: 9, color: C.devTextFaint, lineHeight: 1.5, wordBreak: 'break-word' }}>
+                    {textTools.model ?? 'model'} via {short(textTools.modelServer)}{textTools.modelUp === false ? ' — not answering' : ''}
+                  </span>
+                )}
+              </div>
+            );
+          })()}
 
           {/* Billing — opens Paddle's hosted overlay and stops there. Nothing records the
               result: a completed payment reaches nothing in this app (see lib/paddle.ts). */}

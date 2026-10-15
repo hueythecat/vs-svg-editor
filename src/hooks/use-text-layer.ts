@@ -169,6 +169,16 @@ export function useTextLayer({
       // this function, where the text it has to fit is in its final state.
     }
 
+    // Text from the svg-text service is fitted to the outlines it replaced with
+    // textLength. That length is only right for those words in that face and size, so an
+    // edit to any of them drops it and the text goes back to its natural width.
+    if (attrs.content !== undefined || attrs.font !== undefined || attrs.size !== undefined
+      || attrs.weight !== undefined || attrs.letterSpacing !== undefined) {
+      for (const t of [textEl, ...Array.from(textEl.querySelectorAll('textPath'))]) {
+        t.removeAttribute('textLength');
+        t.removeAttribute('lengthAdjust');
+      }
+    }
     if (attrs.content !== undefined) {
       const tp = textEl.querySelector('textPath');
       // Curved text has one baseline and cannot stack; flat text re-emits its lines,

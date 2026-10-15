@@ -243,6 +243,9 @@ app.use('/api/svg-text', aiLimiter, aiBudget, aiConcurrency);
 // throttled and counted like the others. POST only: GET is the dev rail's status poll,
 // which asks every few seconds and would spend the per-minute allowance on its own.
 app.post('/api/local', aiLimiter, aiConcurrency);
+// The same reasoning for the svg-text service behind /api/text-tools: our own GPU, not a
+// bill, but one pass holds it for 5–15s. GET is its health check.
+app.post('/api/text-tools', aiLimiter, aiConcurrency);
 app.use('/api/review', reviewLimiter);
 app.use('/api', apiLimiter);
 

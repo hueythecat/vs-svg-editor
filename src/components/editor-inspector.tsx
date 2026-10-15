@@ -228,6 +228,29 @@ export const ToolsTab = React.memo(function ToolsTab({
         <CustomiseButton {...customise} />
       </div>
 
+      {/* ── Workspace ──────────────────────────────────────────────────────
+          How big the board is drawn, from its default size up to the working area
+          between the panels. A view setting: the artwork and its export are unchanged,
+          so it has no place in History. */}
+      <div style={{ ...sectionLabelStyle, marginBottom: 9 }}>{t('panel.workspace')}</div>
+      <div style={{ marginBottom: 18 }}>
+        <input
+          type="range"
+          min={0}
+          max={100}
+          step={1}
+          value={Math.round(doc.workspaceScale * 100)}
+          onChange={(e) => doc.onSetWorkspaceScale(Number(e.target.value) / 100)}
+          title={t('panel.canvasSizeTitle')}
+          aria-label={t('panel.canvasSizeTitle')}
+          style={{ width: '100%', accentColor: C.accent, margin: 0, display: 'block' }}
+        />
+        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 5, fontSize: 11, color: C.textFaint }}>
+          <span>{t('panel.canvasSizeDefault')}</span>
+          <span>{t('panel.canvasSizeMax')}</span>
+        </div>
+      </div>
+
       {/* ── Colours ────────────────────────────────────────────────────────
           One headline over the whole colour surface: which layer it acts on is the
           Layers tab's job to show, and what clicking a swatch does is evident from

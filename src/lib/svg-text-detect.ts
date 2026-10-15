@@ -35,9 +35,17 @@ const LONE_PER_LAYER_MAX = 15;
 // The most regions one call can carry: /api/svg-text refuses more (its MAX_REGIONS).
 const MAX_REGIONS = 150;
 
+// Candidates that cannot be lettering are left out of the call — see notLettering.
+const MIN_TEXT_PX = 12;      // a region smaller than this both ways is a speck
+const MIN_STROKE_PX = 6;     // thinner than this, and not one narrow letter, is a sliver
+const NARROW_LETTER_RATIO = 8;
+const LINE_THIN_RATIO = 20;  // a drawn line is at least this many times longer than thick
+const LINE_STRAIGHT = 1.6;   // …and no longer than this × its box's diagonal
+
 type BBox = [number, number, number, number]; // x0, y0, x1, y1 in render px
 
 type Collected = {
+  el: Element;               // the mounted element, for the geometry strokeLike measures
   xpath: string;
   kind: 'text' | 'path';
   bbox: BBox;
@@ -162,6 +170,7 @@ function collect(svg: SVGSVGElement, layerIds: Set<string>): Collected[] {
     const cs = getComputedStyle(el);                   // resolves classes / <style> rules
     const isText = el.tagName.toLowerCase() === 'text';
     out.push({
+      el,
       xpath: xpathOf(el, svg),
       kind: isText ? 'text' : 'path',
       bbox: [r.left - origin.left, r.top - origin.top, r.right - origin.left, r.bottom - origin.top],
@@ -294,6 +303,40 @@ function clusterGlyphs(paths: Collected[], canvasH: number, maxGlyphFrac = 0.5, 
     }
   }
 
+  // A mark stacked on a letter — the dot of an i or j, an accent, a cedilla — is neither
+  // beside it nor overlapping it, so it was left as a region of its own: a box around a
+  // dot, numbered between the words. On vectorstock_1032105 the two i-dots of "Oceanic
+  // crust" and "Continental crust" did that, and a small model dealing eight labels out
+  // in number order gave a label to each dot and ran out before the last three words.
+  //
+  // So a shape still on its own joins a letter's cluster when it is the same colour, in
+  // the same group, no bigger than half that letter's height either way, at least a third
+  // of its width, and sits just clear of it directly above or below. Only into a cluster that already holds two
+  // shapes: this can remove a region, never make one — an islet over a lone landmass
+  // must not turn two shapes that were not candidates into a region that is.
+  const size = new Map<number, number>();
+  glyphs.forEach((_, i) => size.set(find(i), (size.get(find(i)) ?? 0) + 1));
+  const lone = glyphs.map((_, i) => size.get(find(i)) === 1);
+  const stackedOn = (m: BBox, g: BBox) => {
+    const mw = m[2] - m[0], mh = m[3] - m[1], gw = g[2] - g[0], gh = g[3] - g[1];
+    if (mh > 0.5 * gh || mw > 0.5 * gh) return false;
+    // About as wide as what it sits on: a dot is the width of its stem and an accent a
+    // good part of its letter, while a stud over a badge's ornament (vectorstock_14306497)
+    // or a speck over a landmass is a small fraction of the shape below it.
+    if (mw < 0.3 * gw) return false;
+    const cx = (m[0] + m[2]) / 2;
+    if (cx < g[0] - mw / 2 || cx > g[2] + mw / 2) return false;
+    const gap = Math.max(g[1] - m[3], m[1] - g[3]);   // negative when the mark is inside the letter's box
+    return gap > -0.25 * mh && gap <= 2.5 * mh;
+  };
+  for (const idx of byGroup.values()) {
+    for (const m of idx) {
+      if (!lone[m]) continue;
+      const letter = idx.find((g) => !lone[g] && glyphs[g].paint === glyphs[m].paint && stackedOn(glyphs[m].bbox, glyphs[g].bbox));
+      if (letter !== undefined) parent[find(m)] = find(letter);
+    }
+  }
+
   const clusters = new Map<number, Collected[]>();
   glyphs.forEach((g, i) => { const r = find(i); clusters.set(r, [...(clusters.get(r) ?? []), g]); });
   // Row by row, then left to right — region numbers read like the artwork. Glyphs within
@@ -327,6 +370,59 @@ function clusterGlyphs(paths: Collected[], canvasH: number, maxGlyphFrac = 0.5, 
   }
   return list.filter((c) => c.length >= 2 || outlinedLine(c[0])
     || (byLayerRule(c) && (lonePerLayer.get(c[0].layerId) ?? 0) <= LONE_PER_LAYER_MAX));
+}
+
+// Whether a shape is a drawn line — a leader, a rule, an underline — outlined as a filled
+// shape: one outline, far longer than it is thick, and running more or less straight.
+//
+// Half the outline's length is the line's length, and the area inside it over that is its
+// thickness. Straightness is what keeps hairline lettering: a thin c, s or n is just as
+// long for its thickness, but it curls back inside its own box, where a leader with one
+// elbow is never more than √2 × the diagonal. Both figures are ratios, so the element's
+// own units do, whatever transforms scale it on the way to the screen.
+function strokeLike(e: Collected): boolean {
+  const el = e.el;
+  if (e.subpaths !== 1 || !(el instanceof SVGGeometryElement)) return false;
+  try {
+    const perimeter = el.getTotalLength();
+    const box = el.getBBox();
+    if (!(perimeter > 0)) return false;
+    const SAMPLES = 64;
+    let twiceArea = 0;
+    let prev = el.getPointAtLength(0);
+    for (let i = 1; i <= SAMPLES; i++) {
+      const pt = el.getPointAtLength((perimeter * i) / SAMPLES);
+      twiceArea += prev.x * pt.y - pt.x * prev.y;
+      prev = pt;
+    }
+    const length = perimeter / 2;
+    const thickness = Math.abs(twiceArea) / 2 / length;
+    return length >= LINE_THIN_RATIO * thickness && length <= LINE_STRAIGHT * Math.hypot(box.width, box.height);
+  } catch {
+    return false;   // not rendered, or a shape the browser won't measure
+  }
+}
+
+// Why a cluster of outlined shapes cannot be lettering, or null when it might be.
+//
+// Every region sent is a numbered box the model has to keep track of, and a small model
+// loses track: on vectorstock_1032105 — eight labels among 34 boxes, thirteen of them
+// specks and slivers of the globe and four the labels' leader lines — it gave a label to
+// every box. None of these can hold text a reader could see, so they are not asked about:
+//
+//   • a speck: under MIN_TEXT_PX both ways in the 1800px render. The smallest lettering
+//     across the samples is 16px tall (vectorstock_20086499's tagline).
+//   • a sliver: thinner than MIN_STROKE_PX. One narrow letter is the exception — that
+//     tagline's I is 4.5 × 18px — so a single shape no more than NARROW_LETTER_RATIO
+//     times longer than wide is kept.
+//   • drawn lines: every shape in it is strokeLike.
+function notLettering(els: Collected[], bbox: BBox): 'speck' | 'sliver' | 'line' | null {
+  const w = bbox[2] - bbox[0], h = bbox[3] - bbox[1];
+  const long = Math.max(w, h), short = Math.min(w, h);
+  if (long < MIN_TEXT_PX) return 'speck';
+  if (short < MIN_STROKE_PX && !(els.length === 1 && long <= NARROW_LETTER_RATIO * short)) return 'sliver';
+  if (els.every(strokeLike)) return 'line';
+  return null;
 }
 
 // The fill most of a region's shapes carry — the purple of an extruded letter's sides
@@ -600,6 +696,17 @@ export async function detectSvgText(
       ...clusterGlyphs(els.filter((e) => e.kind === 'path'), svg.height.baseVal.value)
         .map((c) => ({ els: c, bbox: unionBox(c), fill: mainFill(c), source: 'outlined_paths' as const })),
     ];
+    // Outlined clusters that cannot be lettering are dropped before the cap below, so a
+    // busy illustration spends its 150 on shapes that might be text.
+    const dropped = { speck: 0, sliver: 0, line: 0 };
+    candidates = candidates.filter((c) => {
+      const why = c.source === 'outlined_paths' ? notLettering(c.els, c.bbox) : null;
+      if (why) dropped[why]++;
+      return !why;
+    });
+    if (dropped.speck + dropped.sliver + dropped.line > 0) {
+      console.log(`[text-detect] left out ${dropped.speck} speck(s), ${dropped.sliver} sliver(s) and ${dropped.line} drawn line(s) that cannot be lettering`);
+    }
     // Still more than one call can carry (a busy illustration whose clusters are real
     // pairs): keep the likeliest text — live <text>, then the clusters with the most
     // glyphs — rather than have the route refuse the lot. Reading order is kept.

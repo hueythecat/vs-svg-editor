@@ -4,6 +4,7 @@ import type { ActiveSvg } from '@/lib/svg-utils';
 import type { RegionBox } from './editor-types';
 import { C, MONO_STACK, SHADOW, FONT_STACK, checkerStyle } from '@/lib/design-tokens';
 import { useT } from '@/i18n/provider';
+import { SHOW_DEV_UI } from '@/lib/env';
 import { MoveIcon, ResizeIcon, RotateIcon } from './svg-icons';
 
 // The canvas stage (handoff §1.1–1.3): a full-bleed, flex-centred area holding the
@@ -20,6 +21,23 @@ const BOARD_MAX_W = 620;   // px
 const BOARD_MAX_VW = 52;   // vw
 const V_BUDGET = 150;      // px of chrome above/below the board
 
+// The workspace-scale control (Tools tab) grows the board from that default towards the
+// whole working area: the stage less the control panel's column — mirrored on the left,
+// because the board is centred, which is also where the dev rail sits — and a small
+// margin top and bottom. On a window too small for that to be any bigger than the
+// default, the default stands and the control has nothing to add.
+const WORK_SIDE = 320;     // px each side: the 272px panel, its 16px inset, and a gutter
+const WORK_V_MARGIN = 48;  // px above and below combined
+
+function boardWidth(aspect: number, scale: number): string {
+  const a = aspect.toFixed(4);
+  const base = `min(${BOARD_MAX_VW}vw, ${BOARD_MAX_W}px, calc((100vh - ${V_BUDGET}px) * ${a}))`;
+  if (scale <= 0) return base;
+  const full = `max(${base}, min(calc(100vw - ${2 * WORK_SIDE}px), calc((100vh - ${WORK_V_MARGIN}px) * ${a})))`;
+  const s = Math.min(1, scale).toFixed(3);
+  return `calc(${base} * (1 - ${s}) + ${full} * ${s})`;
+}
+
 // Aspect ratio (w/h) of the document, read off the root <svg> tag: viewBox first, then
 // width/height. A cheap string scan of the opening tag rather than a full DOM parse.
 function documentAspect(content: string | undefined): number {
@@ -34,6 +52,47 @@ function documentAspect(content: string | undefined): number {
   const h = /\bheight\s*=\s*["']([\d.]+)/i.exec(rootTag);
   if (w && h && Number(h[1]) > 0) return Number(w[1]) / Number(h[1]);
   return 1;
+}
+
+// The artwork's id, for pasting into a request to have it looked at. Review assets and
+// the bundled samples are all named vectorstock_<id>.svg; a dropped file has no id, so its
+// file name stands in.
+const artworkId = (name: string) => /(\d{5,})/.exec(name)?.[1] ?? name;
+
+// Dev only: the id above the board's top-left corner. Clicking copies it; it can also be
+// selected by hand, which the stage otherwise forbids. Every pointer event stops here so
+// a click on the tag never reaches the canvas as a deselect or the start of a drag.
+function ArtworkIdTag({ name }: { name: string }) {
+  const t = useT();
+  const id = artworkId(name);
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), 1200);
+    return () => clearTimeout(timer);
+  }, [copied]);
+  const stop = (e: React.SyntheticEvent) => e.stopPropagation();
+  return (
+    <button
+      type="button"
+      title={t('canvas.copyArtworkId')}
+      onMouseDown={stop}
+      onDoubleClick={stop}
+      onClick={(e) => {
+        e.stopPropagation();
+        navigator.clipboard?.writeText(id).then(() => setCopied(true), () => {});
+      }}
+      style={{
+        position: 'absolute', bottom: '100%', left: 0, marginBottom: 3, zIndex: 20,
+        padding: '1px 6px', borderRadius: 5, lineHeight: '16px',
+        border: `1px solid ${C.borderPanel}`, background: C.surface,
+        fontFamily: MONO_STACK, fontSize: 11, color: C.textSecondary,
+        cursor: 'copy', userSelect: 'text', WebkitUserSelect: 'text', whiteSpace: 'nowrap',
+      }}
+    >
+      {copied ? t('canvas.artworkIdCopied') : `ID ${id}`}
+    </button>
+  );
 }
 
 const handleBase: React.CSSProperties = {
@@ -86,7 +145,7 @@ export const CanvasStage = React.memo(function CanvasStage({
   svgCanvasRef, overlayRef, sizeBadgeRef, showSizeBadge, hoverBadgeRef,
   onCanvasClick, onCanvasMouseDown, onCanvasDoubleClick, onCanvasMouseMove, onCanvasMouseLeave,
   aiLoading, aiStatusMsg,
-  isLoading, activeSvg,
+  isLoading, activeSvg, workspaceScale,
   hiddenLayers, previewIds, previewOutlineId, regionBoxes, onRegionDotClick, backgroundLayerId,
   showSelectionOverlay, selectionIsEmptyText,
   onEmptyTextClick,
@@ -107,6 +166,8 @@ export const CanvasStage = React.memo(function CanvasStage({
   aiStatusMsg: string;
   isLoading: boolean;
   activeSvg: ActiveSvg | null;
+  // 0 = the default board size, 1 = the whole working area (see boardWidth).
+  workspaceScale: number;
   hiddenLayers: Set<string>;
   // Hidden elements to show anyway while the dev panel hovers an entry — the hovered
   // element AND everything hidden beneath it, because display:none on an ancestor cannot
@@ -243,13 +304,14 @@ export const CanvasStage = React.memo(function CanvasStage({
 
           {/* Board — every object coordinate is relative to this box. Sized so the
               whole document fits: width is capped by the viewport and by the height
-              budget × aspect, and the height simply follows. No clipping. */}
+              budget × aspect, and the height simply follows. No clipping. The workspace
+              scale enlarges it from there, up to the working area. */}
           <div
             data-board="1"
             style={{
               position: 'relative',
               flex: 'none',
-              width: `min(${BOARD_MAX_VW}vw, ${BOARD_MAX_W}px, calc((100vh - ${V_BUDGET}px) * ${aspect.toFixed(4)}))`,
+              width: boardWidth(aspect, workspaceScale),
               ...(isTransparent ? checkerStyle() : { background: C.surface }),
               boxShadow: SHADOW.board,
               display: 'flex',
@@ -260,6 +322,7 @@ export const CanvasStage = React.memo(function CanvasStage({
               style={{ width: '100%' }}
               dangerouslySetInnerHTML={svgHtml}
             />
+            {SHOW_DEV_UI && <ArtworkIdTag name={activeSvg.name} />}
             {/* Veil over everything OUTSIDE the board. Artwork dragged past the edge is
                 still drawn (see .svg-canvas svg in EDITOR_CSS) so it can be found and
                 dragged back, but faded so it reads as off the canvas and not exported.

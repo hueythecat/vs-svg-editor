@@ -6,6 +6,7 @@ import { useT } from '@/i18n/provider';
 import type { CustomiseBundle, DocBundle, TextLayerAttrs } from './editor-types';
 import { ToolsTab, TextTab } from './editor-inspector';
 import { LayersTab } from './editor-layers-panel';
+import { DownloadIcon } from './svg-icons';
 
 // One floating control panel, top-right, holding what used to be two separate floating
 // panels — the inspector and the elements list — behind three folder tabs
@@ -201,6 +202,28 @@ export const EditorControlPanel = React.memo(function EditorControlPanel({
           )}
         </div>
       )}
+
+      {/* Export — pinned under the body on every tab. It is what ends every session, so
+          it keeps a standing position rather than scrolling away with a long tab or
+          hiding behind whichever tab is open. Flat accent, not the accent gradient: the
+          gradient is Customise's identity. The label carries the partial-export count. */}
+      <div style={{ flex: 'none', padding: 12, borderTop: `1px solid ${C.borderPanel}` }}>
+        <button
+          type="button"
+          onClick={doc.onExport}
+          style={{
+            width: '100%',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+            border: 'none', background: C.accent, color: '#fff',
+            fontSize: 12.5, fontWeight: 700, fontFamily: FONT_STACK,
+            padding: '10px 14px', borderRadius: 9,
+            cursor: 'pointer',
+          }}
+        >
+          <DownloadIcon size={13} />
+          {doc.exportLabel}
+        </button>
+      </div>
     </div>
   );
 });
