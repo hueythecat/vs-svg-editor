@@ -53,7 +53,7 @@ export const EditorControlPanel = React.memo(function EditorControlPanel({
   onReplaceColor, onEndColorEdit,
   // Text
   textProps, textContentRef, usedFonts, extraFonts, onUpdateTextLayer, onAddTextLayer,
-  detected, onShowDetectedOriginal, onRejectDetected, onSuggestFonts, suggestFontsState,
+  detected, onShowDetectedOriginal, onRejectDetected, onSuggestFonts, suggestFontsState, textPalette,
   // Layers
   layers, hiddenLayers, selectedLayers, backgroundLayerId, textLayerIds, expandableLayerIds,
   hiddenInsideCounts, drillLabel, drillMarks, onBackOut, onReorderLayers,
@@ -84,6 +84,7 @@ export const EditorControlPanel = React.memo(function EditorControlPanel({
   onRejectDetected: () => void;
   onSuggestFonts?: () => void;
   suggestFontsState: SuggestFontsState;
+  textPalette: readonly string[];
 
   layers: SvgLayer[];
   hiddenLayers: Set<string>;
@@ -209,6 +210,7 @@ export const EditorControlPanel = React.memo(function EditorControlPanel({
               onRejectDetected={onRejectDetected}
               onSuggestFonts={onSuggestFonts}
               suggestFontsState={suggestFontsState}
+              textPalette={textPalette}
             />
           )}
         </div>

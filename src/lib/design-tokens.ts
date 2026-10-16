@@ -88,7 +88,6 @@ export const MONO_STACK = 'ui-monospace, monospace';
 
 // ─── Palettes ────────────────────────────────────────────────────────────────
 
-export const TEXT_PALETTE = ['#1f6fd6', '#f2802e', '#111111', '#12b76a', '#e0575b', '#8f6bff'];
 export const BG_PALETTE   = ['#ffffff', '#111111', '#eef0f3', '#fff4e6', '#0b2a4a'];
 
 // ─── Shared style objects ────────────────────────────────────────────────────

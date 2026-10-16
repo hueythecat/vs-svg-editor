@@ -346,7 +346,7 @@ export const ToolsTab = React.memo(function ToolsTab({
 export const TextTab = React.memo(function TextTab({
   textProps, textContentRef, usedFonts, extraFonts,
   onUpdateTextLayer, onAddTextLayer,
-  detected, onShowDetectedOriginal, onRejectDetected, onSuggestFonts, suggestFontsState,
+  detected, onShowDetectedOriginal, onRejectDetected, onSuggestFonts, suggestFontsState, textPalette,
 }: {
   // Never null: with a text layer selected these are its live attributes, with nothing
   // selected they are the draft Add text layer will use. The tab has no empty state —
@@ -364,6 +364,7 @@ export const TextTab = React.memo(function TextTab({
   onRejectDetected: () => void;
   onSuggestFonts?: () => void;
   suggestFontsState: SuggestFontsState;
+  textPalette: readonly string[];
 }) {
   const t = useT();
   return (
@@ -415,6 +416,7 @@ export const TextTab = React.memo(function TextTab({
         onUpdateTextLayer={onUpdateTextLayer}
         onSuggestFonts={onSuggestFonts}
         suggestFontsState={suggestFontsState}
+        palette={textPalette}
       />
 
       {/* Commits the draft above when nothing is selected; adds a fresh layer from those

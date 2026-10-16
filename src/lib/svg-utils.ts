@@ -639,6 +639,43 @@ export function extractLayerColors(layerEl: Element, doc: Document): string[] {
   return [...seen];
 }
 
+// The artwork's own colours, for the text colour swatches: every solid colour it paints
+// with, most-used first, as #rrggbb. Black and white are left out — the text panel always
+// offers those two after the palette — and translucent colours are skipped, since a
+// swatch can only set an opaque fill. Capped so a many-coloured illustration doesn't push
+// the custom-colour tile off below a wall of swatches.
+const DOCUMENT_PALETTE_MAX = 10;
+
+export function documentPalette(content: string): string[] {
+  if (!content) return [];
+  try {
+    const doc = new DOMParser().parseFromString(content, 'image/svg+xml');
+    if (doc.querySelector('parsererror')) return [];
+    const root = doc.documentElement;
+    const solid = (c: string) => /^#[0-9a-f]{6}$/.test(c) && c !== '#000000' && c !== '#ffffff';
+    const colors = extractLayerColors(root, doc).filter(solid);
+    // How many shapes paint with each, by their resolved fill and their stroke.
+    const uses = new Map<string, number>();
+    const count = (raw: string | null) => {
+      if (!raw) return;
+      const c = normalizeColor(raw);
+      if (solid(c)) uses.set(c, (uses.get(c) ?? 0) + 1);
+    };
+    for (const el of Array.from(root.querySelectorAll('*'))) {
+      if (!PAINTABLE_TAGS.has(el.tagName.toLowerCase().replace(/.*:/, ''))) continue;
+      count(effectiveFill(el, doc));
+      count(el.getAttribute('stroke') ?? el.getAttribute('style')?.match(/(?:^|;)\s*stroke\s*:\s*([^;{}]+)/i)?.[1] ?? null);
+    }
+    return colors
+      .map((c, i) => ({ c, i, n: uses.get(c) ?? 0 }))
+      .sort((a, b) => b.n - a.n || a.i - b.i)
+      .slice(0, DOCUMENT_PALETTE_MAX)
+      .map(({ c }) => c);
+  } catch {
+    return [];
+  }
+}
+
 export type TaxonomyGroup = { type: string; elements: string[] };
 
 export type SelectedTextProps = {

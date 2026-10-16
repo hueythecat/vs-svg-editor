@@ -1,7 +1,7 @@
 import React, { RefObject } from 'react';
 
 import type { SelectedTextProps } from '@/lib/svg-utils';
-import { C, FONT_STACK, TEXT_PALETTE, inputStyle, labelStyle } from '@/lib/design-tokens';
+import { C, FONT_STACK, inputStyle, labelStyle } from '@/lib/design-tokens';
 import { useT } from '@/i18n/provider';
 import type { SuggestFontsState, TextLayerAttrs } from './editor-types';
 import { ColorSwatchRow } from './color-swatches';
@@ -29,7 +29,7 @@ const fieldRow: React.CSSProperties = { display: 'flex', gap: 10, marginBottom: 
 
 export const TextControls = React.memo(function TextControls({
   selectedTextProps, textContentRef, usedFonts, extraFonts,
-  onUpdateTextLayer, onSuggestFonts, suggestFontsState = 'idle',
+  onUpdateTextLayer, onSuggestFonts, suggestFontsState = 'idle', palette,
 }: {
   selectedTextProps: SelectedTextProps;
   textContentRef: RefObject<HTMLInputElement | null>;
@@ -42,6 +42,9 @@ export const TextControls = React.memo(function TextControls({
   // Suggested group above. Absent when there is no artwork to ask about.
   onSuggestFonts?: () => void;
   suggestFontsState?: SuggestFontsState;
+  // The colour swatches: the artwork's own colours as loaded, then black and white. The
+  // custom-colour tile after them covers anything else.
+  palette: readonly string[];
 }) {
   const t = useT();
   const curve = selectedTextProps.curve ?? 0;
@@ -163,7 +166,7 @@ export const TextControls = React.memo(function TextControls({
       <div style={{ marginBottom: 12 }}>
         <label style={labelStyle}>{t('text.color')}</label>
         <ColorSwatchRow
-          palette={TEXT_PALETTE}
+          palette={palette}
           value={selectedTextProps.color}
           onPick={(color) => onUpdateTextLayer({ color })}
           onCustomInput={(color) => onUpdateTextLayer({ color })}

@@ -20,6 +20,7 @@ import {
   parseSvg,
   parseViewBox,
   extractDesign,
+  documentPalette,
   pruneMissingLayers,
   stripScripts,
   svgToBase64Png,
@@ -2144,6 +2145,14 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     }
   }, [activeSvg, hiddenLayers, addGoogleFont, loadGoogleFontLink, snapshotForUndo, notifyCustomised, cooldownActive, selectOne]);
 
+  // The Text tab's colour swatches: the artwork's own colours as it was loaded — not as
+  // edited, so recolouring a shape doesn't reshuffle the swatches under the user — then
+  // black and white, which suit text on almost anything.
+  const textPalette = useMemo(
+    () => [...documentPalette(activeSvg?.originalContent ?? ''), '#000000', '#ffffff'],
+    [activeSvg?.originalContent],
+  );
+
   // ── Suggest fonts (Text tab button) ───────────────────────────────────────
   //
   // The Python text service's /design-fonts: the vision model looks at the whole design
@@ -3056,6 +3065,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
                 onRejectDetected={rejectSelectedDetected}
                 onSuggestFonts={activeSvg ? suggestFonts : undefined}
                 suggestFontsState={suggestFontsState}
+                textPalette={textPalette}
                 layers={activeSvg.layers}
                 hiddenLayers={hiddenLayers}
                 selectedLayers={selectedLayers}
