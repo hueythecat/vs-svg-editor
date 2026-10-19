@@ -6,6 +6,7 @@
 //
 // SVGTEXT_URL points at the service; it defaults to one on this machine.
 import { isCrossSite } from '@/lib/ai-guard';
+import { IS_PRODUCTION_UI } from '@/lib/env';
 
 const SVGTEXT_URL = (process.env.SVGTEXT_URL || 'http://127.0.0.1:8010').replace(/\/$/, '');
 // The service quotes 5–15s per SVG; past this the model is stuck, not thinking.
@@ -60,7 +61,12 @@ export async function POST(request: Request): Promise<Response> {
   if (isCrossSite(request)) return fail(403, 'Cross-site requests are not accepted');
   // ?op=design-fonts asks the service's /design-fonts instead: the font suggestions for the
   // design as a whole, a short model call of their own that runs alongside /detect.
-  const op = new URL(request.url).searchParams.get('op') === 'design-fonts' ? 'design-fonts' : 'detect';
+  const params = new URL(request.url).searchParams;
+  const op = params.get('op') === 'design-fonts' ? 'design-fonts' : 'detect';
+  // ?fresh=1 makes /detect skip the service's cache and re-run the model. The dev build
+  // asks for it when its own AI-response cache is switched off; a production build never
+  // passes it on, so the public endpoint can't be made to bypass the cache.
+  const fresh = op === 'detect' && params.get('fresh') === '1' && !IS_PRODUCTION_UI;
 
   let svg: unknown, filename: unknown;
   try {
@@ -75,10 +81,10 @@ export async function POST(request: Request): Promise<Response> {
     typeof filename === 'string' && filename ? filename : 'design.svg');
 
   const started = Date.now();
-  console.log(`[text-tools] ${SVGTEXT_URL}/${op}: ${svg.length} chars`);
+  console.log(`[text-tools] ${SVGTEXT_URL}/${op}${fresh ? '?fresh=1' : ''}: ${svg.length} chars`);
   let res: Response;
   try {
-    res = await fetch(`${SVGTEXT_URL}/${op}`, {
+    res = await fetch(`${SVGTEXT_URL}/${op}${fresh ? '?fresh=1' : ''}`, {
       method: 'POST', body: form, signal: AbortSignal.timeout(TIMEOUT_MS),
     });
   } catch (err) {
@@ -107,6 +113,8 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   const result = await res.text();
-  console.log(`[text-tools] answered in ${((Date.now() - started) / 1000).toFixed(1)}s, ${result.length} chars`);
+  // X-Cache is the service's own: "hit" served a stored result, "miss" ran the model.
+  console.log(`[text-tools] answered in ${((Date.now() - started) / 1000).toFixed(1)}s, ${result.length} chars, ` +
+    `cache ${res.headers.get('x-cache') ?? 'n/a'}`);
   return new Response(result, { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
 }

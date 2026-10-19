@@ -45,8 +45,10 @@ export type TextToolsResult = {
   timing: Record<string, number>;
 };
 
-export async function detectWithTextTools(svg: string, filename: string): Promise<TextToolsResult> {
-  const res = await fetch('/api/text-tools', {
+// fresh: skip the service's cache and re-run the model (dev only — the proxy ignores it
+// in a production build).
+export async function detectWithTextTools(svg: string, filename: string, fresh = false): Promise<TextToolsResult> {
+  const res = await fetch(fresh ? '/api/text-tools?fresh=1' : '/api/text-tools', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ svg, filename }),

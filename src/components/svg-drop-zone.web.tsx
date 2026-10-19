@@ -34,7 +34,7 @@ import { C, EDITOR_CSS, FONT_STACK, SHADOW } from '@/lib/design-tokens';
 import { useLocalLlmStatus } from '@/hooks/use-local-llm-status';
 import { useTextToolsStatus } from '@/hooks/use-text-tools-status';
 import { FONT_SUGGESTION_LIMIT, SHOW_DEV_UI } from '@/lib/env';
-import { readAiCache, writeAiCache } from '@/lib/ai-cache';
+import { isAiCacheEnabled, readAiCache, writeAiCache } from '@/lib/ai-cache';
 // Two entry points into the same catalogue: `t` for the imperative side — status text,
 // error messages, generated layer names, all written into state from callbacks — and
 // `useT` for the JSX, so a language change actually repaints it. The provider sets the
@@ -1875,10 +1875,13 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       setCallStats(null);
       const runId = ++textToolsRunRef.current;
       const sent = markHiddenForService(activeSvg.content, hiddenLayers);
-      console.log('[text-tools] invoking /api/text-tools');
+      // With the dev rail's Cache AI responses off, the service's own cache is skipped
+      // too, so every Customise is a real model run.
+      const fresh = SHOW_DEV_UI && !isAiCacheEnabled();
+      console.log(`[text-tools] invoking /api/text-tools${fresh ? '?fresh=1' : ''}`);
       // Font suggestions are not part of this: they are their own model call, made only
       // when the Text tab's Suggest fonts button asks for them (suggestFonts below).
-      const detecting = detectWithTextTools(sent, activeSvg.name);
+      const detecting = detectWithTextTools(sent, activeSvg.name, fresh);
       try {
         const result = await detecting;
         console.log(`[text-tools] ${result.items.length} item(s) in ${result.timing.total ?? '?'}s:`,
