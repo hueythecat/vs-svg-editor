@@ -28,10 +28,11 @@
     "history": "History",
     "arrange": "Arrange",
     "colours": "Colours",
+    "position": "Position",
+    "positionTitle": "Top-left corner of the selection, in the artwork’s own units",
+    "workspaceFill": "Fill the working area",
     "workspace": "Workspace",
-    "canvasSizeTitle": "Canvas size on screen — does not change the artwork or its export",
-    "canvasSizeDefault": "Default",
-    "canvasSizeMax": "Max"
+    "canvasSizeTitle": "Canvas size on screen — does not change the artwork or its export"
   },
   "inspector": {
     "customColour": "Custom colour",
@@ -44,6 +45,10 @@
     "emptyAfter": " to swap its colours, or drag anything to move, resize and rotate it."
   },
   "text": {
+    "groupMatches": "Matches for this text",
+    "matchedFont": "%{font} (match)",
+    "fontsSuggested": "Fonts suggested",
+    "suggestFontsLockedTitle": "Suggestions are made once per design — open another SVG to ask again",
     "suggestFonts": "Suggest fonts",
     "suggestingFonts": "Suggesting fonts…",
     "suggestFontsNone": "No suggestions came back for this design.",
@@ -102,6 +107,8 @@
     "copySuffix": "%{label} copy"
   },
   "canvas": {
+    "pinArtwork": "Pin to the dev rail",
+    "unpinArtwork": "Unpin from the dev rail",
     "copyArtworkId": "Copy the artwork id",
     "artworkIdCopied": "Copied",
     "replaceRegionWithText": "Replace with editable text",

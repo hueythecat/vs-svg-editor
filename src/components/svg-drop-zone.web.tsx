@@ -51,13 +51,14 @@ import type {
 } from './editor-types';
 import { LLM_OPTIONS, LOCAL_MODELS, OPUS_MODEL, TEXT_DETECT_OPTIONS } from './editor-types';
 import { detectSvgText, type DetectedTextRegion, type TextDetectStats } from '@/lib/svg-text-detect';
+import { type Pin, MAX_PINNED_SVG_CHARS, addPin, getPins, removePin } from '@/lib/dev-pins';
 import {
   detectWithTextTools, detectedSourceOf, fetchDesignFonts, liftEditableText, markHiddenForService,
   rejectDetected, servedGoogleFamilies, showDetectedOriginal,
 } from '@/lib/svg-text-tools';
 import { EditorControlPanel, type ControlTab } from './editor-control-panel';
 import { AiPanel } from './editor-ai-panel';
-import { DevRail, SAMPLE_DRAG_MIME } from './dev-rail';
+import { DevRail } from './dev-rail';
 import { DevRemovedPanel } from './dev-removed-panel';
 import { UpsellModal, CooldownModal, RatingModal, AbortReasonModal, ConfirmModal } from './editor-modals';
 import { CanvasStage } from './editor-canvas';
@@ -76,18 +77,10 @@ import {
   hideRemovedElements, removedSubtree, annotateRenderedPaint, countTaggedRows,
 } from '@/lib/ai-text-pass';
 
-// ─── Samples ─────────────────────────────────────────────────────────────────
-
-const SAMPLES = [
-  { label: 'Lighthouse',   name: 'vectorstock_956069.svg',    src: '/samples/vectorstock_956069.svg' },
-  { label: 'Sandwich',     name: 'vectorstock_51876595.svg',  src: '/samples/vectorstock_51876595.svg' },
-  { label: 'Logo',         name: 'vectorstock_20086499.svg',  src: '/samples/vectorstock_20086499.svg' },
-  { label: 'Emblem',       name: 'vectorstock_23333135.svg',  src: '/samples/vectorstock_23333135.svg' },
-  { label: 'Gradient Art', name: 'vectorstock_23517236.svg',  src: '/samples/vectorstock_23517236.svg' },
-  { label: 'Illustration', name: 'vectorstock_33133625.svg',  src: '/samples/vectorstock_33133625.svg' },
-  { label: 'Badge',        name: 'vectorstock_14306497.svg',  src: '/samples/vectorstock_14306497.svg' },
-  { label: 'Candle',       name: 'vectorstock_19973486.svg',  src: '/samples/vectorstock_19973486.svg' },
-] as const;
+// A pinned card's caption: the art id for vectorstock_<id>.svg, else the file name.
+const artworkLabel = (name: string) => /(\d{5,})/.exec(name)?.[1] ?? name.replace(/\.svg$/i, '');
+// The longer side of a pinned card's thumbnail, in px — enough for the rail's card at 2x.
+const PIN_THUMB_PX = 240;
 
 // Text fields the user manages — added via the text tool (data-text-layer="1")
 // or re-added by an AI pass (id starting "_text_"). These are already real,
@@ -145,8 +138,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   // also uses — the callbacks below want the unbound one, which needs no dependency.
   const tr = useT();
   const [activeSvg, setActiveSvg]       = useState<ActiveSvg | null>(null);
-  // string (not SampleName) because openSample now also loads fetched downloads,
-  // whose names aren't in the static SAMPLES union.
+  // The open artwork's name, which lights its pinned card in the dev rail.
   const [activeSample, setActiveSample] = useState<string | null>(null);
   const [hiddenLayers, setHiddenLayers] = useState<Set<string>>(new Set());
   // What `hiddenLayers` starts as for this document (the canvas layer) — the baseline
@@ -240,9 +232,10 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   const [editingTextId, setEditingTextId]     = useState<string | null>(null);
   const [resetConfirmOpen, setResetConfirmOpen] = useState(false); // "Revert changes?" overlay
   const [devRailOpen, setDevRailOpen]           = useState(false); // dev rail expanded
-  // How far the board is enlarged past its default size (0–1, Tools tab slider). A view
-  // setting like zoom: it changes nothing in the document and is not undoable.
-  const [workspaceScale, setWorkspaceScale]     = useState(0);
+  // Whether the board fills the working area (Tools tab Workspace switch, on by default)
+  // or keeps its default size. A view setting like zoom: it changes nothing in the
+  // document and is not undoable.
+  const [workspaceFull, setWorkspaceFull]       = useState(true);
   const [removedPanelOpen, setRemovedPanelOpen] = useState(false); // dev hidden-by-AI ledger
   // Which LLM every AI action calls. Picking 'kimi' diverts each request to
   // /api/kimi, which re-shapes the same Anthropic-style body for Moonshot. Mirrored
@@ -546,9 +539,9 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   // ── Open sample ────────────────────────────────────────────────────────────
 
   const openSample = useCallback(
-    // Widened from a SAMPLES member so fetched-download previews (whose src is a
-    // data: URI) can be opened through the same path. edit carries the download's
-    // gate (0 = AI features behind an upsell); static samples omit it → allowed.
+    // Opens artwork by URL — a bundled file's path or a fetched download's data: URI.
+    // edit carries the download's gate (0 = AI features behind an upsell); a bundled
+    // file omits it → allowed.
     async (sample: { label: string; name: string; src: string; edit?: 0 | 1 }) => {
       setIsLoading(true);
       setActiveSample(sample.name);
@@ -572,6 +565,62 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   const { openReviewUuid, onReviewListLoaded, notifyCustomised } = useReviewAsset({
     reviewUuid, openReviewUuidRef, openSample, setIsLoading, setCooldownActive, setCooldownUntil,
   });
+
+  // ── Pinned artwork (dev rail) ─────────────────────────────────────────────
+  //
+  // The id tag's pin keeps the open artwork in the dev rail's Pinned list, saved in this
+  // browser (dev-pins.ts). Read after mounting rather than as initial state: the page is
+  // server-rendered with no storage, and an initial list would not match the markup.
+  const [pins, setPins] = useState<Pin[]>([]);
+  useEffect(() => { setPins(getPins()); }, []);
+  const activePinned = !!activeSvg && pins.some((p) => p.name === activeSvg.name);
+
+  const togglePin = useCallback(async () => {
+    if (!activeSvg) return;
+    if (pins.some((p) => p.name === activeSvg.name)) {
+      const next = removePin(activeSvg.name);
+      if (next) setPins(next);
+      return;
+    }
+    const base = { name: activeSvg.name, label: artworkLabel(activeSvg.name), pinnedAt: Date.now() };
+    // Where it came from decides how it is opened again. A review asset is reopened from
+    // the host; a bundled sample from its path; anything else has only its SVG text.
+    const reviewUuid = openReviewUuidRef.current;
+    const origin = reviewUuid
+      ? { kind: 'review' as const, uuid: reviewUuid }
+      : activeSvg.src.startsWith('/')
+        ? { kind: 'sample' as const, src: activeSvg.src }
+        : { kind: 'file' as const, svg: activeSvg.originalContent };
+    if (origin.kind === 'file' && origin.svg.length > MAX_PINNED_SVG_CHARS) {
+      console.warn(`[pins] ${activeSvg.name} is ${origin.svg.length} chars — too large to keep in the browser`);
+      return;
+    }
+    // A small card image, rendered once now rather than every time the rail draws.
+    let thumb = '';
+    try {
+      const vb = parseViewBox(new DOMParser().parseFromString(activeSvg.originalContent, 'image/svg+xml').documentElement);
+      const scale = PIN_THUMB_PX / Math.max(vb.w, vb.h, 1);
+      thumb = 'data:image/png;base64,' + await svgToBase64Png(
+        activeSvg.originalContent, Math.max(1, Math.round(vb.w * scale)), Math.max(1, Math.round(vb.h * scale)),
+      );
+    } catch (err) {
+      console.warn('[pins] thumbnail failed:', err);
+    }
+    const next = addPin({ ...base, thumb, ...origin });
+    if (next) setPins(next);
+    else console.warn('[pins] could not save — browser storage is full or blocked');
+  }, [activeSvg, pins]);
+
+  const unpin = useCallback((name: string) => {
+    const next = removePin(name);
+    if (next) setPins(next);
+  }, []);
+
+  const openPin = useCallback((pin: Pin) => {
+    if (pin.kind === 'review') void openReviewUuid(pin.uuid);
+    else if (pin.kind === 'sample') void openSample({ label: pin.label, name: pin.name, src: pin.src });
+    else void openSample({ label: pin.label, name: pin.name, src: `data:image/svg+xml,${encodeURIComponent(pin.svg)}` });
+  }, [openReviewUuid, openSample]);
 
   // ── Open dropped / browsed file ────────────────────────────────────────────
 
@@ -1290,7 +1339,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   useEffect(() => { positionOverlayRef.current = positionSelectionOverlay; });
   // The board changes size under the selection when the workspace is scaled; the overlay
   // is positioned in screen pixels, so it is measured again against the resized board.
-  useLayoutEffect(() => { positionOverlayRef.current(); }, [workspaceScale]);
+  useLayoutEffect(() => { positionOverlayRef.current(); }, [workspaceFull]);
 
   useLayoutEffect(() => {
     positionSelectionOverlay();
@@ -1694,6 +1743,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
 
   const {
     centerLayersToCanvas, tidySelection, tidySelectionHorizontal, matchRotationToSelected, rotateSelected90,
+    selectionPosition, moveSelectionTo,
   } = useArrangeActions({
     activeSvg, setActiveSvg, svgCanvasRef, selectionIds, selectedLayers, backgroundLayerId, snapshotForUndo,
   });
@@ -1847,8 +1897,9 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
         const doc = new DOMParser().parseFromString(lifted.content, 'image/svg+xml');
         const kept = pruneMissingLayers(doc, activeSvg.layers);
         setActiveSvg((prev) => (prev ? { ...prev, content: lifted.content, layers: [...kept, ...lifted.textLayers] } : null));
-        dropSelectionOutside(kept, lifted.textLayers);
-        setSelectedLayer(lifted.textLayers[0].id);
+        // Selected properly, not just pointed at: the Text tab opens on it with its frame
+        // on the canvas and its position fields live, as if it had been clicked.
+        selectOne(lifted.textLayers[0].id);
         setCustomiseDone(true);
         void notifyCustomised();
       } catch (err) {
@@ -2163,6 +2214,8 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
   // are the safest pick; names Google Fonts doesn't serve are dropped.
   const suggestFonts = useCallback(async () => {
     if (!activeSvg) return;
+    // Once per artwork: applyParsed sets it back to idle when a new one opens.
+    if (suggestFontsState === 'busy' || suggestFontsState === 'done' || suggestFontsState === 'none') return;
     if (activeSvg.edit === 0) { setShowUpsell(true); return; }
     const gen = artworkGenRef.current;
     setSuggestFontsState('busy');
@@ -2185,8 +2238,8 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     for (const name of fonts) addGoogleFont(name, sorted.find((f) => f.family === name)?.weight);
     setCustomiseFonts(fonts);
     setTextForm((f) => ({ ...f, font: fonts[0] }));
-    setSuggestFontsState('idle');
-  }, [activeSvg, hiddenLayers, addGoogleFont]);
+    setSuggestFontsState('done');
+  }, [activeSvg, hiddenLayers, addGoogleFont, suggestFontsState]);
 
   // ── Python text service items: Show original / Not text (Text tab) ─────────
 
@@ -2197,8 +2250,13 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     const found = detectedSourceOf(activeSvg.content, selectedLayer);
     if (!found) return null;
     const review = activeSvg.layers.find((l) => l.id === selectedLayer)?.review;
-    return { review, showingOriginal: found.showingOriginal };
+    return { review, showingOriginal: found.showingOriginal, fontChoices: found.fontChoices };
   }, [activeSvg, selectedLayer]);
+  // Fetched as soon as the field is selected, so the Font list can show each choice in its
+  // own face and picking one renders straight away.
+  useEffect(() => {
+    for (const f of detectedSelection?.fontChoices ?? []) loadGoogleFontLink(f.family, f.weight);
+  }, [detectedSelection?.fontChoices, loadGoogleFontLink]);
 
   const showSelectedOriginal = useCallback((original: boolean) => {
     if (!activeSvg || !selectedLayer) return;
@@ -2815,19 +2873,9 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
   const handleDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     setDragCounter(0); setIsDragging(false);
-    // A preview dragged out of the left column carries its identity on a custom MIME
-    // type (set in SamplesSidebar) — open it like a click. Falls through to OS file
-    // drops, which instead arrive as dataTransfer.files.
-    const sampleJson = e.dataTransfer.getData(SAMPLE_DRAG_MIME);
-    if (sampleJson) {
-      try {
-        openSample(JSON.parse(sampleJson) as { label: string; name: string; src: string });
-        return;
-      } catch { /* malformed payload — ignore and try a file drop */ }
-    }
     const file = e.dataTransfer.files[0];
     if (file) openFile(file);
-  }, [openFile, openSample]);
+  }, [openFile]);
 
   const handleDragEnter = useCallback((e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
@@ -2892,8 +2940,11 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
         })
       : tr('toolbar.export'),
     onExport: openRating,
-    workspaceScale, onSetWorkspaceScale: setWorkspaceScale,
+    workspaceFull, onSetWorkspaceFull: setWorkspaceFull,
     onCenter: centerLayersToCanvas,
+    // The background is locked in place, so a selection of only that has no position to set.
+    position: selectionIsBackground ? null : selectionPosition,
+    onSetPosition: moveSelectionTo,
     onRotate90: rotateSelected90,
     transformDisabled: !selectedLayers.size || selectionIsBackground,
     onMatchRotation: matchRotationToSelected,
@@ -2910,7 +2961,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     hiddenRowCount, openRating, centerLayersToCanvas, rotateSelected90,
     selectedLayers.size, selectionIsBackground, matchRotationToSelected, tidySelection,
     tidySelectionHorizontal, newDesignFromSelection,
-    selectionIds.length, tr, workspaceScale,
+    selectionIds.length, tr, workspaceFull, selectionPosition, moveSelectionTo,
   ]);
 
   // Customise, as the Tools tab needs it. Memoised for the same reason docBundle is: the
@@ -3019,7 +3070,9 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
             aiStatusMsg={aiStatusMsg}
             isLoading={isLoading}
             activeSvg={activeSvg}
-            workspaceScale={workspaceScale}
+            workspaceFull={workspaceFull}
+            pinned={activePinned}
+            onTogglePin={SHOW_DEV_UI ? togglePin : undefined}
             hiddenLayers={hiddenLayers}
             previewIds={previewIds}
             previewOutlineId={previewRemovedId ?? peekedLayerId}
@@ -3176,17 +3229,17 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
       {/* Dev rail (§1.4) — internal only, sits above every panel */}
       {SHOW_DEV_UI && (
         <DevRail
-          samples={SAMPLES}
           activeSample={activeSample}
           isLoading={isLoading}
           open={devRailOpen}
           onSetOpen={onSetDevRailOpen}
-          onOpenSample={openSample}
-          onOpenFetched={openSample}
           onOpenReviewUuid={openReviewUuid}
           onReviewListLoaded={onReviewListLoaded}
           hideNonTextRegions={hideNonTextRegions}
           onSetHideNonTextRegions={onSetHideNonTextRegions}
+          pins={pins}
+          onOpenPin={openPin}
+          onUnpin={unpin}
         />
       )}
 

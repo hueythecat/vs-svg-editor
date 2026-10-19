@@ -11,18 +11,14 @@ import {
 import { useLocalLlmStatus } from '@/hooks/use-local-llm-status';
 import { useTextToolsStatus } from '@/hooks/use-text-tools-status';
 import { PADDLE_ENV, openPaddleCheckout, paddleConfigError } from '@/lib/paddle';
-import { ChevronIcon, SettingsIcon } from './svg-icons';
+import type { Pin } from '@/lib/dev-pins';
+import { ChevronIcon, SettingsIcon, TrashIcon } from './svg-icons';
 
 type Sample = { label: string; name: string; src: string; edit?: 0 | 1 };
 
-// What a review-uuid open hands back, so the rail can add a preview card for artwork
-// the parent resolved. Exported because the parent builds it — same shape as Sample,
-// named for what it is at that end.
+// What a review-uuid open hands back: the artwork the parent resolved, or null when
+// nothing loaded. Exported because the parent builds it.
 export type OpenedSample = Sample;
-
-// Custom drag MIME so a preview dragged onto the canvas can be told apart from an OS
-// file drop. The drop handler in svg-drop-zone reads this same key.
-export const SAMPLE_DRAG_MIME = 'application/x-svg-sample';
 
 // One row of /api/review/list — the review host's own asset list. Only the fields the
 // dropdown needs are typed; the upstream sends more (user_id, cancelled, timestamps…).
@@ -66,20 +62,16 @@ const dedupeReviewList = (rows: ReviewListItem[]): ReviewListItem[] => {
 // The internal/dev affordance from the handoff §1.4 — deliberately dark so it never
 // reads as user UI, collapsing to a small pill at the top-left of the canvas.
 
-interface DevRailProps<S extends Sample> {
-  samples: ReadonlyArray<S>;
+interface DevRailProps {
   activeSample: string | null;
   isLoading: boolean;
   // Expanded state is owned by the parent so it can collapse the rail once artwork
   // lands on the canvas — including for loads the rail didn't start (file drop, browse).
   open: boolean;
   onSetOpen: (open: boolean) => void;
-  onOpenSample: (sample: S) => void;
-  // Opens a download that was fetched and extracted at runtime (src is a data: URI).
-  onOpenFetched?: (sample: Sample) => void;
   // Opens a review asset by uuid — the same path the /<uuid> deep link takes, check
   // call and cooldown included. The dropdown's selection action. Resolves with the
-  // sample it opened (null if nothing loaded) so the rail can preview it.
+  // sample it opened (null if nothing loaded) so the rail knows it worked.
   onOpenReviewUuid?: (uuid: string) => Promise<OpenedSample | null>;
   // The cooldown basis, reported whenever the list is (re)loaded: the most recent
   // customised_at across rows that aren't cancelled. One value for every asset, since
@@ -89,12 +81,18 @@ interface DevRailProps<S extends Sample> {
   // editor, which draws the boxes; the rail only flips it.
   hideNonTextRegions: boolean;
   onSetHideNonTextRegions: (on: boolean) => void;
+  // Artwork pinned from the id tag above the canvas, newest first — the rail's only
+  // previews. Hovering a card offers a trash can to unpin it.
+  pins?: ReadonlyArray<Pin>;
+  onOpenPin?: (pin: Pin) => void;
+  onUnpin?: (name: string) => void;
 }
 
-export function DevRail<S extends Sample>({
-  samples, activeSample, isLoading, open, onSetOpen, onOpenSample, onOpenFetched,
+export function DevRail({
+  activeSample, isLoading, open, onSetOpen,
   onOpenReviewUuid, onReviewListLoaded, hideNonTextRegions, onSetHideNonTextRegions,
-}: DevRailProps<S>) {
+  pins = [], onOpenPin, onUnpin,
+}: DevRailProps) {
   const [selectedDownload, setSelectedDownload] = useState<string>('');
   const [reviewList, setReviewList] = useState<ReviewListItem[]>([]);
   // Mirrors reviewList for openFromList: the id box opens a row out of a list it has
@@ -108,7 +106,6 @@ export function DevRail<S extends Sample>({
   const [reviewId, setReviewId] = useState('');
   const [fetchStatus, setFetchStatus] = useState<string | null>(null);
   const [fetching, setFetching] = useState(false);
-  const [fetchedSamples, setFetchedSamples] = useState<Sample[]>([]);
   // Mirrors the persisted preference. Nothing else re-renders off it — the AI passes ask
   // the cache module directly at call time — so it stays local to the rail. Lazy initial
   // state: reading storage during SSR would throw, and this only ever renders client-side.
@@ -178,13 +175,10 @@ export function DevRail<S extends Sample>({
   }, [open, loadList]);
 
   // Picking from the list dropdown. The parent owns the open — it runs the same check /
-  // download / cooldown path as a /<uuid> deep link — and hands back what it opened, so
-  // the asset also lands in the previews below, exactly like an id-box fetch. De-duped
-  // by name so re-selecting refreshes its card rather than stacking duplicates.
+  // download / cooldown path as a /<uuid> deep link — and hands back what it opened.
   const openFromList = useCallback(async (uuid: string) => {
     const sample = await onOpenReviewUuid?.(uuid);
     if (!sample) return;
-    setFetchedSamples((prev) => [sample, ...prev.filter((s) => s.name !== sample.name)]);
     // Remembered only once it has actually opened: a selection that failed isn't one to
     // offer again first.
     const row = reviewListRef.current.find((r) => r.edit_uuid === uuid);
@@ -262,30 +256,31 @@ export function DevRail<S extends Sample>({
   // active styling, and matches its disabled condition so the two can't disagree.
   const armed = !fetching && reviewId.trim().length > 0;
 
-  // The previews are two lists sharing one strip: assets fetched this session on top,
-  // the bundled samples under them. A bundled sample whose file name matches a fetched
-  // one is the same artwork — several bundled ids are registered on the review host —
-  // so it would sit there as a second card for the same thing, both lit as active.
-  // The fetched copy wins: it's the live asset, carrying its own edit flag and whatever
-  // the host holds now, where the bundled file is a fixed snapshot.
-  const fetchedNames = new Set(fetchedSamples.map((s) => s.name));
-  const staticSamples = samples.filter((s) => !fetchedNames.has(s.name));
-
-  const renderCard =(sample: Sample, onOpen: () => void) => {
-    const isActive = activeSample === sample.name;
+  const renderPin = (pin: Pin) => {
+    const isActive = activeSample === pin.name;
     return (
+      <div key={pin.name} className="ed-dev-pin" style={{ position: 'relative', display: 'flex', flexDirection: 'column' }}>
+      {/* Shown on hover only (.ed-dev-pin:hover in EDITOR_CSS). A sibling of the card
+          rather than inside it: a button can't hold another button. */}
       <button
-        key={sample.name}
         type="button"
-        onClick={onOpen}
-        disabled={isLoading}
-        // Dragging the preview onto the canvas opens it. draggable sits on the button
-        // so the whole tile is the drag handle; the payload is read back in handleDrop.
-        draggable
-        onDragStart={(e) => {
-          e.dataTransfer.setData(SAMPLE_DRAG_MIME, JSON.stringify(sample));
-          e.dataTransfer.effectAllowed = 'copy';
+        className="ed-dev-pin-trash"
+        title="Unpin"
+        aria-label={`Unpin ${pin.label}`}
+        onClick={() => onUnpin?.(pin.name)}
+        style={{
+          position: 'absolute', top: 9, right: 9, zIndex: 1,
+          width: 22, height: 22, borderRadius: 6, padding: 0,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          border: 'none', background: 'rgba(16,19,24,.78)', color: '#ff8a8a', cursor: 'pointer',
         }}
+      >
+        <TrashIcon size={13} />
+      </button>
+      <button
+        type="button"
+        onClick={() => onOpenPin?.(pin)}
+        disabled={isLoading}
         className="ed-dev-card"
         style={{
           display: 'flex', flexDirection: 'column', gap: 4,
@@ -307,10 +302,8 @@ export function DevRail<S extends Sample>({
           }}
         >
           <img
-            src={sample.src}
-            alt={sample.label}
-            // Suppress the native image drag so only the button's drag fires (carrying
-            // our custom payload rather than the image URL).
+            src={pin.thumb || undefined}
+            alt={pin.label}
             draggable={false}
             style={{ width: '100%', height: '100%', objectFit: 'contain', padding: 2, boxSizing: 'border-box' }}
           />
@@ -322,9 +315,10 @@ export function DevRail<S extends Sample>({
             overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
           }}
         >
-          {sample.label}
+          {pin.label}
         </span>
       </button>
+      </div>
     );
   };
 
@@ -705,9 +699,11 @@ export function DevRail<S extends Sample>({
             )}
           </div>
 
-          {/* Samples */}
+          {/* Pinned items — artwork pinned from the id tag above the canvas. */}
           <div style={{ padding: '0 12px 4px' }}>
-            <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: '.6px', color: C.devTextDim }}>SAMPLES</span>
+            <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: '.6px', color: C.devTextDim }}>
+              PINNED ITEMS
+            </span>
           </div>
           <div
             className="ed-scroll"
@@ -717,8 +713,12 @@ export function DevRail<S extends Sample>({
               display: 'flex', flexDirection: 'column', gap: 6,
             }}
           >
-            {fetchedSamples.map((sample) => renderCard(sample, () => onOpenFetched?.(sample)))}
-            {staticSamples.map((sample) => renderCard(sample, () => onOpenSample(sample)))}
+            {pins.length === 0 && (
+              <span style={{ fontSize: 10, lineHeight: 1.5, color: C.devTextFaint }}>
+                Pin artwork with the pin next to its id above the canvas.
+              </span>
+            )}
+            {pins.map(renderPin)}
           </div>
         </div>
       ) : (

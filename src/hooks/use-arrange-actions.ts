@@ -2,9 +2,11 @@
 // rotate 90°. Each is the same shape — measure the live artwork, write a transform onto
 // the parsed document, snapshot for undo, store the result — and none of them touches
 // anything else in the editor, which is why they live together and apart from it.
-import { type Dispatch, type RefObject, type SetStateAction, useCallback } from 'react';
+import { type Dispatch, type RefObject, type SetStateAction, useCallback, useLayoutEffect, useState } from 'react';
 
-import { type ActiveSvg, type SvgLayer, bboxInRootSpace, unionBoxInRootSpace } from '@/lib/svg-utils';
+import {
+  type ActiveSvg, type SvgLayer, applyTranslateDelta, bboxInRootSpace, unionBoxInRootSpace,
+} from '@/lib/svg-utils';
 
 type Options = {
   activeSvg: ActiveSvg | null;
@@ -233,5 +235,67 @@ export function useArrangeActions({
     setActiveSvg((prev) => (prev ? { ...prev, content } : null));
   }, [activeSvg, selectedLayers, backgroundLayerId, snapshotForUndo]);
 
-  return { centerLayersToCanvas, tidySelection, tidySelectionHorizontal, matchRotationToSelected, rotateSelected90 };
+  // ── Position (X / Y fields) ───────────────────────────────────────────────
+  //
+  // Where the selection sits: the top-left corner of its union box, in the artwork's own
+  // units (the viewBox). Measured off the live canvas after every change to the document
+  // or the selection, so the fields always read what is drawn — including after a drag,
+  // which writes the document once on release.
+  const [selectionPosition, setSelectionPosition] = useState<{ x: number; y: number } | null>(null);
+  useLayoutEffect(() => {
+    const measure = () => {
+      const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
+      const box = svgEl && selectionIds.length > 0 ? unionBoxInRootSpace(svgEl, selectionIds) : null;
+      setSelectionPosition(box ? { x: box.x, y: box.y } : null);
+    };
+    measure();
+    // A text field's box changes when its web font arrives, which is often after the
+    // document change that selected it — measured then, the fields would read the
+    // fallback face's box.
+    document.fonts?.addEventListener('loadingdone', measure);
+    return () => document.fonts?.removeEventListener('loadingdone', measure);
+  }, [activeSvg?.content, selectionIds, svgCanvasRef]);
+
+  // Moves the selection so its top-left corner lands on (x, y); an axis left undefined
+  // stays put. Several layers move as one block, like Center, so their spacing survives.
+  const moveSelectionTo = useCallback((target: { x?: number; y?: number }) => {
+    if (!activeSvg || selectionIds.length === 0) return;
+    const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
+    if (!svgEl) return;
+    const box = unionBoxInRootSpace(svgEl, selectionIds);
+    if (!box) return;
+    const dx = target.x === undefined ? 0 : target.x - box.x;
+    const dy = target.y === undefined ? 0 : target.y - box.y;
+    if (Math.abs(dx) < 0.005 && Math.abs(dy) < 0.005) return;
+
+    const rootCTM = svgEl.getScreenCTM();
+    if (!rootCTM) return;
+    const doc = new DOMParser().parseFromString(activeSvg.content, 'image/svg+xml');
+    let changed = false;
+    for (const id of selectionIds) {
+      const liveEl = svgEl.getElementById(id) as SVGGraphicsElement | null;
+      const docEl = doc.getElementById(id);
+      if (!liveEl || !docEl) continue;
+      // The translate goes on the layer's own transform, so it acts in its PARENT's
+      // space. A layer opened out of a transformed group has a parent that is scaled or
+      // rotated against the canvas, and the canvas-space shift has to be carried into it.
+      const parent = liveEl.parentElement as unknown as SVGGraphicsElement | null;
+      const parentCTM = parent && parent !== (svgEl as unknown) ? parent.getScreenCTM() : rootCTM;
+      if (!parentCTM) continue;
+      const m = rootCTM.inverse().multiply(parentCTM).inverse();
+      const pdx = m.a * dx + m.c * dy;
+      const pdy = m.b * dx + m.d * dy;
+      docEl.setAttribute('transform', applyTranslateDelta(docEl.getAttribute('transform') ?? '', +pdx.toFixed(2), +pdy.toFixed(2)));
+      changed = true;
+    }
+    if (!changed) return;
+    snapshotForUndo(activeSvg.content, activeSvg.layers);
+    const content = new XMLSerializer().serializeToString(doc.documentElement);
+    setActiveSvg((prev) => (prev ? { ...prev, content } : null));
+  }, [activeSvg, selectionIds, snapshotForUndo]);
+
+  return {
+    centerLayersToCanvas, tidySelection, tidySelectionHorizontal, matchRotationToSelected, rotateSelected90,
+    selectionPosition, moveSelectionTo,
+  };
 }

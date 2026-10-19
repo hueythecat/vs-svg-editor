@@ -3,6 +3,7 @@ import React, { Dispatch, RefObject, SetStateAction } from 'react';
 import type { SelectedTextProps, SvgLayer } from '@/lib/svg-utils';
 import { C, FONT_STACK, SHADOW } from '@/lib/design-tokens';
 import { useT } from '@/i18n/provider';
+import type { FontChoice } from '@/lib/svg-text-tools';
 import type { CustomiseBundle, DocBundle, SuggestFontsState, TextLayerAttrs } from './editor-types';
 import { ToolsTab, TextTab } from './editor-inspector';
 import { LayersTab } from './editor-layers-panel';
@@ -79,7 +80,7 @@ export const EditorControlPanel = React.memo(function EditorControlPanel({
   extraFonts: string[];
   onUpdateTextLayer: (attrs: Partial<TextLayerAttrs>) => void;
   onAddTextLayer: () => void;
-  detected: { review?: 'font' | 'text'; showingOriginal: boolean } | null;
+  detected: { review?: 'font' | 'text'; showingOriginal: boolean; fontChoices: FontChoice[] } | null;
   onShowDetectedOriginal: (original: boolean) => void;
   onRejectDetected: () => void;
   onSuggestFonts?: () => void;
@@ -211,16 +212,19 @@ export const EditorControlPanel = React.memo(function EditorControlPanel({
               onSuggestFonts={onSuggestFonts}
               suggestFontsState={suggestFontsState}
               textPalette={textPalette}
+              position={doc.position}
+              onSetPosition={doc.onSetPosition}
             />
           )}
         </div>
       )}
 
-      {/* Export — pinned under the body on every tab. It is what ends every session, so
-          it keeps a standing position rather than scrolling away with a long tab or
-          hiding behind whichever tab is open. Flat accent, not the accent gradient: the
-          gradient is Customise's identity. The label carries the partial-export count. */}
-      <div style={{ flex: 'none', padding: 12, borderTop: `1px solid ${C.borderPanel}` }}>
+      {/* Export — on the Tools tab only, pinned under its body so it keeps a standing
+          position rather than scrolling away with the tab. The Text and Layers tabs are
+          about the selection; Export is about the whole artwork, like the rest of Tools.
+          Flat accent, not the accent gradient: the gradient is Customise's identity. The
+          label carries the partial-export count. */}
+      {tab === 'tools' && <div style={{ flex: 'none', padding: 12, borderTop: `1px solid ${C.borderPanel}` }}>
         <button
           type="button"
           onClick={doc.onExport}
@@ -236,7 +240,7 @@ export const EditorControlPanel = React.memo(function EditorControlPanel({
           <DownloadIcon size={13} />
           {doc.exportLabel}
         </button>
-      </div>
+      </div>}
     </div>
   );
 });

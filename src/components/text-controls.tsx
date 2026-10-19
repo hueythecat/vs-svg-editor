@@ -4,6 +4,7 @@ import type { SelectedTextProps } from '@/lib/svg-utils';
 import { C, FONT_STACK, inputStyle, labelStyle } from '@/lib/design-tokens';
 import { useT } from '@/i18n/provider';
 import type { SuggestFontsState, TextLayerAttrs } from './editor-types';
+import type { FontChoice } from '@/lib/svg-text-tools';
 import { ColorSwatchRow } from './color-swatches';
 
 // Inspector body for a selected text layer (handoff §1.6, "Text selected"): Words /
@@ -29,7 +30,7 @@ const fieldRow: React.CSSProperties = { display: 'flex', gap: 10, marginBottom: 
 
 export const TextControls = React.memo(function TextControls({
   selectedTextProps, textContentRef, usedFonts, extraFonts,
-  onUpdateTextLayer, onSuggestFonts, suggestFontsState = 'idle', palette,
+  onUpdateTextLayer, onSuggestFonts, suggestFontsState = 'idle', palette, fontChoices = [],
 }: {
   selectedTextProps: SelectedTextProps;
   textContentRef: RefObject<HTMLInputElement | null>;
@@ -45,9 +46,14 @@ export const TextControls = React.memo(function TextControls({
   // The colour swatches: the artwork's own colours as loaded, then black and white. The
   // custom-colour tile after them covers anything else.
   palette: readonly string[];
+  // For text the Python text service set: the face it matched, then its runners-up. Each
+  // carries the weight it was matched at, which picking it applies along with the family.
+  fontChoices?: FontChoice[];
 }) {
   const t = useT();
   const curve = selectedTextProps.curve ?? 0;
+  // Suggest fonts runs once per artwork; a failed ask is the one outcome that can retry.
+  const locked = suggestFontsState === 'busy' || suggestFontsState === 'done' || suggestFontsState === 'none';
 
   return (
     <div>
@@ -71,7 +77,10 @@ export const TextControls = React.memo(function TextControls({
         <select
           className="ed-input"
           value={selectedTextProps.font}
-          onChange={(e) => onUpdateTextLayer({ font: e.target.value })}
+          onChange={(e) => {
+            const choice = fontChoices.find((f) => f.family === e.target.value);
+            onUpdateTextLayer(choice ? { font: choice.family, weight: choice.weight } : { font: e.target.value });
+          }}
           style={{ ...inputStyle, cursor: 'pointer' }}
         >
           {/*
@@ -82,6 +91,18 @@ export const TextControls = React.memo(function TextControls({
             the design. Grouped as well as ordered, or the ordering communicates nothing —
             a bare list gives no way to tell a font in use from one merely offered.
           */}
+          {/* This text's own shortlist from the Python text service — the match first,
+              then the faces it nearly picked — each at its matched weight. Ahead of the
+              artwork-wide groups because it is about this line alone. */}
+          {fontChoices.length > 0 && (
+            <optgroup label={t('text.groupMatches')}>
+              {fontChoices.map((f, i) => (
+                <option key={`choice-${f.family}`} value={f.family} style={{ fontFamily: f.family }}>
+                  {i === 0 ? t('text.matchedFont', { font: `${f.family} ${f.weight}` }) : `${f.family} ${f.weight}`}
+                </option>
+              ))}
+            </optgroup>
+          )}
           {usedFonts.length > 0 && (
             <optgroup label={t('text.groupInDesign')}>
               {usedFonts.map((f) => (
@@ -108,17 +129,19 @@ export const TextControls = React.memo(function TextControls({
               type="button"
               className="ed-ghost"
               onClick={onSuggestFonts}
-              disabled={suggestFontsState === 'busy'}
+              disabled={locked}
+              title={locked && suggestFontsState !== 'busy' ? t('text.suggestFontsLockedTitle') : undefined}
               style={{
                 width: '100%', marginTop: 6,
                 border: `1px solid ${C.borderInput}`, background: C.surface,
                 color: C.textSecondary, fontSize: 12, fontFamily: FONT_STACK,
                 padding: '6px 10px', borderRadius: 8,
-                cursor: suggestFontsState === 'busy' ? 'default' : 'pointer',
-                opacity: suggestFontsState === 'busy' ? 0.6 : 1,
+                cursor: locked ? 'default' : 'pointer',
+                opacity: locked ? 0.6 : 1,
               }}
             >
-              {t(suggestFontsState === 'busy' ? 'text.suggestingFonts' : 'text.suggestFonts')}
+              {t(suggestFontsState === 'busy' ? 'text.suggestingFonts'
+                : suggestFontsState === 'done' ? 'text.fontsSuggested' : 'text.suggestFonts')}
             </button>
             {(suggestFontsState === 'none' || suggestFontsState === 'failed') && (
               <span style={{ display: 'block', marginTop: 5, fontSize: 11, color: C.textMuted }}>

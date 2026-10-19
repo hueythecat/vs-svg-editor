@@ -5,7 +5,7 @@ import type { RegionBox } from './editor-types';
 import { C, MONO_STACK, SHADOW, FONT_STACK, checkerStyle } from '@/lib/design-tokens';
 import { useT } from '@/i18n/provider';
 import { SHOW_DEV_UI } from '@/lib/env';
-import { MoveIcon, ResizeIcon, RotateIcon } from './svg-icons';
+import { MoveIcon, PinIcon, ResizeIcon, RotateIcon } from './svg-icons';
 
 // The canvas stage (handoff §1.1–1.3): a full-bleed, flex-centred area holding the
 // white board, plus the selection / drag / rotate / scale overlay. Memoised and fed
@@ -21,21 +21,19 @@ const BOARD_MAX_W = 620;   // px
 const BOARD_MAX_VW = 52;   // vw
 const V_BUDGET = 150;      // px of chrome above/below the board
 
-// The workspace-scale control (Tools tab) grows the board from that default towards the
-// whole working area: the stage less the control panel's column — mirrored on the left,
+// The Workspace switch (Tools tab) grows the board from that default to the whole
+// working area: the stage less the control panel's column — mirrored on the left,
 // because the board is centred, which is also where the dev rail sits — and a small
 // margin top and bottom. On a window too small for that to be any bigger than the
-// default, the default stands and the control has nothing to add.
+// default, the default stands and the switch has nothing to add.
 const WORK_SIDE = 320;     // px each side: the 272px panel, its 16px inset, and a gutter
 const WORK_V_MARGIN = 48;  // px above and below combined
 
-function boardWidth(aspect: number, scale: number): string {
+function boardWidth(aspect: number, full: boolean): string {
   const a = aspect.toFixed(4);
   const base = `min(${BOARD_MAX_VW}vw, ${BOARD_MAX_W}px, calc((100vh - ${V_BUDGET}px) * ${a}))`;
-  if (scale <= 0) return base;
-  const full = `max(${base}, min(calc(100vw - ${2 * WORK_SIDE}px), calc((100vh - ${WORK_V_MARGIN}px) * ${a})))`;
-  const s = Math.min(1, scale).toFixed(3);
-  return `calc(${base} * (1 - ${s}) + ${full} * ${s})`;
+  if (!full) return base;
+  return `max(${base}, min(calc(100vw - ${2 * WORK_SIDE}px), calc((100vh - ${WORK_V_MARGIN}px) * ${a})))`;
 }
 
 // Aspect ratio (w/h) of the document, read off the root <svg> tag: viewBox first, then
@@ -59,10 +57,16 @@ function documentAspect(content: string | undefined): number {
 // file name stands in.
 const artworkId = (name: string) => /(\d{5,})/.exec(name)?.[1] ?? name;
 
-// Dev only: the id above the board's top-left corner. Clicking copies it; it can also be
-// selected by hand, which the stage otherwise forbids. Every pointer event stops here so
-// a click on the tag never reaches the canvas as a deselect or the start of a drag.
-function ArtworkIdTag({ name }: { name: string }) {
+// Dev only: the id above the board's top-left corner, with a pin beside it. Clicking the
+// id copies it; it can also be selected by hand, which the stage otherwise forbids. The
+// pin adds the artwork to the dev rail's Pinned list (or takes it off again). Every
+// pointer event stops here so a click on either never reaches the canvas as a deselect
+// or the start of a drag.
+function ArtworkIdTag({ name, pinned, onTogglePin }: {
+  name: string;
+  pinned: boolean;
+  onTogglePin?: () => void;
+}) {
   const t = useT();
   const id = artworkId(name);
   const [copied, setCopied] = useState(false);
@@ -72,26 +76,45 @@ function ArtworkIdTag({ name }: { name: string }) {
     return () => clearTimeout(timer);
   }, [copied]);
   const stop = (e: React.SyntheticEvent) => e.stopPropagation();
+  const chip: React.CSSProperties = {
+    padding: '1px 6px', borderRadius: 5, lineHeight: '16px',
+    border: `1px solid ${C.borderPanel}`, background: C.surface,
+    fontFamily: MONO_STACK, fontSize: 11, color: C.textSecondary, whiteSpace: 'nowrap',
+  };
   return (
-    <button
-      type="button"
-      title={t('canvas.copyArtworkId')}
+    <div
       onMouseDown={stop}
       onDoubleClick={stop}
-      onClick={(e) => {
-        e.stopPropagation();
-        navigator.clipboard?.writeText(id).then(() => setCopied(true), () => {});
-      }}
-      style={{
-        position: 'absolute', bottom: '100%', left: 0, marginBottom: 3, zIndex: 20,
-        padding: '1px 6px', borderRadius: 5, lineHeight: '16px',
-        border: `1px solid ${C.borderPanel}`, background: C.surface,
-        fontFamily: MONO_STACK, fontSize: 11, color: C.textSecondary,
-        cursor: 'copy', userSelect: 'text', WebkitUserSelect: 'text', whiteSpace: 'nowrap',
-      }}
+      style={{ position: 'absolute', bottom: '100%', left: 0, marginBottom: 3, zIndex: 20, display: 'flex', gap: 4 }}
     >
-      {copied ? t('canvas.artworkIdCopied') : `ID ${id}`}
-    </button>
+      <button
+        type="button"
+        title={t('canvas.copyArtworkId')}
+        onClick={(e) => {
+          e.stopPropagation();
+          navigator.clipboard?.writeText(id).then(() => setCopied(true), () => {});
+        }}
+        style={{ ...chip, cursor: 'copy', userSelect: 'text', WebkitUserSelect: 'text' }}
+      >
+        {copied ? t('canvas.artworkIdCopied') : `ID ${id}`}
+      </button>
+      {onTogglePin && (
+        <button
+          type="button"
+          title={t(pinned ? 'canvas.unpinArtwork' : 'canvas.pinArtwork')}
+          aria-label={t(pinned ? 'canvas.unpinArtwork' : 'canvas.pinArtwork')}
+          aria-pressed={pinned}
+          onClick={(e) => { e.stopPropagation(); onTogglePin(); }}
+          style={{
+            ...chip, padding: '1px 5px', display: 'flex', alignItems: 'center', cursor: 'pointer',
+            color: pinned ? C.accent : C.textMuted,
+            borderColor: pinned ? C.accentTintBorder : C.borderPanel,
+          }}
+        >
+          <PinIcon size={12} filled={pinned} />
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -145,7 +168,7 @@ export const CanvasStage = React.memo(function CanvasStage({
   svgCanvasRef, overlayRef, sizeBadgeRef, showSizeBadge, hoverBadgeRef,
   onCanvasClick, onCanvasMouseDown, onCanvasDoubleClick, onCanvasMouseMove, onCanvasMouseLeave,
   aiLoading, aiStatusMsg,
-  isLoading, activeSvg, workspaceScale,
+  isLoading, activeSvg, workspaceFull, pinned, onTogglePin,
   hiddenLayers, previewIds, previewOutlineId, regionBoxes, onRegionDotClick, backgroundLayerId,
   showSelectionOverlay, selectionIsEmptyText,
   onEmptyTextClick,
@@ -166,8 +189,11 @@ export const CanvasStage = React.memo(function CanvasStage({
   aiStatusMsg: string;
   isLoading: boolean;
   activeSvg: ActiveSvg | null;
-  // 0 = the default board size, 1 = the whole working area (see boardWidth).
-  workspaceScale: number;
+  // Off = the default board size, on = the whole working area (see boardWidth).
+  workspaceFull: boolean;
+  // Dev only: whether the open artwork is pinned to the dev rail, and the pin button.
+  pinned: boolean;
+  onTogglePin?: () => void;
   hiddenLayers: Set<string>;
   // Hidden elements to show anyway while the dev panel hovers an entry — the hovered
   // element AND everything hidden beneath it, because display:none on an ancestor cannot
@@ -304,14 +330,14 @@ export const CanvasStage = React.memo(function CanvasStage({
 
           {/* Board — every object coordinate is relative to this box. Sized so the
               whole document fits: width is capped by the viewport and by the height
-              budget × aspect, and the height simply follows. No clipping. The workspace
-              scale enlarges it from there, up to the working area. */}
+              budget × aspect, and the height simply follows. No clipping. The Workspace
+              switch enlarges it from there to the working area. */}
           <div
             data-board="1"
             style={{
               position: 'relative',
               flex: 'none',
-              width: boardWidth(aspect, workspaceScale),
+              width: boardWidth(aspect, workspaceFull),
               ...(isTransparent ? checkerStyle() : { background: C.surface }),
               boxShadow: SHADOW.board,
               display: 'flex',
@@ -322,7 +348,7 @@ export const CanvasStage = React.memo(function CanvasStage({
               style={{ width: '100%' }}
               dangerouslySetInnerHTML={svgHtml}
             />
-            {SHOW_DEV_UI && <ArtworkIdTag name={activeSvg.name} />}
+            {SHOW_DEV_UI && <ArtworkIdTag name={activeSvg.name} pinned={pinned} onTogglePin={onTogglePin} />}
             {/* Veil over everything OUTSIDE the board. Artwork dragged past the edge is
                 still drawn (see .svg-canvas svg in EDITOR_CSS) so it can be found and
                 dragged back, but faded so it reads as off the canvas and not exported.

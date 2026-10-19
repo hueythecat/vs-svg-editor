@@ -28,10 +28,11 @@
     "history": "Verlauf",
     "arrange": "Anordnen",
     "colours": "Farben",
+    "position": "Position",
+    "positionTitle": "Obere linke Ecke der Auswahl, in den Einheiten der Grafik",
+    "workspaceFill": "Arbeitsbereich ausfüllen",
     "workspace": "Arbeitsbereich",
-    "canvasSizeTitle": "Größe der Arbeitsfläche auf dem Bildschirm – ändert weder die Grafik noch den Export",
-    "canvasSizeDefault": "Standard",
-    "canvasSizeMax": "Max."
+    "canvasSizeTitle": "Größe der Arbeitsfläche auf dem Bildschirm – ändert weder die Grafik noch den Export"
   },
   "inspector": {
     "customColour": "Eigene Farbe",
@@ -44,6 +45,10 @@
     "emptyAfter": ", um seine Farben zu tauschen, oder ziehe ein Element, um es zu verschieben, zu skalieren und zu drehen."
   },
   "text": {
+    "groupMatches": "Treffer für diesen Text",
+    "matchedFont": "%{font} (Treffer)",
+    "fontsSuggested": "Schriften vorgeschlagen",
+    "suggestFontsLockedTitle": "Vorschläge gibt es einmal pro Design — ein anderes SVG öffnen, um erneut zu fragen",
     "suggestFonts": "Schriften vorschlagen",
     "suggestingFonts": "Schriften werden vorgeschlagen…",
     "suggestFontsNone": "Für dieses Design kamen keine Vorschläge zurück.",
@@ -102,6 +107,8 @@
     "copySuffix": "%{label} Kopie"
   },
   "canvas": {
+    "pinArtwork": "An die Dev-Leiste anheften",
+    "unpinArtwork": "Von der Dev-Leiste lösen",
     "copyArtworkId": "Artwork-ID kopieren",
     "artworkIdCopied": "Kopiert",
     "replaceRegionWithText": "Durch bearbeitbaren Text ersetzen",

@@ -27,11 +27,15 @@ export type DocBundle = {
   onReset: () => void;
   exportLabel: string;
   onExport: () => void;
-  // How far the board is enlarged past its default size: 0 is the default, 1 fills the
-  // working area between the floating panels. A view setting — never part of the document.
-  workspaceScale: number;
-  onSetWorkspaceScale: (scale: number) => void;
+  // Whether the board fills the working area between the floating panels (on) or keeps
+  // its default size (off). A view setting — never part of the document.
+  workspaceFull: boolean;
+  onSetWorkspaceFull: (full: boolean) => void;
   onCenter: () => void;
+  // The selection's top-left corner in the artwork's own units (its viewBox), or null
+  // with nothing selected. Setting it moves the whole selection as one block.
+  position: { x: number; y: number } | null;
+  onSetPosition: (target: { x?: number; y?: number }) => void;
   onRotate90: () => void;
   transformDisabled: boolean;
   onMatchRotation: () => void;
@@ -166,6 +170,8 @@ export interface TaxonomyBundle {
   setOpen: Dispatch<SetStateAction<boolean>>;
 }
 
-// The Text tab's Suggest fonts button: idle, waiting on the Python text service, or why the
-// last ask came back empty-handed ('none': no usable fonts; 'failed': no answer at all).
-export type SuggestFontsState = 'idle' | 'busy' | 'none' | 'failed';
+// The Text tab's Suggest fonts button: idle, waiting on the Python text service, or how
+// the ask ended. 'done' (fonts listed) and 'none' (the service had no usable fonts) lock
+// the button until another artwork is opened — asking again about the same design only
+// spends a model call. 'failed' (no answer at all) leaves it free to retry.
+export type SuggestFontsState = 'idle' | 'busy' | 'done' | 'none' | 'failed';

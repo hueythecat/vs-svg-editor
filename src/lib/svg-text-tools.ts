@@ -104,6 +104,17 @@ export function markHiddenForService(svg: string, hidden: Iterable<string>): str
 }
 
 const DETECTED_SOURCE = 'data-detected-source';
+// The face the service matched to the item and its runners-up, as "Family weight" entries
+// joined with "|" — kept on the field itself so they survive undo and reordering.
+const FONT_CHOICES = 'data-font-choices';
+
+export type FontChoice = { family: string; weight: number };
+
+// "Lora 600" -> { family: 'Lora', weight: 600 }; a name with no weight is taken as 400.
+export function parseFontChoice(choice: string): FontChoice {
+  const m = /^(.*?)\s+(\d{3})$/.exec(choice.trim());
+  return m ? { family: m[1], weight: Number(m[2]) } : { family: choice.trim(), weight: 400 };
+}
 
 // "'Barlow Condensed', sans-serif" -> "Barlow Condensed". The Text tab's font list holds
 // bare family names, and a stack would never match one of them.
@@ -137,6 +148,11 @@ export function liftEditableText(
     text.setAttribute('data-name', item.text);
     // Ties the field to its hidden outlines, for Show original and Not text.
     text.setAttribute(DETECTED_SOURCE, item.id);
+    if (item.font) {
+      const choices = [`${item.font.family} ${item.font.weight}`, ...item.font.alternatives]
+        .filter((c, i, all) => c.trim() && all.indexOf(c) === i);
+      text.setAttribute(FONT_CHOICES, choices.join('|'));
+    }
     const family = firstFamily(text.getAttribute('font-family') ?? '');
     if (family) text.setAttribute('font-family', family);
     // Flat text is re-anchored on its centre, which is what every other field in the
@@ -157,12 +173,16 @@ export function liftEditableText(
 }
 
 // The service's item id behind a lifted text field, or null for any other layer.
-export function detectedSourceOf(svg: string, textId: string): { source: string; showingOriginal: boolean } | null {
+// fontChoices: the service's match first, then its alternatives; empty when it had none.
+export function detectedSourceOf(
+  svg: string, textId: string,
+): { source: string; showingOriginal: boolean; fontChoices: FontChoice[] } | null {
   const doc = new DOMParser().parseFromString(svg, 'image/svg+xml');
   const text = doc.getElementById(textId);
   const source = text?.getAttribute(DETECTED_SOURCE);
   if (!text || !source) return null;
-  return { source, showingOriginal: text.getAttribute('display') === 'none' };
+  const fontChoices = (text.getAttribute(FONT_CHOICES) ?? '').split('|').filter(Boolean).map(parseFontChoice);
+  return { source, showingOriginal: text.getAttribute('display') === 'none', fontChoices };
 }
 
 const originalsOf = (doc: Document, source: string) =>

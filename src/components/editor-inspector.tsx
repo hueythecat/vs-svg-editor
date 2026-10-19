@@ -1,10 +1,11 @@
-import React, { RefObject, useCallback, useState } from 'react';
+import React, { RefObject, useCallback, useEffect, useState } from 'react';
 
 import type { SelectedTextProps } from '@/lib/svg-utils';
 import {
-  BG_PALETTE, C, FONT_STACK, MONO_STACK, sectionLabelStyle,
+  BG_PALETTE, C, FONT_STACK, MONO_STACK, inputStyle, sectionLabelStyle,
 } from '@/lib/design-tokens';
 import { useT } from '@/i18n/provider';
+import type { FontChoice } from '@/lib/svg-text-tools';
 import type { CustomiseBundle, DocBundle, SuggestFontsState, TextLayerAttrs } from './editor-types';
 import { ColorSwatchRow } from './color-swatches';
 import { CustomiseButton } from './editor-ai-panel';
@@ -113,6 +114,65 @@ function ActionButton({
 
 // Both action rows wrap: six buttons at their natural width do not fit one 272px column
 // in every language.
+// One axis of the position fields. Typed into freely and applied on Enter or when focus
+// leaves, not per keystroke: each apply is an undo step, and "12" on the way to "120"
+// would otherwise jump the artwork about. Escape puts back the measured value.
+const fmtPos = (v: number) => String(Math.round(v * 10) / 10);
+
+function PositionField({ axis, value, onCommit }: {
+  axis: 'x' | 'y';
+  value: number;
+  onCommit: (v: number) => void;
+}) {
+  const [draft, setDraft] = useState(fmtPos(value));
+  // Follows the artwork when it moves some other way — a drag, Center, undo.
+  useEffect(() => { setDraft(fmtPos(value)); }, [value]);
+  const commit = () => {
+    const v = Number(draft);
+    if (draft.trim() === '' || !Number.isFinite(v)) { setDraft(fmtPos(value)); return; }
+    if (fmtPos(v) !== fmtPos(value)) onCommit(v);
+  };
+  return (
+    <label style={{ flex: 1, minWidth: 0, display: 'flex', alignItems: 'center', gap: 6 }}>
+      <span style={{ fontSize: 11, fontWeight: 600, color: C.textMuted, fontFamily: FONT_STACK, width: 10 }}>
+        {axis.toUpperCase()}
+      </span>
+      <input
+        className="ed-input"
+        type="number"
+        step="any"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') { commit(); (e.target as HTMLInputElement).blur(); }
+          if (e.key === 'Escape') { setDraft(fmtPos(value)); (e.target as HTMLInputElement).blur(); }
+        }}
+        style={{ ...inputStyle, minWidth: 0 }}
+      />
+    </label>
+  );
+}
+
+// X and Y of the selection's top-left corner, in the artwork's own units. Shared by the
+// Tools and Text tabs: a selected text field opens on the Text tab, and placing text is
+// the main reason to type a position, so it is there too.
+export function PositionFields({ position, onSetPosition }: {
+  position: { x: number; y: number };
+  onSetPosition: (target: { x?: number; y?: number }) => void;
+}) {
+  const t = useT();
+  return (
+    <div style={{ marginBottom: 12 }}>
+      <div style={{ ...sectionLabelStyle, marginBottom: 7 }} title={t('panel.positionTitle')}>{t('panel.position')}</div>
+      <div style={{ display: 'flex', gap: 10 }}>
+        <PositionField axis="x" value={position.x} onCommit={(x) => onSetPosition({ x })} />
+        <PositionField axis="y" value={position.y} onCommit={(y) => onSetPosition({ y })} />
+      </div>
+    </div>
+  );
+}
+
 const actionRow: React.CSSProperties = {
   display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 12,
 };
@@ -222,6 +282,8 @@ export const ToolsTab = React.memo(function ToolsTab({
         </ActionButton>
       </div>
 
+      {doc.position && <PositionFields position={doc.position} onSetPosition={doc.onSetPosition} />}
+
       {/* The one AI action, directly under Arrange — it acts on the whole artwork, like
           Center does, rather than on the selection the Colours block below edits. */}
       <div style={{ marginBottom: 18 }}>
@@ -229,27 +291,25 @@ export const ToolsTab = React.memo(function ToolsTab({
       </div>
 
       {/* ── Workspace ──────────────────────────────────────────────────────
-          How big the board is drawn, from its default size up to the working area
-          between the panels. A view setting: the artwork and its export are unchanged,
-          so it has no place in History. */}
+          Whether the board fills the working area between the panels (on, the default)
+          or keeps its default size. A view setting: the artwork and its export are
+          unchanged, so it has no place in History. */}
       <div style={{ ...sectionLabelStyle, marginBottom: 9 }}>{t('panel.workspace')}</div>
-      <div style={{ marginBottom: 18 }}>
+      <label
+        title={t('panel.canvasSizeTitle')}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 8, marginBottom: 18,
+          fontSize: 12.5, color: C.textSecondary, fontFamily: FONT_STACK, cursor: 'pointer',
+        }}
+      >
         <input
-          type="range"
-          min={0}
-          max={100}
-          step={1}
-          value={Math.round(doc.workspaceScale * 100)}
-          onChange={(e) => doc.onSetWorkspaceScale(Number(e.target.value) / 100)}
-          title={t('panel.canvasSizeTitle')}
-          aria-label={t('panel.canvasSizeTitle')}
-          style={{ width: '100%', accentColor: C.accent, margin: 0, display: 'block' }}
+          type="checkbox"
+          checked={doc.workspaceFull}
+          onChange={(e) => doc.onSetWorkspaceFull(e.target.checked)}
+          style={{ accentColor: C.accent, width: 14, height: 14, margin: 0, cursor: 'pointer' }}
         />
-        <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 5, fontSize: 11, color: C.textFaint }}>
-          <span>{t('panel.canvasSizeDefault')}</span>
-          <span>{t('panel.canvasSizeMax')}</span>
-        </div>
-      </div>
+        {t('panel.workspaceFill')}
+      </label>
 
       {/* ── Colours ────────────────────────────────────────────────────────
           One headline over the whole colour surface: which layer it acts on is the
@@ -347,6 +407,7 @@ export const TextTab = React.memo(function TextTab({
   textProps, textContentRef, usedFonts, extraFonts,
   onUpdateTextLayer, onAddTextLayer,
   detected, onShowDetectedOriginal, onRejectDetected, onSuggestFonts, suggestFontsState, textPalette,
+  position, onSetPosition,
 }: {
   // Never null: with a text layer selected these are its live attributes, with nothing
   // selected they are the draft Add text layer will use. The tab has no empty state —
@@ -359,12 +420,15 @@ export const TextTab = React.memo(function TextTab({
   onAddTextLayer: () => void;
   // Set when the selected layer is text the Python text service put in place of outlines:
   // whether it wants a second look, and whether the outlines are showing instead of it.
-  detected: { review?: 'font' | 'text'; showingOriginal: boolean } | null;
+  detected: { review?: 'font' | 'text'; showingOriginal: boolean; fontChoices: FontChoice[] } | null;
   onShowDetectedOriginal: (original: boolean) => void;
   onRejectDetected: () => void;
   onSuggestFonts?: () => void;
   suggestFontsState: SuggestFontsState;
   textPalette: readonly string[];
+  // Set while a layer is selected; the draft for new text has no position yet.
+  position: { x: number; y: number } | null;
+  onSetPosition: (target: { x?: number; y?: number }) => void;
 }) {
   const t = useT();
   return (
@@ -417,7 +481,10 @@ export const TextTab = React.memo(function TextTab({
         onSuggestFonts={onSuggestFonts}
         suggestFontsState={suggestFontsState}
         palette={textPalette}
+        fontChoices={detected?.fontChoices}
       />
+
+      {position && <PositionFields position={position} onSetPosition={onSetPosition} />}
 
       {/* Commits the draft above when nothing is selected; adds a fresh layer from those
           same values when something is. */}

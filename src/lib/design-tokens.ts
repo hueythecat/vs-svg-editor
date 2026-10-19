@@ -196,6 +196,10 @@ export const EDITOR_CSS = `
   .ed-star { transition: color .12s, transform .12s; }
   .ed-star:hover { transform: scale(1.12); }
   .ed-dev-card:hover { border-color: ${C.devTextDim}; }
+  /* A pinned card's trash can: there only while the card is hovered, or when it is the
+     keyboard focus, so it never sits over every thumbnail in the list. */
+  .ed-dev-pin .ed-dev-pin-trash { opacity: 0; transition: opacity .12s; }
+  .ed-dev-pin:hover .ed-dev-pin-trash, .ed-dev-pin .ed-dev-pin-trash:focus-visible { opacity: 1; }
   .ed-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
   .ed-scroll::-webkit-scrollbar-thumb { background: ${C.borderInput}; border-radius: 4px; }
   .ed-scroll::-webkit-scrollbar-track { background: transparent; }
