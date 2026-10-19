@@ -210,7 +210,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   const [fontSuggestion, setFontSuggestion]   = useState<string | null>(null);
   const [suggestedFontName, setSuggestedFontName] = useState<string | null>(null);
   // The Font dropdown's lists and the stylesheet loader (use-google-fonts.ts).
-  const { usedFonts, extraFonts, loadGoogleFontLink, addGoogleFont, addUsedFont, resetFonts } = useGoogleFonts();
+  const { usedFonts, extraFonts, loadGoogleFontLink, addGoogleFont, addUsedFont, resetFonts, demoteUsedFonts } = useGoogleFonts();
   const [customiseFonts, setCustomiseFonts]   = useState<string[]>([]);
   // What the last text-detection call cost, shown under "This image" in the AI tools.
   const [callStats, setCallStats]             = useState<TextDetectStats | null>(null);
@@ -2698,11 +2698,11 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     // The revert undoes the customise pass, so the pill has to go back to being
     // runnable — it disables itself once done, and would otherwise stay stuck on
     // "Customised" over artwork that no longer carries any of its output. The font
-    // suggestions went with that run, so they go too.
+    // suggestions stay: they describe the artwork, not the run, and Suggest fonts is
+    // locked once it has answered for this artwork.
     setCustomiseDone(false);
-    setCustomiseFonts([]);
     setCallStats(null);
-    resetFonts();
+    demoteUsedFonts();
     setAiError(null);
     // And everything else a pass leaves behind. The region boxes and their dots address
     // shapes by position in the document the detection saw; over the reverted document
@@ -2715,7 +2715,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     setPreviewRemovedId(null);
     setExpandDepth(0);
     setEditingTextId(null);
-  }, [activeSvg, defaultHiddenLayers, resetFonts]);
+  }, [activeSvg, defaultHiddenLayers, demoteUsedFonts]);
 
   const cancelReset = useCallback(() => setResetConfirmOpen(false), []);
 

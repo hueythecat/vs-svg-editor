@@ -52,5 +52,12 @@ export function useGoogleFonts() {
     setExtraFonts([]);
   }, []);
 
-  return { usedFonts, extraFonts, loadGoogleFontLink, addGoogleFont, addUsedFont, resetFonts };
+  // Revert takes the re-created text away but not what was learned about the artwork:
+  // the faces it was set in go back to being suggestions, beside the ones already there.
+  const demoteUsedFonts = useCallback(() => {
+    setExtraFonts((extra) => [...usedFonts.filter((f) => !extra.includes(f)), ...extra]);
+    setUsedFonts([]);
+  }, [usedFonts]);
+
+  return { usedFonts, extraFonts, loadGoogleFontLink, addGoogleFont, addUsedFont, resetFonts, demoteUsedFonts };
 }
