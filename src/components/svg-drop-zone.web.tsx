@@ -53,7 +53,7 @@ import { LLM_OPTIONS, LOCAL_MODELS, OPUS_MODEL, TEXT_DETECT_OPTIONS } from './ed
 import { detectSvgText, type DetectedTextRegion, type TextDetectStats } from '@/lib/svg-text-detect';
 import { type Pin, MAX_PINNED_SVG_CHARS, addPin, getPins, removePin } from '@/lib/dev-pins';
 import {
-  detectWithTextTools, detectedSourceOf, fetchDesignFonts, liftEditableText, markHiddenForService,
+  applyFontUpgrades, detectWithTextTools, detectedSourceOf, fetchDesignFonts, liftEditableText, markHiddenForService,
   rejectDetected, servedGoogleFamilies, showDetectedOriginal,
 } from '@/lib/svg-text-tools';
 import { EditorControlPanel, type ControlTab } from './editor-control-panel';
@@ -263,6 +263,10 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   // Bumped whenever a different artwork is opened. Suggest fonts compares it before
   // applying an answer, which can arrive after the user has moved on.
   const artworkGenRef = useRef(0);
+  // What the last Python-text-service run stored its items' outlines under, and the words it
+  // read for each item: Suggest fonts sends the name so guessed fonts can be retried, and
+  // swaps a better face only onto a field whose words are still these.
+  const textToolsOutlinesRef = useRef<{ name: string; texts: Map<string, string> } | null>(null);
   // The Text tab's Suggest fonts button: idle, asking, or how the last ask ended.
   const [suggestFontsState, setSuggestFontsState] = useState<SuggestFontsState>('idle');
   // The regions the last DOM-regions run returned, boxed and numbered on the canvas like
@@ -493,6 +497,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       const { content, layers } = parseSvg(cleaned);
       textToolsRunRef.current++;
       artworkGenRef.current++;
+      textToolsOutlinesRef.current = null;
       setSuggestFontsState('idle');
       setActiveSvg((prev) => { revokePrev(prev); return { name, src, content, originalContent: content, layers, objectUrl, edit }; });
       setTextDetectBoxes(NO_REGION_BOXES);
@@ -1985,6 +1990,9 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
           return;
         }
         snapshotForUndo(activeSvg.content, activeSvg.layers);
+        textToolsOutlinesRef.current = result.outlines
+          ? { name: result.outlines, texts: new Map(result.items.map((it) => [it.id, it.text])) }
+          : null;
         for (const it of result.items) if (it.font) addUsedFont(it.font.family, it.font.weight);
         const doc = new DOMParser().parseFromString(lifted.content, 'image/svg+xml');
         const kept = pruneMissingLayers(doc, activeSvg.layers);
@@ -2304,6 +2312,9 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
   // listed in the Font list and the AI panel, the first becoming the default for text
   // added afterwards. Any the service says are already in the artwork lead, since those
   // are the safest pick; names Google Fonts doesn't serve are dropped.
+  // The artwork as it is now, for an answer that arrives after the user kept editing.
+  const latestSvgRef = useRef(activeSvg);
+  latestSvgRef.current = activeSvg;
   const suggestFonts = useCallback(async () => {
     if (!activeSvg) return;
     // Once per artwork: applyParsed sets it back to idle when a new one opens.
@@ -2312,9 +2323,36 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     const gen = artworkGenRef.current;
     setSuggestFontsState('busy');
     console.log('[text-tools] invoking /api/text-tools?op=design-fonts');
-    const design = await fetchDesignFonts(markHiddenForService(activeSvg.content, hiddenLayers));
+    const stored = textToolsOutlinesRef.current;
+    const answer = await fetchDesignFonts(markHiddenForService(activeSvg.content, hiddenLayers), stored?.name);
     if (artworkGenRef.current !== gen) return;
-    if (design === null) { setSuggestFontsState('failed'); return; }
+    if (answer === null) { setSuggestFontsState('failed'); return; }
+    // Debug: each guessed field, what the suggested fonts scored on its shape and the verdict.
+    if (!stored) console.log('[text-tools] font retry: no stored outlines (Customise not run on this artwork)');
+    for (const r of answer.fontRetries) {
+      console.log(`[text-tools] font retry ${r.id} "${r.text}": guess ${r.was.family} ${r.was.weight} ` +
+        `(${r.was.score ?? '-'}) -> ${r.verdict}\n  ` +
+        (r.tried.map((t) => `${t.family} ${t.weight} ${t.score}`).join(', ') || '(none scored)') +
+        (r.missing.length ? `\n  not downloadable: ${r.missing.join(', ')}` : ''));
+    }
+    // Fields whose font was a guess and that a suggested face fits clearly better by shape
+    // take that face, as one undo step — unless the user has changed their words or font.
+    const now = latestSvgRef.current;
+    if (stored && now && answer.fontUpgrades.length) {
+      const { content, changed, settled } = applyFontUpgrades(now.content, answer.fontUpgrades, stored.texts);
+      if (changed.length) {
+        console.log('[text-tools] better fonts: ' + answer.fontUpgrades.map((u) =>
+          `${u.id} ${u.was.family} ${u.was.weight} (${u.was.score ?? '-'}) -> ${u.family} ${u.weight} (${u.score})`).join('; '));
+        snapshotForUndo(now.content, now.layers);
+        for (const u of answer.fontUpgrades) addGoogleFont(u.family, u.weight);
+        // No longer a guess: the face now matches well enough not to need a look. A single
+        // letter keeps its flag, one glyph being too little to be sure.
+        const layers = now.layers.map((l) =>
+          settled.includes(l.id) && l.review === 'font' ? { id: l.id, label: l.label } : l);
+        setActiveSvg((prev) => (prev ? { ...prev, content, layers } : null));
+      }
+    }
+    const design = answer.designFonts;
     const sorted = [...design].sort((a, b) => Number(b.matchedInDesign) - Number(a.matchedInDesign));
     if (sorted.length) {
       console.log('[text-tools] design fonts: ' + sorted.map((f) =>
@@ -2331,7 +2369,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     setCustomiseFonts(fonts);
     setTextForm((f) => ({ ...f, font: fonts[0] }));
     setSuggestFontsState('done');
-  }, [activeSvg, hiddenLayers, addGoogleFont, suggestFontsState]);
+  }, [activeSvg, hiddenLayers, addGoogleFont, suggestFontsState, snapshotForUndo]);
 
   // ── Python text service items: Show original / Not text (Text tab) ─────────
 

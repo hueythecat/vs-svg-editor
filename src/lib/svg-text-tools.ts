@@ -43,6 +43,28 @@ export type TextToolsResult = {
   editableSvg: string;
   rejected: string[];
   timing: Record<string, number>;
+  // The name the service stored the items' outlines under, for /design-fonts to retry the
+  // guessed fonts against its suggestions (fetchDesignFonts). Null when nothing was stored.
+  outlines?: string | null;
+};
+// A better face for an item whose font was a guess, found among the design-font suggestions
+// by shape. `was` is what the service matched at /detect, so the field can be checked as
+// untouched before it is swapped.
+export type TextToolsFontUpgrade = {
+  id: string;                        // the item id, "t1"
+  family: string; weight: number; score: number;
+  category: string | null;
+  was: { family: string; weight: number; score: number | null };
+  lowConfidence?: boolean;           // still a guess (a single letter): keep its review flag
+};
+// Debug only: how each suggested family scored on one guessed item, best first, and why it
+// was or wasn't upgraded. `missing`: suggested families the service couldn't download.
+export type TextToolsFontRetry = {
+  id: string; text: string;
+  was: { family: string; weight: number; score: number | null };
+  tried: { family: string; weight: number; score: number }[];
+  missing: string[];
+  verdict: string;
 };
 
 // fresh: skip the service's cache and re-run the model (dev only — the proxy ignores it
@@ -64,20 +86,37 @@ export async function detectWithTextTools(svg: string, filename: string, fresh =
 }
 
 /** The design-wide font suggestions: one short model call of its own (/design-fonts),
- *  made only when the user asks for them. Null when the service could not be asked or
- *  failed; [] when it answered with none. */
-export async function fetchDesignFonts(svg: string): Promise<TextToolsDesignFont[] | null> {
+ *  made only when the user asks for them. With `outlines` (TextToolsResult.outlines) the
+ *  service also retries the items whose font was a guess against those suggestions, and
+ *  lists the clearly better faces in fontUpgrades. Null when the service could not be
+ *  asked or failed; empty lists when it answered with none. */
+export async function fetchDesignFonts(
+  svg: string, outlines?: string | null,
+): Promise<{
+  designFonts: TextToolsDesignFont[]; fontUpgrades: TextToolsFontUpgrade[]; fontRetries: TextToolsFontRetry[];
+} | null> {
   try {
-    const res = await fetch('/api/text-tools?op=design-fonts', {
+    const query = outlines ? `&outlines=${encodeURIComponent(outlines)}` : '';
+    const res = await fetch(`/api/text-tools?op=design-fonts${query}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ svg }),
     });
     if (!res.ok) return null;
-    const body = await res.json() as { designFonts?: unknown };
-    return Array.isArray(body.designFonts)
-      ? body.designFonts.filter((f): f is TextToolsDesignFont => typeof f?.family === 'string' && f.family !== '')
-      : [];
+    const body = await res.json() as { designFonts?: unknown; fontUpgrades?: unknown; fontRetries?: unknown };
+    return {
+      designFonts: Array.isArray(body.designFonts)
+        ? body.designFonts.filter((f): f is TextToolsDesignFont => typeof f?.family === 'string' && f.family !== '')
+        : [],
+      fontUpgrades: Array.isArray(body.fontUpgrades)
+        ? body.fontUpgrades.filter((u): u is TextToolsFontUpgrade =>
+          typeof u?.id === 'string' && typeof u?.family === 'string' && u.family !== '' &&
+          typeof u?.weight === 'number' && typeof u?.was?.family === 'string')
+        : [],
+      fontRetries: Array.isArray(body.fontRetries)
+        ? body.fontRetries.filter((r): r is TextToolsFontRetry => typeof r?.id === 'string' && Array.isArray(r?.tried))
+        : [],
+    };
   } catch {
     return null;
   }
@@ -189,6 +228,38 @@ export function detectedSourceOf(
 
 const originalsOf = (doc: Document, source: string) =>
   Array.from(doc.querySelectorAll(`[data-detected-id="${CSS.escape(source)}"]`));
+
+/** Put each upgrade's face on its lifted field, but only on a field the user has left alone:
+ *  the words still the ones the service read (`texts`, item id -> text) and the face still
+ *  the one it matched. The new face leads the field's font choices, the old one stays among
+ *  them. Returns the document, the ids of the fields changed (none: `svg` unchanged) and of
+ *  those no longer a guess (`settled`: a single letter stays one). */
+export function applyFontUpgrades(
+  svg: string, upgrades: TextToolsFontUpgrade[], texts: ReadonlyMap<string, string>,
+): { content: string; changed: string[]; settled: string[] } {
+  if (upgrades.length === 0) return { content: svg, changed: [], settled: [] };
+  const doc = new DOMParser().parseFromString(svg, 'image/svg+xml');
+  if (doc.querySelector('parsererror')) return { content: svg, changed: [], settled: [] };
+  const changed: string[] = [], settled: string[] = [];
+  for (const up of upgrades) {
+    const text = doc.querySelector(`text[${DETECTED_SOURCE}="${CSS.escape(up.id)}"]`);
+    const read = texts.get(up.id);
+    if (!text?.id || read === undefined) continue;
+    if ((text.textContent ?? '').trim() !== read.trim()) continue;
+    if (firstFamily(text.getAttribute('font-family') ?? '') !== up.was.family) continue;
+    if (Number(text.getAttribute('font-weight') ?? 400) !== up.was.weight) continue;
+    text.setAttribute('font-family', up.family);
+    text.setAttribute('font-weight', String(up.weight));
+    const choices = [`${up.family} ${up.weight}`, ...(text.getAttribute(FONT_CHOICES) ?? '').split('|')]
+      .filter((c, i, all) => c.trim() && all.indexOf(c) === i);
+    text.setAttribute(FONT_CHOICES, choices.join('|'));
+    changed.push(text.id);
+    if (!up.lowConfidence) settled.push(text.id);
+  }
+  return changed.length
+    ? { content: new XMLSerializer().serializeToString(doc.documentElement), changed, settled }
+    : { content: svg, changed, settled };
+}
 
 /** Swap a lifted field for the outlines it replaced, or back. Written into the SVG, like
  *  the service's own hiding, so it exports the way it looks. */

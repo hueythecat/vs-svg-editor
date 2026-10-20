@@ -67,6 +67,11 @@ export async function POST(request: Request): Promise<Response> {
   // asks for it when its own AI-response cache is switched off; a production build never
   // passes it on, so the public endpoint can't be made to bypass the cache.
   const fresh = op === 'detect' && params.get('fresh') === '1' && !IS_PRODUCTION_UI;
+  // ?outlines= names the outlines /detect stored for this artwork (its result's `outlines`),
+  // so /design-fonts can retry the guessed fonts against its suggestions. Passed on only in
+  // the shape the service gives it.
+  const outlines = op === 'design-fonts' ? params.get('outlines') ?? '' : '';
+  const query = fresh ? '?fresh=1' : /^(\d{5,20}|file)_[0-9a-f]{12}$/.test(outlines) ? `?outlines=${outlines}` : '';
 
   let svg: unknown, filename: unknown;
   try {
@@ -81,10 +86,10 @@ export async function POST(request: Request): Promise<Response> {
     typeof filename === 'string' && filename ? filename : 'design.svg');
 
   const started = Date.now();
-  console.log(`[text-tools] ${SVGTEXT_URL}/${op}${fresh ? '?fresh=1' : ''}: ${svg.length} chars`);
+  console.log(`[text-tools] ${SVGTEXT_URL}/${op}${query}: ${svg.length} chars`);
   let res: Response;
   try {
-    res = await fetch(`${SVGTEXT_URL}/${op}${fresh ? '?fresh=1' : ''}`, {
+    res = await fetch(`${SVGTEXT_URL}/${op}${query}`, {
       method: 'POST', body: form, signal: AbortSignal.timeout(TIMEOUT_MS),
     });
   } catch (err) {
