@@ -53,7 +53,8 @@ export const TextControls = React.memo(function TextControls({
   const t = useT();
   const curve = selectedTextProps.curve ?? 0;
   // Suggest fonts runs once per artwork; a failed ask is the one outcome that can retry.
-  const locked = suggestFontsState === 'busy' || suggestFontsState === 'done' || suggestFontsState === 'none';
+  const busy = suggestFontsState === 'busy';
+  const locked = busy || suggestFontsState === 'done' || suggestFontsState === 'none';
 
   return (
     <div>
@@ -130,17 +131,29 @@ export const TextControls = React.memo(function TextControls({
               className="ed-ghost"
               onClick={onSuggestFonts}
               disabled={locked}
-              title={locked && suggestFontsState !== 'busy' ? t('text.suggestFontsLockedTitle') : undefined}
+              title={locked && !busy ? t('text.suggestFontsLockedTitle') : undefined}
+              aria-busy={busy}
               style={{
                 width: '100%', marginTop: 6,
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 7,
                 border: `1px solid ${C.borderInput}`, background: C.surface,
                 color: C.textSecondary, fontSize: 12, fontFamily: FONT_STACK,
                 padding: '6px 10px', borderRadius: 8,
-                cursor: locked ? 'default' : 'pointer',
-                opacity: locked ? 0.6 : 1,
+                cursor: busy ? 'wait' : locked ? 'default' : 'pointer',
+                // Faded once it has answered; a call in flight stays bright with its spinner.
+                opacity: locked && !busy ? 0.6 : 1,
               }}
             >
-              {t(suggestFontsState === 'busy' ? 'text.suggestingFonts'
+              {busy && (
+                <span
+                  style={{
+                    width: 11, height: 11, borderRadius: '50%', flex: 'none',
+                    border: `2px solid ${C.borderInput}`, borderTopColor: C.accent,
+                    animation: 'ed-spin .8s linear infinite',
+                  }}
+                />
+              )}
+              {t(busy ? 'text.suggestingFonts'
                 : suggestFontsState === 'done' ? 'text.fontsSuggested' : 'text.suggestFonts')}
             </button>
             {(suggestFontsState === 'none' || suggestFontsState === 'failed') && (
