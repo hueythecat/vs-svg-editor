@@ -165,7 +165,7 @@ function AiLoadingOverlay({ message }: { message: string }) {
 }
 
 export const CanvasStage = React.memo(function CanvasStage({
-  svgCanvasRef, overlayRef, sizeBadgeRef, showSizeBadge, hoverBadgeRef,
+  svgCanvasRef, overlayRef, sizeBadgeRef, showSizeBadge, hoverBadgeRef, marqueeRef,
   onCanvasClick, onCanvasMouseDown, onCanvasDoubleClick, onCanvasMouseMove, onCanvasMouseLeave,
   aiLoading, aiStatusMsg,
   isLoading, activeSvg, workspaceFull, pinned, onTogglePin,
@@ -180,6 +180,8 @@ export const CanvasStage = React.memo(function CanvasStage({
   sizeBadgeRef: React.RefObject<HTMLSpanElement | null>;
   showSizeBadge: boolean;
   hoverBadgeRef: React.RefObject<HTMLSpanElement | null>;
+  // The click-drag selection box. Placed and shown by the parent while a drag runs.
+  marqueeRef: React.RefObject<HTMLDivElement | null>;
   onCanvasClick: (e: React.MouseEvent<HTMLDivElement>) => void;
   onCanvasMouseDown: (e: React.MouseEvent<HTMLDivElement>) => void;
   onCanvasDoubleClick: (e: React.MouseEvent<HTMLDivElement>) => void;
@@ -290,6 +292,15 @@ export const CanvasStage = React.memo(function CanvasStage({
       </span>
 
       {aiLoading && <AiLoadingOverlay message={aiStatusMsg} />}
+
+      <div
+        ref={marqueeRef}
+        aria-hidden
+        style={{
+          position: 'absolute', display: 'none', zIndex: 15, pointerEvents: 'none',
+          border: `1px solid ${C.accent}`, background: 'rgba(91,108,255,.08)', borderRadius: 2,
+        }}
+      />
 
       {isLoading && !activeSvg ? (
         <div

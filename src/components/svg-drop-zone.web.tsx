@@ -195,6 +195,12 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     startDist: number;                   // pointer distance from centre at grab (root units)
     baseTransforms: Record<string, string>;
   } | null>(null);
+  // A click-drag selection box started on empty board (or the locked background).
+  // additive: shift was held, so what the box takes joins the selection it started with.
+  const [marquee, setMarquee] = useState<{
+    startClientX: number; startClientY: number;
+    additive: boolean; base: Set<string>;
+  } | null>(null);
   // The layer under the pointer — drives the hover readout, nothing else.
   const [hoveredLayerId, setHoveredLayerId] = useState<string | null>(null);
   const [ratingOpen, setRatingOpen]   = useState(false);   // export satisfaction prompt
@@ -392,6 +398,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   const textEditorRef   = useRef<HTMLDivElement>(null);
   const sizeBadgeRef    = useRef<HTMLSpanElement>(null);
   const hoverBadgeRef   = useRef<HTMLSpanElement>(null);
+  const marqueeRef      = useRef<HTMLDivElement>(null);
   // Shown when an AI action is invoked on a gated asset (edit === 0).
   const [showUpsell, setShowUpsell] = useState(false);
   // Shown once a /<uuid> asset has loaded and turns out to be inside the customise
@@ -1340,6 +1347,15 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   // The board changes size under the selection when the workspace is scaled; the overlay
   // is positioned in screen pixels, so it is measured again against the resized board.
   useLayoutEffect(() => { positionOverlayRef.current(); }, [workspaceFull]);
+  // A text field changes size when its web font arrives, and after a Customise that is
+  // usually after the field was selected and framed — the frame then kept the fallback
+  // face's box (on one sample twice the width of the letter it held). Any font finishing
+  // loading re-measures it.
+  useEffect(() => {
+    const remeasure = () => positionOverlayRef.current();
+    document.fonts?.addEventListener('loadingdone', remeasure);
+    return () => document.fonts?.removeEventListener('loadingdone', remeasure);
+  }, []);
 
   useLayoutEffect(() => {
     positionSelectionOverlay();
@@ -1498,9 +1514,11 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   //   • grabbing anything else selects it first, then moves just that layer
   //   • shift is the selection-building gesture, so it never starts a drag
   //   • the background layer is locked, and the overlay's own handles opt out
+  //   • a press on empty space or the background starts a selection box instead,
+  //     shift or not — shift makes the box add to the selection
   // A gesture that never moved falls through to the click handler as a plain select.
   const handleCanvasMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    if (e.button !== 0 || e.shiftKey) return;
+    if (e.button !== 0) return;
     if (!activeSvg?.layers.length) return;
     if ((e.target as Element).closest?.('[data-sel-overlay]')) return;
     const svgEl = svgCanvasRef.current?.querySelector('svg') as SVGSVGElement | null;
@@ -1512,7 +1530,12 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     for (let el = e.target as Element | null; el && el !== (svgEl as Element); el = el.parentElement) {
       if (layerIds.has(el.id)) { hitId = el.id; hitEl = el; break; }
     }
-    if (!hitId || hitId === backgroundLayerId) return;
+    if (!hitId || hitId === backgroundLayerId) {
+      dragMovedRef.current = false;
+      setMarquee({ startClientX: e.clientX, startClientY: e.clientY, additive: e.shiftKey, base: selectedLayers });
+      return;
+    }
+    if (e.shiftKey) return;
 
     if (selectedLayers.has(hitId)) {
       beginLayerDrag(e, selectionIds);
@@ -1522,6 +1545,72 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       beginLayerDrag(e, [hitId]);
     }
   }, [activeSvg, backgroundLayerId, selectedLayers, selectionIds, selectOne, beginLayerDrag]);
+
+  // Global mouse listeners while a selection box is drawn. The box is drawn straight onto
+  // its node (no re-render per move); what it takes is worked out once, on release.
+  //
+  // A layer is taken when its whole on-screen box lies inside the selection box — touching
+  // it is not enough, or every drag across a busy design would sweep up the large shapes
+  // behind it. Hidden layers and the locked background are never taken, and a layer
+  // nested inside another that was taken goes with its parent rather than as a row of
+  // its own.
+  useEffect(() => {
+    if (!marquee) return;
+    const stage = svgCanvasRef.current;
+    const box = marqueeRef.current;
+    const svgEl = stage?.querySelector('svg') as SVGSVGElement | null;
+    if (!stage || !box || !svgEl) { setMarquee(null); return; }
+    const origin = stage.getBoundingClientRect();
+    let rect = { left: 0, top: 0, right: 0, bottom: 0 };
+
+    const onMove = (e: MouseEvent) => {
+      if (Math.abs(e.clientX - marquee.startClientX) > CLICK_SLOP_PX ||
+          Math.abs(e.clientY - marquee.startClientY) > CLICK_SLOP_PX) {
+        dragMovedRef.current = true;
+      }
+      if (!dragMovedRef.current) return;
+      rect = {
+        left: Math.min(e.clientX, marquee.startClientX), right: Math.max(e.clientX, marquee.startClientX),
+        top: Math.min(e.clientY, marquee.startClientY), bottom: Math.max(e.clientY, marquee.startClientY),
+      };
+      Object.assign(box.style, {
+        display: 'block',
+        left: `${rect.left - origin.left}px`, top: `${rect.top - origin.top}px`,
+        width: `${rect.right - rect.left}px`, height: `${rect.bottom - rect.top}px`,
+      });
+    };
+
+    const onUp = () => {
+      box.style.display = 'none';
+      setMarquee(null);
+      // A press that never moved is a plain click, and the click handler has it.
+      if (!dragMovedRef.current) return;
+      // The click that follows this mouseup must not re-select. It only fires when the
+      // release lands on the stage, so the flag is cleared after it either way.
+      setTimeout(() => { dragMovedRef.current = false; }, 0);
+      const taken: Element[] = [];
+      for (const layer of activeSvg?.layers ?? []) {
+        if (layer.id === backgroundLayerId || hiddenLayers.has(layer.id)) continue;
+        const el = svgEl.querySelector(`#${CSS.escape(layer.id)}`);
+        const r = el?.getBoundingClientRect();
+        if (!el || !r || (r.width === 0 && r.height === 0)) continue;
+        if (r.left >= rect.left && r.right <= rect.right && r.top >= rect.top && r.bottom <= rect.bottom) {
+          taken.push(el);
+        }
+      }
+      const ids = taken.filter((el) => !taken.some((other) => other !== el && other.contains(el))).map((el) => el.id);
+      const next = marquee.additive ? new Set([...marquee.base, ...ids]) : new Set(ids);
+      setSelectedLayers(next);
+      setSelectedLayer(ids[ids.length - 1] ?? (next.size ? [...next][next.size - 1] : null));
+    };
+
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [marquee, activeSvg?.layers, backgroundLayerId, hiddenLayers]);
 
   // Hover: the layer under the pointer, or null off the artwork. The same upward walk
   // handleCanvasMouseDown uses to decide what a press grabbed — one readout and one
@@ -3063,6 +3152,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
             svgCanvasRef={svgCanvasRef}
             overlayRef={overlayRef}
             sizeBadgeRef={sizeBadgeRef}
+            marqueeRef={marqueeRef}
             hoverBadgeRef={hoverBadgeRef}
             onCanvasClick={handleCanvasClick}
             onCanvasMouseDown={handleCanvasMouseDown}
