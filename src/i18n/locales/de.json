@@ -150,6 +150,8 @@
       "other": "%{model} · %{seconds} s · %{count} Bereiche"
     },
     "statsTokens": "%{input} Tokens ein · %{output} aus",
+    "statsService": "Dienst %{total} s · %{calls} Modellaufruf(e), insgesamt %{model} s",
+    "statsServiceCached": "aus dem Cache des Textdienstes (kein Modellaufruf)",
     "statsPhases": "Laden %{load} s · Lesen %{read} s · Schreiben %{write} s (%{rate} Tokens/s)",
     "selectedLayer": "Ausgewählte Ebene",
     "processing": "Wird verarbeitet…",

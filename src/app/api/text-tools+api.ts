@@ -71,7 +71,13 @@ export async function POST(request: Request): Promise<Response> {
   // so /design-fonts can retry the guessed fonts against its suggestions. Passed on only in
   // the shape the service gives it.
   const outlines = op === 'design-fonts' ? params.get('outlines') ?? '' : '';
-  const query = fresh ? '?fresh=1' : /^(\d{5,20}|file)_[0-9a-f]{12}$/.test(outlines) ? `?outlines=${outlines}` : '';
+  // ?local=1 asks for the service's local model instead of Claude (when Claude is its provider).
+  const parts = [
+    fresh && 'fresh=1',
+    /^(\d{5,20}|file)_[0-9a-f]{12}$/.test(outlines) && `outlines=${outlines}`,
+    params.get('local') === '1' && 'local=1',
+  ].filter(Boolean);
+  const query = parts.length ? `?${parts.join('&')}` : '';
 
   let svg: unknown, filename: unknown;
   try {
@@ -121,5 +127,8 @@ export async function POST(request: Request): Promise<Response> {
   // X-Cache is the service's own: "hit" served a stored result, "miss" ran the model.
   console.log(`[text-tools] answered in ${((Date.now() - started) / 1000).toFixed(1)}s, ${result.length} chars, ` +
     `cache ${res.headers.get('x-cache') ?? 'n/a'}`);
-  return new Response(result, { headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } });
+  // X-Cache passed on so the dev stats can say a result was stored, not a fresh model run.
+  return new Response(result, { headers: {
+    'Content-Type': 'application/json', 'Cache-Control': 'no-store', 'X-Cache': res.headers.get('x-cache') ?? 'n/a',
+  } });
 }

@@ -1975,9 +1975,15 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       console.log(`[text-tools] invoking /api/text-tools${fresh ? '?fresh=1' : ''}`);
       // Font suggestions are not part of this: they are their own model call, made only
       // when the Text tab's Suggest fonts button asks for them (suggestFonts below).
+      const started = performance.now();
       const detecting = detectWithTextTools(sent, activeSvg.name, fresh);
       try {
         const result = await detecting;
+        if (result.llm) {
+          console.log(`[text-tools] ${result.llm.provider} ${result.llm.model ?? ''}: ${result.llm.calls} call(s), ` +
+            `${result.llm.inputTokens} tokens in / ${result.llm.outputTokens} out, ${result.llm.callSeconds}s in calls` +
+            (result.cached ? ' (cached result)' : ''), result.timing);
+        }
         console.log(`[text-tools] ${result.items.length} item(s) in ${result.timing.total ?? '?'}s:`,
           result.items.map((it) => `${it.id} ${it.kind} "${it.text}" ${it.font ? `${it.font.family} ${it.font.weight}` : '-'}` +
             (it.source === 'fullpage' ? ' (check this is text)' : it.font?.lowConfidence ? ' (font is a guess)' : '')).join(', '));
@@ -2001,6 +2007,19 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
         // on the canvas and its position fields live, as if it had been clicked.
         selectOne(lifted.textLayers[0].id);
         setCustomiseDone(true);
+        const llm = result.llm;
+        setCallStats({
+          model: llm ? `${llm.model ?? llm.provider}${llm.provider === 'local' ? ' (local)' : ''}` : '?',
+          seconds: (performance.now() - started) / 1000,
+          regions: result.items.length,
+          inputTokens: llm?.calls ? llm.inputTokens : null,
+          outputTokens: llm?.calls ? llm.outputTokens : null,
+          phases: null,
+          service: {
+            totalSeconds: result.timing.total ?? 0, calls: llm?.calls ?? 0,
+            callSeconds: llm?.callSeconds ?? 0, cached: result.cached === true,
+          },
+        });
         void notifyCustomised();
       } catch (err) {
         console.error('[text-tools] failed:', err);
@@ -2327,6 +2346,11 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     const answer = await fetchDesignFonts(markHiddenForService(activeSvg.content, hiddenLayers), stored?.name);
     if (artworkGenRef.current !== gen) return;
     if (answer === null) { setSuggestFontsState('failed'); return; }
+    if (answer.llm) {
+      console.log(`[text-tools] design-fonts: ${answer.llm.provider} ${answer.llm.model ?? ''}, ` +
+        `${answer.llm.inputTokens} tokens in / ${answer.llm.outputTokens} out, ${answer.timing.total ?? '?'}s` +
+        (answer.cached ? ' (cached result)' : ''), answer.timing);
+    }
     // Debug: each guessed field, what the suggested fonts scored on its shape and the verdict.
     if (!stored) console.log('[text-tools] font retry: no stored outlines (Customise not run on this artwork)');
     for (const r of answer.fontRetries) {

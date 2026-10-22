@@ -495,6 +495,9 @@ export type TextDetectStats = {
   inputTokens: number | null;
   outputTokens: number | null;
   phases: { load: number; read: number; write: number } | null;   // seconds
+  // The Python text service's own account (ai-tools Customise): its whole run, the model
+  // calls inside it, and whether it was served from its cache (then nothing ran).
+  service?: { totalSeconds: number; calls: number; callSeconds: number; cached: boolean } | null;
 };
 
 // Joins the regions that make up one line of text into a single region.

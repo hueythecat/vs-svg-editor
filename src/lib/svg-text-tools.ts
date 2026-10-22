@@ -13,7 +13,8 @@ import type { SvgLayer } from '@/lib/svg-utils';
 export type TextToolsFont = {
   family: string; weight: number; category: string;
   score: number | null; lowConfidence: boolean;
-  alternatives: string[];            // e.g. ["Lora 600", "Merriweather 800"]
+  alternatives: string[];            // e.g. ["Lora 600", "Merriweather 800"]: up to 4, best first
+  alternativeScores?: number[];      // their match scores, same order
   visionSuggestion: string | null;
 };
 export type TextToolsItem = {
@@ -35,6 +36,15 @@ export type TextToolsDesignFont = {
   reason: string | null;
   matchedInDesign: boolean;
 };
+// Which model a text-service call used and what it cost. Copied from the original run when
+// the service answered from its cache (cached is then true and no model ran this time).
+export type TextToolsLlm = {
+  provider: 'claude' | 'local' | 'tesseract';
+  model: string | null;
+  calls: number;
+  inputTokens: number; outputTokens: number;
+  callSeconds: number;                 // summed across calls, which partly run in parallel
+};
 export type TextToolsResult = {
   items: TextToolsItem[];
   // Empty unless /detect is asked with ?fonts=1, which the editor never does — the Text
@@ -46,6 +56,8 @@ export type TextToolsResult = {
   // The name the service stored the items' outlines under, for /design-fonts to retry the
   // guessed fonts against its suggestions (fetchDesignFonts). Null when nothing was stored.
   outlines?: string | null;
+  llm?: TextToolsLlm;
+  cached?: boolean;                    // set here from X-Cache, not sent in the body
 };
 // A better face for an item whose font was a guess, found among the design-font suggestions
 // by shape. `was` is what the service matched at /detect, so the field can be checked as
@@ -82,7 +94,7 @@ export async function detectWithTextTools(svg: string, filename: string, fresh =
   if (!Array.isArray(body.items) || typeof body.editableSvg !== 'string') {
     throw new Error('The text service sent back something unexpected');
   }
-  return body;
+  return { ...body, cached: res.headers.get('x-cache') === 'hit' };
 }
 
 /** The design-wide font suggestions: one short model call of its own (/design-fonts),
@@ -94,6 +106,7 @@ export async function fetchDesignFonts(
   svg: string, outlines?: string | null,
 ): Promise<{
   designFonts: TextToolsDesignFont[]; fontUpgrades: TextToolsFontUpgrade[]; fontRetries: TextToolsFontRetry[];
+  llm: TextToolsLlm | null; timing: Record<string, number>; cached: boolean;
 } | null> {
   try {
     const query = outlines ? `&outlines=${encodeURIComponent(outlines)}` : '';
@@ -103,8 +116,12 @@ export async function fetchDesignFonts(
       body: JSON.stringify({ svg }),
     });
     if (!res.ok) return null;
-    const body = await res.json() as { designFonts?: unknown; fontUpgrades?: unknown; fontRetries?: unknown };
+    const body = await res.json() as {
+      designFonts?: unknown; fontUpgrades?: unknown; fontRetries?: unknown;
+      llm?: TextToolsLlm; timing?: Record<string, number>;
+    };
     return {
+      llm: body.llm ?? null, timing: body.timing ?? {}, cached: res.headers.get('x-cache') === 'hit',
       designFonts: Array.isArray(body.designFonts)
         ? body.designFonts.filter((f): f is TextToolsDesignFont => typeof f?.family === 'string' && f.family !== '')
         : [],
@@ -148,8 +165,10 @@ const DETECTED_SOURCE = 'data-detected-source';
 // The face the service matched to the item and its runners-up, as "Family weight" entries
 // joined with "|" — kept on the field itself so they survive undo and reordering.
 const FONT_CHOICES = 'data-font-choices';
+// Their match scores, in the same order and joined the same way ("" where there is none).
+const FONT_SCORES = 'data-font-scores';
 
-export type FontChoice = { family: string; weight: number };
+export type FontChoice = { family: string; weight: number; score?: number | null };
 
 // "Lora 600" -> { family: 'Lora', weight: 600 }; a name with no weight is taken as 400.
 export function parseFontChoice(choice: string): FontChoice {
@@ -190,9 +209,12 @@ export function liftEditableText(
     // Ties the field to its hidden outlines, for Show original and Not text.
     text.setAttribute(DETECTED_SOURCE, item.id);
     if (item.font) {
+      const scores = [item.font.score, ...item.font.alternatives.map((_, i) => item.font?.alternativeScores?.[i] ?? null)];
       const choices = [`${item.font.family} ${item.font.weight}`, ...item.font.alternatives]
-        .filter((c, i, all) => c.trim() && all.indexOf(c) === i);
-      text.setAttribute(FONT_CHOICES, choices.join('|'));
+        .map((c, i) => ({ c, s: scores[i] }))
+        .filter(({ c }, i, all) => c.trim() && all.findIndex((x) => x.c === c) === i);
+      text.setAttribute(FONT_CHOICES, choices.map((x) => x.c).join('|'));
+      text.setAttribute(FONT_SCORES, choices.map((x) => (x.s == null ? '' : String(x.s))).join('|'));
     }
     const family = firstFamily(text.getAttribute('font-family') ?? '');
     if (family) text.setAttribute('font-family', family);
@@ -222,7 +244,10 @@ export function detectedSourceOf(
   const text = doc.getElementById(textId);
   const source = text?.getAttribute(DETECTED_SOURCE);
   if (!text || !source) return null;
-  const fontChoices = (text.getAttribute(FONT_CHOICES) ?? '').split('|').filter(Boolean).map(parseFontChoice);
+  const scores = (text.getAttribute(FONT_SCORES) ?? '').split('|');
+  const fontChoices = (text.getAttribute(FONT_CHOICES) ?? '').split('|')
+    .map((c, i): FontChoice | null => (c ? { ...parseFontChoice(c), score: scores[i] ? Number(scores[i]) : null } : null))
+    .filter((c): c is FontChoice => c !== null);
   return { source, showingOriginal: text.getAttribute('display') === 'none', fontChoices };
 }
 
@@ -250,9 +275,12 @@ export function applyFontUpgrades(
     if (Number(text.getAttribute('font-weight') ?? 400) !== up.was.weight) continue;
     text.setAttribute('font-family', up.family);
     text.setAttribute('font-weight', String(up.weight));
-    const choices = [`${up.family} ${up.weight}`, ...(text.getAttribute(FONT_CHOICES) ?? '').split('|')]
-      .filter((c, i, all) => c.trim() && all.indexOf(c) === i);
-    text.setAttribute(FONT_CHOICES, choices.join('|'));
+    const had = (text.getAttribute(FONT_CHOICES) ?? '').split('|');
+    const hadScores = (text.getAttribute(FONT_SCORES) ?? '').split('|');
+    const choices = [{ c: `${up.family} ${up.weight}`, s: String(up.score) }, ...had.map((c, i) => ({ c, s: hadScores[i] ?? '' }))]
+      .filter(({ c }, i, all) => c.trim() && all.findIndex((x) => x.c === c) === i);
+    text.setAttribute(FONT_CHOICES, choices.map((x) => x.c).join('|'));
+    text.setAttribute(FONT_SCORES, choices.map((x) => x.s).join('|'));
     changed.push(text.id);
     if (!up.lowConfidence) settled.push(text.id);
   }

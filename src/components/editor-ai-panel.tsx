@@ -334,6 +334,17 @@ export const AiPanel = React.memo(function AiPanel({
                 })}
               </div>
             )}
+            {fonts.callStats.service && (
+              <div>
+                {fonts.callStats.service.cached
+                  ? t('ai.statsServiceCached')
+                  : t('ai.statsService', {
+                    total: fonts.callStats.service.totalSeconds.toFixed(1),
+                    calls: fonts.callStats.service.calls,
+                    model: fonts.callStats.service.callSeconds.toFixed(1),
+                  })}
+              </div>
+            )}
           </div>
         )}
       </div>

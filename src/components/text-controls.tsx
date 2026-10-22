@@ -97,11 +97,15 @@ export const TextControls = React.memo(function TextControls({
               artwork-wide groups because it is about this line alone. */}
           {fontChoices.length > 0 && (
             <optgroup label={t('text.groupMatches')}>
-              {fontChoices.map((f, i) => (
-                <option key={`choice-${f.family}`} value={f.family} style={{ fontFamily: f.family }}>
-                  {i === 0 ? t('text.matchedFont', { font: `${f.family} ${f.weight}` }) : `${f.family} ${f.weight}`}
-                </option>
-              ))}
+              {fontChoices.map((f, i) => {
+                // The shape-match score (0–1) beside each, so a near-tie with the match shows.
+                const name = `${f.family} ${f.weight}${f.score != null ? ` · ${f.score.toFixed(2)}` : ''}`;
+                return (
+                  <option key={`choice-${f.family}`} value={f.family} style={{ fontFamily: f.family }}>
+                    {i === 0 ? t('text.matchedFont', { font: name }) : name}
+                  </option>
+                );
+              })}
             </optgroup>
           )}
           {usedFonts.length > 0 && (
