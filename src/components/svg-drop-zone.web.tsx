@@ -253,7 +253,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   const selectLlmProvider = (p: LlmProvider) => { llmProviderRef.current = p; setLlmProvider(p); };
   // Which text-detection call Customise makes. Ref-mirrored like the provider, so
   // runCustomise reads the live choice without taking it as a dependency. Defaults to the
-  // svg-text service ("Qwen — AI MCP tools"), the one choice that applies its result.
+  // svg-text service ("Python text service"), the one choice that applies its result.
   const [textDetectMethod, setTextDetectMethod] = useState<TextDetectMethod>('ai-tools');
   const textDetectMethodRef = useRef<TextDetectMethod>('ai-tools');
   const selectTextDetectMethod = (m: TextDetectMethod) => { textDetectMethodRef.current = m; setTextDetectMethod(m); };
@@ -1972,11 +1972,14 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       // With the dev rail's Cache AI responses off, the service's own cache is skipped
       // too, so every Customise is a real model run.
       const fresh = SHOW_DEV_UI && !isAiCacheEnabled();
-      console.log(`[text-tools] invoking /api/text-tools${fresh ? '?fresh=1' : ''}`);
+      // A Local entry in the Model dropdown runs the service on its local qwen model; any
+      // other leaves it on the service's own default (Claude Sonnet, if so configured).
+      const local = !!localModel();
+      console.log(`[text-tools] invoking /api/text-tools${fresh ? ' fresh' : ''}${local ? ' local (qwen)' : ''}`);
       // Font suggestions are not part of this: they are their own model call, made only
       // when the Text tab's Suggest fonts button asks for them (suggestFonts below).
       const started = performance.now();
-      const detecting = detectWithTextTools(sent, activeSvg.name, fresh);
+      const detecting = detectWithTextTools(sent, activeSvg.name, fresh, local);
       try {
         const result = await detecting;
         if (result.llm) {
@@ -2341,9 +2344,10 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     if (activeSvg.edit === 0) { setShowUpsell(true); return; }
     const gen = artworkGenRef.current;
     setSuggestFontsState('busy');
-    console.log('[text-tools] invoking /api/text-tools?op=design-fonts');
+    const local = !!localModel();
+    console.log(`[text-tools] invoking /api/text-tools?op=design-fonts${local ? ' local (qwen)' : ''}`);
     const stored = textToolsOutlinesRef.current;
-    const answer = await fetchDesignFonts(markHiddenForService(activeSvg.content, hiddenLayers), stored?.name);
+    const answer = await fetchDesignFonts(markHiddenForService(activeSvg.content, hiddenLayers), stored?.name, local);
     if (artworkGenRef.current !== gen) return;
     if (answer === null) { setSuggestFontsState('failed'); return; }
     if (answer.llm) {

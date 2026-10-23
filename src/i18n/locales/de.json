@@ -138,7 +138,7 @@
     "textDetectCurrent": "Aktuell — Bild + Quelltext",
     "textDetectDomRegions": "Neu — DOM-Regionen (Debug)",
     "unavailable": "%{label} (nicht verfügbar)",
-    "textDetectAiTools": "Qwen — KI-MCP-Tools",
+    "textDetectAiTools": "Python-Textdienst",
     "thisImage": "Dieses Bild",
     "analysing": "Wird analysiert…",
     "applyFontGlobally": "Schriftart global anwenden",

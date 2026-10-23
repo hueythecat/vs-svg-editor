@@ -1,4 +1,4 @@
-// The "Qwen — AI MCP tools" Text detection choice. Forwards the artwork to the svg-text
+// The "Python text service" Text detection choice. Forwards the artwork to the svg-text
 // service (assets/ai-tools/INTEGRATION.md), which does its own geometry, asks qwen3-vl on
 // the vLLM server what each piece says, matches a Google Font per item and hands back an
 // editable SVG. Proxied rather than called from the browser so the service needs no CORS

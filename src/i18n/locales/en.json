@@ -138,7 +138,7 @@
     "textDetectCurrent": "Current — vision + source",
     "textDetectDomRegions": "New — DOM regions (debug)",
     "unavailable": "%{label} (unavailable)",
-    "textDetectAiTools": "Qwen — AI MCP tools",
+    "textDetectAiTools": "Python text service",
     "thisImage": "This image",
     "analysing": "Analysing…",
     "applyFontGlobally": "Apply font globally",

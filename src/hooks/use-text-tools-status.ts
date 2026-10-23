@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 
-// What GET /api/text-tools reports: whether the svg-text service behind the "Qwen — AI MCP
-// tools" choice is up, and whether the model server it reads text with is answering and
+// What GET /api/text-tools reports: whether the svg-text service behind the "Python text
+// service" choice is up, and whether the model server it reads text with is answering and
 // serving its model. modelUp is null when the service doesn't say which server it uses.
 export type TextToolsStatus = {
   host: string;

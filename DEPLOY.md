@@ -198,7 +198,7 @@ the edge — delete that block and reload Caddy. Under the dev server on a lapto
 the vLLM server can't take goes to Ollama (`OLLAMA_HOST`, default
 `http://127.0.0.1:11434`); a deployed build never tries Ollama and fails the call instead.
 
-**`/api/text-tools`** answers in production too. It is the "Qwen — AI MCP tools" choice in
+**`/api/text-tools`** answers in production too. It is the "Python text service" choice in
 the AI tools Text detection dropdown, and forwards the artwork to the svg-text service
 (`assets/ai-tools/INTEGRATION.md`) at `SVGTEXT_URL`, default `http://127.0.0.1:8010`. That
 service has to be running where `SVGTEXT_URL` points, with its own route to the vLLM server;

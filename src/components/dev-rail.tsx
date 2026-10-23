@@ -607,8 +607,8 @@ export function DevRail({
             </div>
           )}
 
-          {/* Python text service — the svg-text service behind "Qwen — AI MCP tools", and the model
-              server it reads with. Both have to be up: the service's own health check passes
+          {/* Python text service — the svg-text service behind the Text detection choice of
+              that name, and the model server it reads with. Both have to be up: the service's own health check passes
               without a model server, and every Customise then fails. */}
           {textTools && (() => {
             const ready = textTools.up && textTools.modelUp !== false;
@@ -620,7 +620,7 @@ export function DevRail({
                 </span>
                 <div
                   title={!textTools.up
-                    ? `Nothing is answering at ${textTools.host} — "Qwen — AI MCP tools" will fail.`
+                    ? `Nothing is answering at ${textTools.host} — "Python text service" will fail.`
                     : textTools.modelUp === false
                       ? `The service at ${textTools.host} is up, but its model server ${textTools.modelServer} is not answering${textTools.model ? ` with ${textTools.model}` : ''} — every Customise will fail. Is the ssh vs-svg tunnel up?`
                       : `The service at ${textTools.host} and its model server are answering.`}
