@@ -71,11 +71,13 @@ export async function POST(request: Request): Promise<Response> {
   // so /design-fonts can retry the guessed fonts against its suggestions. Passed on only in
   // the shape the service gives it.
   const outlines = op === 'design-fonts' ? params.get('outlines') ?? '' : '';
-  // ?local=1 asks for the service's local model instead of Claude (when Claude is its provider).
+  // ?local=1 / ?claude=1 pick the service's local model or Claude Sonnet for this request,
+  // whichever the service defaults to.
   const parts = [
     fresh && 'fresh=1',
     /^(\d{5,20}|file)_[0-9a-f]{12}$/.test(outlines) && `outlines=${outlines}`,
     params.get('local') === '1' && 'local=1',
+    params.get('claude') === '1' && 'claude=1',
   ].filter(Boolean);
   const query = parts.length ? `?${parts.join('&')}` : '';
 
