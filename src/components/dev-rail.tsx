@@ -8,7 +8,6 @@ import {
   setIgnoreCanCustomise as setIgnoreCanCustomiseFlag,
   setIgnoreCooldownPrompt, setIgnoreHasCustomised, getRecentVectors, pushRecentVector,
 } from '@/lib/dev-flags';
-import { useLocalLlmStatus } from '@/hooks/use-local-llm-status';
 import { useTextToolsStatus } from '@/hooks/use-text-tools-status';
 import { PADDLE_ENV, openPaddleCheckout, paddleConfigError } from '@/lib/paddle';
 import type { Pin } from '@/lib/dev-pins';
@@ -121,9 +120,8 @@ export function DevRail({
   const paddleError = paddleConfigError();
   const [buying, setBuying] = useState(false);
   const [buyStatus, setBuyStatus] = useState<string | null>(null);
-  // Where the "Local" models would be answered right now. Asked only while the rail is
-  // expanded; null until the first answer, and the section hides until then.
-  const localLlm = useLocalLlmStatus(open);
+  // The text service's health. Asked only while the rail is expanded; null until the
+  // first answer, and the section hides until then.
   const textTools = useTextToolsStatus(open);
 
   // The dropdown's contents come from the review host, not a hardcoded list, so it
@@ -575,44 +573,15 @@ export function DevRail({
             </label>
           </div>
 
-          {/* AWS LLM — whether the vLLM server the "Local" models try first is there, and
-              which of them it takes. On a laptop anything it doesn't take is answered by
-              Ollama; on a server there is nothing else. */}
-          {localLlm && (
-            <div style={{ padding: '0 12px 10px' }}>
-              <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: '.6px', color: C.devTextDim }}>
-                AWS LLM
-              </span>
-              <div
-                title={localLlm.up
-                  ? `vLLM at ${localLlm.host} is answering.${localLlm.fallback ? ' Local models it does not serve go to Ollama.' : ''}`
-                  : `Nothing is answering at ${localLlm.host}${localLlm.fallback ? ' — every local model goes to Ollama.' : ' — the local models will fail.'}`}
-                style={{ display: 'flex', alignItems: 'center', gap: 7, marginTop: 7 }}
-              >
-                <span
-                  style={{
-                    width: 7, height: 7, borderRadius: '50%', flex: 'none',
-                    background: localLlm.up && localLlm.models.length ? '#3fb950' : localLlm.up ? C.devAccent : C.danger,
-                  }}
-                />
-                <span style={{ fontSize: 10, color: C.devTextMuted }}>
-                  vLLM {localLlm.host.replace(/^(127\.0\.0\.1|localhost)/, '')} {localLlm.up ? 'connected' : localLlm.fallback ? 'down — using Ollama' : 'down'}
-                </span>
-              </div>
-              {localLlm.up && (
-                <span style={{ display: 'block', marginTop: 5, fontSize: 9, color: C.devTextFaint, lineHeight: 1.5, wordBreak: 'break-word' }}>
-                  {localLlm.models.length ? localLlm.models.join(', ') : `Serves none of the local models${localLlm.fallback ? ' — using Ollama' : ''}`}
-                </span>
-              )}
-            </div>
-          )}
-
           {/* Python text service — the svg-text service behind the Text detection choice of
-              that name, and the model server it reads with. Both have to be up: the service's own health check passes
-              without a model server, and every Customise then fails. */}
+              that name, from its own /health, which probes each model it can read text with
+              (no model call). Green when it and the model it runs by default both answer;
+              amber when it's up but that model isn't. */}
           {textTools && (() => {
-            const ready = textTools.up && textTools.modelUp !== false;
             const short = (url: string) => url.replace(/^https?:\/\//, '').replace(/^(127\.0\.0\.1|localhost)/, '');
+            const models = Object.entries(textTools.models ?? {});
+            const fallback = textTools.default ? textTools.models?.[textTools.default] : undefined;
+            const ready = textTools.up && fallback?.up !== false;
             return (
               <div style={{ padding: '0 12px 10px' }}>
                 <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: '.6px', color: C.devTextDim }}>
@@ -621,9 +590,9 @@ export function DevRail({
                 <div
                   title={!textTools.up
                     ? `Nothing is answering at ${textTools.host} — "Python text service" will fail.`
-                    : textTools.modelUp === false
-                      ? `The service at ${textTools.host} is up, but its model server ${textTools.modelServer} is not answering${textTools.model ? ` with ${textTools.model}` : ''} — every Customise will fail. Is the ssh vs-svg tunnel up?`
-                      : `The service at ${textTools.host} and its model server are answering.`}
+                    : ready
+                      ? `The service at ${textTools.host}${textTools.version ? ` (v${textTools.version})` : ''} is up, and its default model is answering.`
+                      : `The service at ${textTools.host} is up, but its default model (${textTools.default}) is not answering${fallback?.error ? `: ${fallback.error}` : ''}.`}
                   style={{ display: 'flex', alignItems: 'center', gap: 7, marginTop: 7 }}
                 >
                   <span
@@ -633,12 +602,19 @@ export function DevRail({
                     }}
                   />
                   <span style={{ fontSize: 10, color: C.devTextMuted }}>
-                    {short(textTools.host)} {!textTools.up ? 'down' : textTools.modelUp === false ? 'up — model server down' : 'connected'}
+                    {short(textTools.host)} {!textTools.up ? 'down' : ready ? 'connected' : `up — ${textTools.default} model down`}
                   </span>
                 </div>
-                {textTools.up && textTools.modelServer && (
-                  <span style={{ display: 'block', marginTop: 5, fontSize: 9, color: C.devTextFaint, lineHeight: 1.5, wordBreak: 'break-word' }}>
-                    {textTools.model ?? 'model'} via {short(textTools.modelServer)}{textTools.modelUp === false ? ' — not answering' : ''}
+                {/* Every model the service can use, its default first; hover for why one is down. */}
+                {textTools.up && models.length > 0 && (
+                  <span
+                    title={models.flatMap(([key, m]) => (m.error ? [`${key}: ${m.error}`] : [])).join('\n') || undefined}
+                    style={{ display: 'block', marginTop: 5, fontSize: 9, color: C.devTextFaint, lineHeight: 1.5, wordBreak: 'break-word' }}
+                  >
+                    {models
+                      .sort(([a], [b]) => Number(b === textTools.default) - Number(a === textTools.default))
+                      .map(([key, m]) => `${m.model ?? key} ${m.up ? 'up' : m.up === false ? 'down' : '?'}${key === textTools.default ? ' (default)' : ''}`)
+                      .join(' · ')}
                   </span>
                 )}
               </div>

@@ -32,7 +32,7 @@ import {
 } from '@/lib/svg-utils';
 import { C, EDITOR_CSS, FONT_STACK, SHADOW } from '@/lib/design-tokens';
 import { useLocalLlmStatus } from '@/hooks/use-local-llm-status';
-import { useTextToolsStatus } from '@/hooks/use-text-tools-status';
+import { textToolsModelHealth, useTextToolsStatus } from '@/hooks/use-text-tools-status';
 import { FONT_SUGGESTION_LIMIT, SHOW_DEV_UI } from '@/lib/env';
 import { isAiCacheEnabled, readAiCache, writeAiCache } from '@/lib/ai-cache';
 // Two entry points into the same catalogue: `t` for the imperative side — status text,
@@ -310,9 +310,11 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   // model server is failing. Asked only while the AI tools panel is open, like the above.
   const textTools = useTextToolsStatus(aiPanelOpen);
   const textDetectOptions = useMemo(() => {
-    const down = !!textTools && (!textTools.up || textTools.modelUp === false);
+    // Down when the service is, or when the model this Model choice would run it on is.
+    const asked = LOCAL_MODELS[llmProvider] ? 'local' : llmProvider.startsWith('claude') ? 'claude' : null;
+    const down = !!textTools && (!textTools.up || textToolsModelHealth(textTools, asked)?.up === false);
     return TEXT_DETECT_OPTIONS.map((o) => (o.value === 'ai-tools' && down ? { ...o, unavailable: true } : o));
-  }, [textTools]);
+  }, [textTools, llmProvider]);
   // The local model id when one of the "Local" entries is selected, else null.
   const localModel = () => LOCAL_MODELS[llmProviderRef.current] ?? null;
   // The text service's model for the Model dropdown's choice: a Claude entry runs it on

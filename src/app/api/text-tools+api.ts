@@ -14,47 +14,44 @@ const TIMEOUT_MS = 90_000;
 
 const fail = (status: number, message: string) => Response.json({ error: { message } }, { status });
 
-// The model server the service says it uses, as reachable from here. The service reports
-// it from its own side, so a loopback address in it means the service's machine — which
-// is only this one when SVGTEXT_URL is loopback too.
-function modelServerUrl(reported: string): string {
-  try {
-    const url = new URL(reported);
-    const service = new URL(SVGTEXT_URL);
-    const loopback = (h: string) => h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]';
-    if (loopback(url.hostname) && !loopback(service.hostname)) url.hostname = service.hostname;
-    return url.toString().replace(/\/$/, '');
-  } catch {
-    return reported;
-  }
-}
+// The service's own /health, cut down to what the dev console and the Text detection
+// choice need. The service probes each model it can run (no model call — it asks the
+// local server what it serves and looks Claude up on the free models endpoint) and keeps
+// the answer for 30 s, so this can be polled. A service older than that probe only names
+// its default model, which is then reported with `up: null` (unknown).
+type ModelHealth = { model: string | null; server: string | null; up: boolean | null; error?: string };
 
-// Whether the service is up, and whether the model server behind it is too — the service's
-// own /health says ok with no model server at all, and then fails every /detect with a
-// 502. Nothing is sent to a model: the model server is only asked what it serves.
+const str = (v: unknown) => (typeof v === 'string' ? v : null);
+
 export async function GET(): Promise<Response> {
   const headers = { 'Cache-Control': 'no-store' };
-  let health: { model?: unknown; server?: unknown };
+  let health: Record<string, unknown>;
   try {
-    const res = await fetch(`${SVGTEXT_URL}/health`, { signal: AbortSignal.timeout(3000) });
+    const res = await fetch(`${SVGTEXT_URL}/health`, { signal: AbortSignal.timeout(5000) });
     if (!res.ok) return Response.json({ host: SVGTEXT_URL, up: false }, { headers });
-    health = await res.json().catch(() => ({}));
+    health = ((await res.json().catch(() => null)) ?? {}) as Record<string, unknown>;
   } catch {
     return Response.json({ host: SVGTEXT_URL, up: false }, { headers });
   }
-  const model = typeof health.model === 'string' ? health.model : null;
-  if (typeof health.server !== 'string') {
-    return Response.json({ host: SVGTEXT_URL, up: true, model, modelServer: null, modelUp: null }, { headers });
+  // Which of its models a request without ?local=1 / ?claude=1 runs on.
+  const fallback = health.server === 'claude' ? 'claude' : 'local';
+  const models: Record<string, ModelHealth> = {};
+  const reported = health.models && typeof health.models === 'object' ? health.models as Record<string, unknown> : null;
+  if (reported) {
+    for (const [key, raw] of Object.entries(reported)) {
+      const m = (raw ?? {}) as Record<string, unknown>;
+      const error = str(m.error);
+      models[key] = {
+        model: str(m.model), server: str(m.server), up: m.up === true,
+        ...(error ? { error } : {}),
+      };
+    }
+  } else if (str(health.model)) {
+    models[fallback] = { model: str(health.model), server: str(health.server), up: null };
   }
-  const modelServer = modelServerUrl(health.server);
-  let modelUp = false;
-  try {
-    const res = await fetch(`${modelServer}/v1/models`, { signal: AbortSignal.timeout(3000) });
-    const body = (await res.json().catch(() => null)) as { data?: { id?: unknown }[] } | null;
-    const served = (body?.data ?? []).map((m) => m.id);
-    modelUp = res.ok && (model === null || served.includes(model));
-  } catch { /* not answering: modelUp stays false */ }
-  return Response.json({ host: SVGTEXT_URL, up: true, model, modelServer, modelUp }, { headers });
+  return Response.json({
+    host: SVGTEXT_URL, up: true, version: str(health.version), default: fallback, models,
+  }, { headers });
 }
 
 export async function POST(request: Request): Promise<Response> {
