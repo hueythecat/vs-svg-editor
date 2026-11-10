@@ -124,10 +124,9 @@ export const LLM_OPTIONS: Array<{ value: LlmProvider; label: string }> = [
 // /api/svg-text. For now Customise only runs it and logs the JSON; nothing is applied.
 // 'ai-tools' hands the whole job to the svg-text service (assets/ai-tools, via
 // /api/text-tools), which finds, reads and font-matches the text and returns an editable
-// SVG. The service runs its own default model (Claude Sonnet or qwen, set on the service);
-// a Local entry in the Model dropdown sends local=1 to make it use qwen, and any other
-// entry leaves it on that default. 'ai-tools' is the default
-// (svg-drop-zone.web.tsx), and the vLLM qwen3-vl:8b-instruct entry is the default model.
+// SVG. The Model dropdown picks the service's model: a Claude entry sends claude=1 (Claude
+// Sonnet), a Local entry local=1 (its qwen), whatever the service's own default. 'ai-tools'
+// is the default (svg-drop-zone.web.tsx), and Claude Sonnet is the default model.
 export type TextDetectMethod = 'current' | 'dom-regions' | 'ai-tools';
 
 export const TEXT_DETECT_OPTIONS: Array<{ value: TextDetectMethod; labelKey: string }> = [

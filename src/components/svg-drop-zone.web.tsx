@@ -54,7 +54,7 @@ import { detectSvgText, type DetectedTextRegion, type TextDetectStats } from '@/
 import { type Pin, MAX_PINNED_SVG_CHARS, addPin, getPins, removePin } from '@/lib/dev-pins';
 import {
   applyFontUpgrades, detectWithTextTools, detectedSourceOf, fetchDesignFonts, liftEditableText, markHiddenForService,
-  rejectDetected, servedGoogleFamilies, showDetectedOriginal,
+  rejectDetected, servedGoogleFamilies, showDetectedOriginal, type TextToolsModel,
 } from '@/lib/svg-text-tools';
 import { EditorControlPanel, type ControlTab } from './editor-control-panel';
 import { AiPanel } from './editor-ai-panel';
@@ -246,10 +246,10 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   // Which LLM every AI action calls. Picking 'kimi' diverts each request to
   // /api/kimi, which re-shapes the same Anthropic-style body for Moonshot. Mirrored
   // into a ref so the AI callbacks below read the live choice, never a stale closure.
-  // Defaults to qwen3-vl:8b-instruct, the model the AWS vLLM server serves: no per-call
-  // bill. Off the tunnel, on a laptop, the same entry falls back to Ollama.
-  const [llmProvider, setLlmProvider] = useState<LlmProvider>('local-instruct');
-  const llmProviderRef = useRef<LlmProvider>('local-instruct');
+  // Defaults to Claude Sonnet: the local qwen entries depend on a model server that is not
+  // always up, and production's text service runs on Claude.
+  const [llmProvider, setLlmProvider] = useState<LlmProvider>('claude');
+  const llmProviderRef = useRef<LlmProvider>('claude');
   const selectLlmProvider = (p: LlmProvider) => { llmProviderRef.current = p; setLlmProvider(p); };
   // Which text-detection call Customise makes. Ref-mirrored like the provider, so
   // runCustomise reads the live choice without taking it as a dependency. Defaults to the
@@ -315,6 +315,12 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   }, [textTools]);
   // The local model id when one of the "Local" entries is selected, else null.
   const localModel = () => LOCAL_MODELS[llmProviderRef.current] ?? null;
+  // The text service's model for the Model dropdown's choice: a Claude entry runs it on
+  // Claude Sonnet (claude=1), a Local entry on its qwen (local=1), whatever the service's
+  // default; anything else (Kimi) leaves it on that default. The service has no Opus, so
+  // Claude Opus also means its Sonnet.
+  const textToolsModel = (): TextToolsModel =>
+    localModel() ? 'local' : llmProviderRef.current.startsWith('claude') ? 'claude' : null;
   const llmEndpoint = () =>
     llmProviderRef.current === 'kimi' ? '/api/kimi' : localModel() ? '/api/local' : '/api/claude';
   // Log label. /api/kimi discards the model id we send and pins its own, so naming a
@@ -1972,14 +1978,12 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
       // With the dev rail's Cache AI responses off, the service's own cache is skipped
       // too, so every Customise is a real model run.
       const fresh = SHOW_DEV_UI && !isAiCacheEnabled();
-      // A Local entry in the Model dropdown runs the service on its local qwen model; any
-      // other leaves it on the service's own default (Claude Sonnet, if so configured).
-      const local = !!localModel();
-      console.log(`[text-tools] invoking /api/text-tools${fresh ? ' fresh' : ''}${local ? ' local (qwen)' : ''}`);
+      const model = textToolsModel();
+      console.log(`[text-tools] invoking /api/text-tools${fresh ? ' fresh' : ''}${model ? ` ${model}` : ''}`);
       // Font suggestions are not part of this: they are their own model call, made only
       // when the Text tab's Suggest fonts button asks for them (suggestFonts below).
       const started = performance.now();
-      const detecting = detectWithTextTools(sent, activeSvg.name, fresh, local);
+      const detecting = detectWithTextTools(sent, activeSvg.name, fresh, model);
       try {
         const result = await detecting;
         if (result.llm) {
@@ -2344,10 +2348,10 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     if (activeSvg.edit === 0) { setShowUpsell(true); return; }
     const gen = artworkGenRef.current;
     setSuggestFontsState('busy');
-    const local = !!localModel();
-    console.log(`[text-tools] invoking /api/text-tools?op=design-fonts${local ? ' local (qwen)' : ''}`);
+    const model = textToolsModel();
+    console.log(`[text-tools] invoking /api/text-tools?op=design-fonts${model ? ` ${model}` : ''}`);
     const stored = textToolsOutlinesRef.current;
-    const answer = await fetchDesignFonts(markHiddenForService(activeSvg.content, hiddenLayers), stored?.name, local);
+    const answer = await fetchDesignFonts(markHiddenForService(activeSvg.content, hiddenLayers), stored?.name, model);
     if (artworkGenRef.current !== gen) return;
     if (answer === null) { setSuggestFontsState('failed'); return; }
     if (answer.llm) {

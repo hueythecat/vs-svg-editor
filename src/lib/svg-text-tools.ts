@@ -79,9 +79,11 @@ export type TextToolsFontRetry = {
   verdict: string;
 };
 
-// The proxy URL for one service call. local: run it on the service's local qwen model
-// rather than its default (Claude Sonnet, when that is how the service is set up) — sent
-// when a Local entry is picked in the Model dropdown.
+// Which of the service's models runs a call: 'claude' (Sonnet, sent as claude=1) or 'local'
+// (its qwen, local=1), following the Model dropdown; null leaves it on the service's default.
+export type TextToolsModel = 'claude' | 'local' | null;
+
+// The proxy URL for one service call.
 const textToolsUrl = (params: Record<string, string | false | null | undefined>) => {
   const query = new URLSearchParams(
     Object.entries(params).filter((e): e is [string, string] => typeof e[1] === 'string' && e[1] !== ''),
@@ -92,9 +94,9 @@ const textToolsUrl = (params: Record<string, string | false | null | undefined>)
 // fresh: skip the service's cache and re-run the model (dev only — the proxy ignores it
 // in a production build).
 export async function detectWithTextTools(
-  svg: string, filename: string, fresh = false, local = false,
+  svg: string, filename: string, fresh = false, model: TextToolsModel = null,
 ): Promise<TextToolsResult> {
-  const res = await fetch(textToolsUrl({ fresh: fresh && '1', local: local && '1' }), {
+  const res = await fetch(textToolsUrl({ fresh: fresh && '1', ...(model ? { [model]: '1' } : {}) }), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ svg, filename }),
@@ -115,13 +117,13 @@ export async function detectWithTextTools(
  *  lists the clearly better faces in fontUpgrades. Null when the service could not be
  *  asked or failed; empty lists when it answered with none. */
 export async function fetchDesignFonts(
-  svg: string, outlines?: string | null, local = false,
+  svg: string, outlines?: string | null, model: TextToolsModel = null,
 ): Promise<{
   designFonts: TextToolsDesignFont[]; fontUpgrades: TextToolsFontUpgrade[]; fontRetries: TextToolsFontRetry[];
   llm: TextToolsLlm | null; timing: Record<string, number>; cached: boolean;
 } | null> {
   try {
-    const res = await fetch(textToolsUrl({ op: 'design-fonts', outlines, local: local && '1' }), {
+    const res = await fetch(textToolsUrl({ op: 'design-fonts', outlines, ...(model ? { [model]: '1' } : {}) }), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ svg }),
