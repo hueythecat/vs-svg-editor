@@ -223,7 +223,10 @@ export const TextControls = React.memo(function TextControls({
             onChange={(e) => onUpdateTextLayer({ letterSpacing: Number(e.target.value) })}
             style={{ ...inputStyle, cursor: 'pointer' }}
           >
-            {LETTER_SPACING.map((v) => (
+            {/* A measured value (a fitted or joined line) between the steps is listed
+                too, or the select would show the first step instead of the real one. */}
+            {(LETTER_SPACING.includes(selectedTextProps.letterSpacing as never)
+              ? LETTER_SPACING : [...LETTER_SPACING, selectedTextProps.letterSpacing].sort((a, b) => a - b)).map((v) => (
               <option key={v} value={v}>
                 {v === 0
                   ? t('text.spacingNormal')

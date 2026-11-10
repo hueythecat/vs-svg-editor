@@ -4,6 +4,7 @@ import { type Dispatch, type RefObject, type SetStateAction, useCallback, useMem
 import {
   type ActiveSvg, type SvgLayer, computeArcPath, measureTextAdvance, setTextLines, textLines,
 } from '@/lib/svg-utils';
+import { fittedLetterSpacing } from '@/lib/svg-text-tools';
 
 // The layers panel gives each row one line. A multi-line field's newlines would break
 // that row, so the label is the flattened string — the artwork still stacks.
@@ -44,7 +45,10 @@ export function useTextLayer({
       weight:  Number(textEl.getAttribute('font-weight') ?? 400),
       color:         textEl.getAttribute('fill') ?? '#000000',
       curve:         isGroup ? Number(el.getAttribute('data-curve') ?? 0) : null as number | null,
-      letterSpacing: parseFloat((textEl.getAttribute('letter-spacing') ?? '0').replace('em', '')) || 0,
+      // A field the text service fitted with textLength has no letter-spacing of its own;
+      // its real tracking is read off the fit so the inline editor and Spacing show it.
+      letterSpacing: fittedLetterSpacing(textEl)
+        ?? (parseFloat((textEl.getAttribute('letter-spacing') ?? '0').replace('em', '')) || 0),
     };
   }, [selectedLayer, activeSvg?.content]);
 
@@ -67,6 +71,15 @@ export function useTextLayer({
     const isGroup = el.getAttribute('data-text-layer') === '1';
     let textEl: Element | null = isGroup ? el.querySelector('text') : el;
     if (!textEl) return;
+
+    // Any of these edits drops a text-service field's textLength fit (below), or rebuilds
+    // the <text> without it (the curve promotion). Keep the tracking the fit was drawing
+    // as real letter-spacing first, so typing a word doesn't collapse the line's spacing.
+    if (attrs.letterSpacing === undefined && (attrs.content !== undefined || attrs.font !== undefined
+      || attrs.size !== undefined || attrs.weight !== undefined || attrs.curve !== undefined)) {
+      const kept = fittedLetterSpacing(textEl);
+      if (kept) textEl.setAttribute('letter-spacing', `${kept}em`);
+    }
 
     // For non-group text elements that need a curve, promote to group first
     if (attrs.curve !== undefined && !isGroup && el.tagName.toLowerCase() === 'text' && attrs.curve !== 0) {

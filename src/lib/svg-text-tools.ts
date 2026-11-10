@@ -193,6 +193,39 @@ export function parseFontChoice(choice: string): FontChoice {
 // bare family names, and a stack would never match one of them.
 const firstFamily = (stack: string) => stack.split(',')[0].trim().replace(/^['"]|['"]$/g, '');
 
+let measureCtx: CanvasRenderingContext2D | null = null;
+
+/** The tracking, in em, that a field fitted with textLength is really drawn with.
+ *
+ *  The service spreads each line to the width of the outlines it replaced with
+ *  textLength + lengthAdjust="spacing" and writes no letter-spacing, so the field
+ *  reads as "Normal" spacing and anything that draws it without textLength (the inline
+ *  editor's HTML overlay, or the field after an edit drops the fit) loses the gaps.
+ *  This turns the fit back into letter-spacing: the extra length over the string's
+ *  natural advance, shared over its n-1 gaps (letter-spacing widens the glyph span by
+ *  exactly that). Measured on a canvas, which draws with the page's loaded webfonts.
+ *  Null when the field has no fit or it can't be measured; an explicit letter-spacing
+ *  is left to its owner. */
+export function fittedLetterSpacing(textEl: Element): number | null {
+  if (textEl.hasAttribute('letter-spacing')) return null;
+  const fitted = textEl.hasAttribute('textLength') ? textEl : textEl.querySelector('textPath[textLength]');
+  const length = Number(fitted?.getAttribute('textLength'));
+  const adjust = fitted?.getAttribute('lengthAdjust') ?? 'spacing';
+  if (!fitted || !(length > 0) || adjust !== 'spacing') return null;
+  const str = (fitted.textContent ?? '').replace(/\s+/g, ' ').trim();
+  const size = Number(textEl.getAttribute('font-size'));
+  if (str.length < 2 || !(size > 0) || typeof document === 'undefined') return null;
+  measureCtx ??= document.createElement('canvas').getContext('2d');
+  if (!measureCtx) return null;
+  const family = firstFamily(textEl.getAttribute('font-family') ?? '') || 'sans-serif';
+  // Measured at 100px and scaled: canvas rounds tiny sizes and some artwork sets 6px text.
+  measureCtx.font = `${textEl.getAttribute('font-weight') ?? 400} 100px "${family}"`;
+  const natural = (measureCtx.measureText(str).width * size) / 100;
+  if (!(natural > 0)) return null;
+  const em = (length - natural) / (str.length - 1) / size;
+  return Math.abs(em) < 0.005 ? 0 : +Math.max(-0.2, Math.min(2, em)).toFixed(2);
+}
+
 /** Lift the service's editable text out of its one group into a root-level <text> per
  *  item. Returns the document (serialised, root <svg> only — no XML declaration) and a
  *  layer row per lifted field, or null when the SVG cannot be parsed. */
