@@ -28,6 +28,10 @@ const V_BUDGET = 150;      // px of chrome above/below the board
 // default, the default stands and the switch has nothing to add.
 const WORK_SIDE = 320;     // px each side: the 272px panel, its 16px inset, and a gutter
 const WORK_V_MARGIN = 48;  // px above and below combined
+// Bright cyan for canvas pointer feedback: the hover outline, the box-select marquee
+// and the selection frame (its dashed border and rotate stem).
+// Brighter than the accent so it reads over the blues common in the artwork.
+const HIGHLIGHT = '#00e5ff';
 
 function boardWidth(aspect: number, full: boolean): string {
   const a = aspect.toFixed(4);
@@ -301,7 +305,7 @@ export const CanvasStage = React.memo(function CanvasStage({
         aria-hidden
         style={{
           position: 'absolute', display: 'none', zIndex: 15, pointerEvents: 'none',
-          border: `1px solid ${C.accent}`, background: 'rgba(91,108,255,.08)', borderRadius: 2,
+          border: `1px solid ${HIGHLIGHT}`, background: 'rgba(0,229,255,.1)', borderRadius: 2,
         }}
       />
 
@@ -434,7 +438,7 @@ export const CanvasStage = React.memo(function CanvasStage({
                 <feMorphology in="SourceAlpha" operator="dilate" radius="2.75" result="outer" />
                 <feComposite in="inner" in2="SourceAlpha" operator="out" result="ring" />
                 <feComposite in="outer" in2="inner" operator="out" result="halo" />
-                <feFlood floodColor="#00e5ff" />
+                <feFlood floodColor={HIGHLIGHT} />
                 <feComposite in2="ring" operator="in" result="accentRing" />
                 <feFlood floodColor="#ffffff" floodOpacity="0.85" />
                 <feComposite in2="halo" operator="in" result="whiteHalo" />
@@ -480,7 +484,7 @@ export const CanvasStage = React.memo(function CanvasStage({
               style={{
                 position: 'absolute',
                 pointerEvents: selectionIsEmptyText ? 'auto' : 'none',
-                border: `1.5px dashed ${C.accent}`,
+                border: `1.5px dashed ${HIGHLIGHT}`,
                 boxSizing: 'border-box',
                 zIndex: 5,
               }}
@@ -543,7 +547,7 @@ export const CanvasStage = React.memo(function CanvasStage({
                 style={{
                   position: 'absolute', left: '50%', top: -30,
                   width: 1.5, height: 22, marginLeft: -0.75,
-                  background: C.accent, pointerEvents: 'none',
+                  background: HIGHLIGHT, pointerEvents: 'none',
                 }}
               />
               <div
