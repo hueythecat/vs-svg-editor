@@ -165,7 +165,7 @@ function AiLoadingOverlay({ message }: { message: string }) {
 }
 
 export const CanvasStage = React.memo(function CanvasStage({
-  svgCanvasRef, overlayRef, sizeBadgeRef, showSizeBadge, hoverBadgeRef, marqueeRef,
+  svgCanvasRef, overlayRef, sizeBadgeRef, showSizeBadge, hoverBadgeRef, hoverOutlineRef, marqueeRef,
   onCanvasClick, onCanvasMouseDown, onCanvasDoubleClick, onCanvasMouseMove, onCanvasMouseLeave,
   aiLoading, aiStatusMsg,
   isLoading, activeSvg, workspaceFull, pinned, onTogglePin,
@@ -180,6 +180,9 @@ export const CanvasStage = React.memo(function CanvasStage({
   sizeBadgeRef: React.RefObject<HTMLSpanElement | null>;
   showSizeBadge: boolean;
   hoverBadgeRef: React.RefObject<HTMLSpanElement | null>;
+  // The hovered layer's shape outline. The parent fills and places it alongside the
+  // hover readout.
+  hoverOutlineRef: React.RefObject<SVGSVGElement | null>;
   // The click-drag selection box. Placed and shown by the parent while a drag runs.
   marqueeRef: React.RefObject<HTMLDivElement | null>;
   onCanvasClick: (e: React.MouseEvent<HTMLDivElement>) => void;
@@ -413,6 +416,36 @@ export const CanvasStage = React.memo(function CanvasStage({
               </div>
             ))}
           </div>
+
+          {/* Hover outline — the silhouette of whatever layer the pointer is over, traced in
+              bright cyan over a white halo so it reads on light and dark artwork.
+              The parent puts a copy of the layer in the inner <g> (mapped from the
+              artwork's coordinates to this box) and places the box over the layer. The
+              filter keeps only the ring round the copy's ink, so the copy's own fills
+              never show. Built from a copy because the artwork itself is never touched. */}
+          <svg
+            ref={hoverOutlineRef}
+            aria-hidden
+            style={{ position: 'absolute', display: 'none', zIndex: 5, pointerEvents: 'none', overflow: 'visible' }}
+          >
+            <defs>
+              <filter id="hover-outline-filter" filterUnits="userSpaceOnUse" x="0" y="0" width="100%" height="100%">
+                <feMorphology in="SourceAlpha" operator="dilate" radius="1.5" result="inner" />
+                <feMorphology in="SourceAlpha" operator="dilate" radius="2.75" result="outer" />
+                <feComposite in="inner" in2="SourceAlpha" operator="out" result="ring" />
+                <feComposite in="outer" in2="inner" operator="out" result="halo" />
+                <feFlood floodColor="#00e5ff" />
+                <feComposite in2="ring" operator="in" result="accentRing" />
+                <feFlood floodColor="#ffffff" floodOpacity="0.85" />
+                <feComposite in2="halo" operator="in" result="whiteHalo" />
+                <feMerge>
+                  <feMergeNode in="whiteHalo" />
+                  <feMergeNode in="accentRing" />
+                </feMerge>
+              </filter>
+            </defs>
+            <g filter="url(#hover-outline-filter)"><g data-hover-outline-copy /></g>
+          </svg>
 
           {/* Hover readout — the same x/y + w/h the selection badge shows, for whatever
               layer the pointer is over, so the numbers can be read without selecting

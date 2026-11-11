@@ -410,6 +410,7 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   const textEditorRef   = useRef<HTMLDivElement>(null);
   const sizeBadgeRef    = useRef<HTMLSpanElement>(null);
   const hoverBadgeRef   = useRef<HTMLSpanElement>(null);
+  const hoverOutlineRef = useRef<SVGSVGElement>(null);
   const marqueeRef      = useRef<HTMLDivElement>(null);
   // Shown when an AI action is invoked on a gated asset (edit === 0).
   const [showUpsell, setShowUpsell] = useState(false);
@@ -1334,8 +1335,14 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   useLayoutEffect(() => {
     const badge = hoverBadgeRef.current;
     if (!badge) return;
+    const outline = hoverOutlineRef.current;
+    const copyHost = outline?.querySelector('[data-hover-outline-copy]') as SVGGElement | null;
 
-    const hide = () => { badge.style.display = 'none'; };
+    const hide = () => {
+      badge.style.display = 'none';
+      if (outline) outline.style.display = 'none';
+      copyHost?.replaceChildren();
+    };
     const canvasEl = svgCanvasRef.current;
     const svgEl = canvasEl?.querySelector('svg') as SVGSVGElement | null;
     // A gesture in progress owns the readout — see handleCanvasMouseMove.
@@ -1355,7 +1362,40 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
     badge.style.left = `${rect.left - canvasRect.left + canvasEl.scrollLeft}px`;
     badge.style.top = `${rect.bottom - canvasRect.top + canvasEl.scrollTop + 8}px`;
     badge.style.display = 'block';
-  }, [hoveredLayerId, gestureActive, activeSvg?.content, hiddenLayers]);
+
+    // The outline: a copy of the layer, drawn through the parent's screen matrix into a
+    // box that covers the layer's screen rect plus room for the ring. Only the copy's
+    // alpha reaches the filter, so gradients, patterns and opacity all outline the same.
+    // Text is left out — it has its own frame, and an outline round every glyph is noise.
+    // So is the selected layer, which is already framed.
+    const parentCtm = (layerEl.parentNode as SVGGraphicsElement | null)?.getScreenCTM?.();
+    if (!outline || !copyHost) return;
+    if (!parentCtm || selectedLayers.has(hoveredLayerId) || layerEl.tagName.toLowerCase() === 'text'
+      || layerEl.querySelector('text')) {
+      outline.style.display = 'none';
+      copyHost.replaceChildren();
+      return;
+    }
+    const pad = 4;
+    const ox = rect.left - pad, oy = rect.top - pad;
+    outline.setAttribute('width', String(rect.width + pad * 2));
+    outline.setAttribute('height', String(rect.height + pad * 2));
+    outline.style.left = `${ox - canvasRect.left + canvasEl.scrollLeft}px`;
+    outline.style.top = `${oy - canvasRect.top + canvasEl.scrollTop}px`;
+    const m = parentCtm;
+    copyHost.setAttribute('transform',
+      `translate(${-ox} ${-oy}) matrix(${m.a} ${m.b} ${m.c} ${m.d} ${m.e} ${m.f})`);
+    const copy = layerEl.cloneNode(true) as SVGElement;
+    // The copy must not answer to the layer's ids (querySelector('#id') would find
+    // whichever comes first in the page), and must be visible even if styling elsewhere
+    // targets the original.
+    copy.removeAttribute('id');
+    copy.querySelectorAll('[id]').forEach((el) => el.removeAttribute('id'));
+    copy.style.display = '';
+    copy.style.visibility = 'visible';
+    copyHost.replaceChildren(copy);
+    outline.style.display = 'block';
+  }, [hoveredLayerId, gestureActive, activeSvg?.content, hiddenLayers, selectedLayers]);
 
   // Keep a live ref so the drag/rotate window listeners can reposition without
   // being torn down and recreated on every render.
@@ -3260,6 +3300,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
             sizeBadgeRef={sizeBadgeRef}
             marqueeRef={marqueeRef}
             hoverBadgeRef={hoverBadgeRef}
+            hoverOutlineRef={hoverOutlineRef}
             onCanvasClick={handleCanvasClick}
             onCanvasMouseDown={handleCanvasMouseDown}
             onCanvasDoubleClick={handleCanvasDoubleClick}
