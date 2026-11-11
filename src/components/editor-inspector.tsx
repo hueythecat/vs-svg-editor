@@ -15,6 +15,76 @@ import {
 } from './svg-icons';
 import { TextControls } from './text-controls';
 
+// ── Text Customise changed ───────────────────────────────────────────────────
+//
+// Under the Customise button once it has run: each field it put in place of lettering,
+// with a switch between the new editable text (on) and the original lettering (off) — the
+// Text tab's Show original, for every field at once without selecting each. Clicking the
+// words selects that field.
+const CustomisedFields = React.memo(function CustomisedFields({
+  fields, onToggle, onSelect, selectedId,
+}: {
+  fields: CustomiseBundle['fields'];
+  onToggle: CustomiseBundle['onToggleField'];
+  onSelect: CustomiseBundle['onSelectField'];
+  selectedId: string | null;
+}) {
+  const t = useT();
+  return (
+    <div style={{ marginTop: 12 }} data-customised-fields>
+      <div style={{ ...sectionLabelStyle, marginBottom: 6 }}>{t('ai.textChanges')}</div>
+      {fields.map((f) => {
+        const on = !f.showingOriginal;
+        return (
+          <div
+            key={f.id}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 8, padding: '5px 6px', borderRadius: 6,
+              background: f.id === selectedId ? C.accentTint : 'transparent',
+            }}
+          >
+            <button
+              type="button"
+              // A field showing its original lettering has nothing on the canvas to select.
+              onClick={on ? () => onSelect(f.id) : undefined}
+              disabled={!on}
+              title={f.label}
+              style={{
+                flex: 1, minWidth: 0, textAlign: 'left', background: 'none', border: 'none', padding: 0,
+                cursor: on ? 'pointer' : 'default', fontFamily: FONT_STACK, fontSize: 12,
+                color: on ? C.textBody : C.textFaint,
+                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+              }}
+            >
+              {f.label}
+            </button>
+            <button
+              type="button"
+              role="switch"
+              aria-checked={on}
+              aria-label={t(on ? 'ai.fieldShowOriginal' : 'ai.fieldShowEditable', { text: f.label })}
+              title={t(on ? 'ai.fieldShowOriginal' : 'ai.fieldShowEditable', { text: f.label })}
+              onClick={() => onToggle(f.id, on)}
+              style={{
+                position: 'relative', flex: 'none', width: 28, height: 16, borderRadius: 8, padding: 0,
+                border: 'none', cursor: 'pointer', transition: 'background .15s',
+                background: on ? C.accent : C.disabled,
+              }}
+            >
+              <span
+                style={{
+                  position: 'absolute', top: 2, left: on ? 14 : 2, width: 12, height: 12, borderRadius: '50%',
+                  background: '#fff', transition: 'left .15s', boxShadow: '0 1px 2px rgba(0,0,0,.2)',
+                }}
+              />
+            </button>
+          </div>
+        );
+      })}
+    </div>
+  );
+});
+
 // The two colour/type bodies of the control panel (editor-control-panel.tsx). These
 // were one floating "inspector" card that switched its body on the selection; the
 // tabbed handoff splits that switch across two tabs, so the same bodies now render
@@ -288,6 +358,14 @@ export const ToolsTab = React.memo(function ToolsTab({
           Center does, rather than on the selection the Colours block below edits. */}
       <div style={{ marginBottom: 18 }}>
         <CustomiseButton {...customise} />
+        {customise.fields.length > 0 && (
+          <CustomisedFields
+            fields={customise.fields}
+            onToggle={customise.onToggleField}
+            onSelect={customise.onSelectField}
+            selectedId={selectedLayer}
+          />
+        )}
       </div>
 
       {/* ── Workspace ──────────────────────────────────────────────────────

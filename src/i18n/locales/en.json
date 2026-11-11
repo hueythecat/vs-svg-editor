@@ -123,6 +123,9 @@
     "browse": "or click to browse"
   },
   "ai": {
+    "textChanges": "Text changes",
+    "fieldShowOriginal": "Show the original lettering for “%{text}”",
+    "fieldShowEditable": "Show the editable text for “%{text}”",
     "customise": "Customise",
     "customising": "Customising…",
     "customised": "Customised",

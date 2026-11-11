@@ -1,3 +1,4 @@
+import type { DetectedField } from '@/lib/svg-text-tools';
 import type { TaxonomyGroup } from '@/lib/svg-utils';
 import type { TextDetectStats } from '@/lib/svg-text-detect';
 import type { Dispatch, SetStateAction } from 'react';
@@ -60,6 +61,10 @@ export type CustomiseBundle = {
   gated: boolean;
   ready: boolean;
   cooldown: boolean;
+  // The text Customise replaced, each switchable back to the original lettering.
+  fields: DetectedField[];
+  onToggleField: (id: string, original: boolean) => void;
+  onSelectField: (id: string) => void;
 };
 
 export type AiActionType = 'strip-text' | 'suggest-font' | 'remove-specific-text' | 'check-text';

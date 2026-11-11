@@ -335,6 +335,19 @@ export function applyFontUpgrades(
     : { content: svg, changed, settled };
 }
 
+/** Every field Customise lifted out of the outlines, in document order: its id, its words
+ *  as they are now, and whether it is currently swapped back for the original outlines. */
+export type DetectedField = { id: string; label: string; showingOriginal: boolean };
+
+export function detectedFields(svg: string): DetectedField[] {
+  const doc = new DOMParser().parseFromString(svg, 'image/svg+xml');
+  return Array.from(doc.querySelectorAll(`[${DETECTED_SOURCE}]`)).flatMap((el) => (el.id ? [{
+    id: el.id,
+    label: (el.textContent ?? '').replace(/\s+/g, ' ').trim() || el.getAttribute('data-name') || el.id,
+    showingOriginal: el.getAttribute('display') === 'none',
+  }] : []));
+}
+
 /** Swap a lifted field for the outlines it replaced, or back. Written into the SVG, like
  *  the service's own hiding, so it exports the way it looks. */
 export function showDetectedOriginal(svg: string, textId: string, original: boolean): string {

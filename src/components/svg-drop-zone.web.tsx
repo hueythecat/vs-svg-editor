@@ -53,7 +53,7 @@ import { LLM_OPTIONS, LOCAL_MODELS, OPUS_MODEL, TEXT_DETECT_OPTIONS } from './ed
 import { detectSvgText, type DetectedTextRegion, type TextDetectStats } from '@/lib/svg-text-detect';
 import { type Pin, MAX_PINNED_SVG_CHARS, addPin, getPins, removePin } from '@/lib/dev-pins';
 import {
-  applyFontUpgrades, detectWithTextTools, detectedSourceOf, fetchDesignFonts, liftEditableText, markHiddenForService,
+  applyFontUpgrades, detectWithTextTools, detectedFields, detectedSourceOf, fetchDesignFonts, liftEditableText, markHiddenForService,
   rejectDetected, servedGoogleFamilies, showDetectedOriginal, type TextToolsModel,
 } from '@/lib/svg-text-tools';
 import { EditorControlPanel, type ControlTab } from './editor-control-panel';
@@ -660,6 +660,9 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
 
   // ── Clear ──────────────────────────────────────────────────────────────────
 
+  // Set by the Text changes list under Customise just before it selects a field, so the
+  // tab-follows-selection effect leaves the Tools tab open (see that effect).
+  const selectFromFieldListRef = useRef(false);
   const selectOne = useCallback((id: string | null) => {
     setSelectedLayer(id);
     setSelectedLayers(id ? new Set([id]) : new Set());
@@ -1726,9 +1729,14 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   // always win, which is why this rule can't trap a canvas click on Layers.
   // Read as a functional update so the current tab is not itself a dependency; otherwise
   // the effect would re-fire (and fight the user) on every manual tab change.
+  // The Text changes list under Customise is the same kind of list, so a pick from it
+  // leaves Tools where it is (selectFromFieldListRef, set by that list for one selection).
   useEffect(() => {
     if (!selectedLayer) return;
-    setControlTab((cur) => (cur === 'layers' ? cur : selectionIsText ? 'text' : 'layers'));
+    const fromFieldList = selectFromFieldListRef.current;
+    selectFromFieldListRef.current = false;
+    setControlTab((cur) => (cur === 'layers' || (fromFieldList && cur === 'tools')
+      ? cur : selectionIsText ? 'text' : 'layers'));
   }, [selectedLayer, selectionIsText]);
 
   // ── Inline text editing (use-inline-text-edit.ts) ──────────────────────────
@@ -2422,12 +2430,21 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     for (const f of detectedSelection?.fontChoices ?? []) loadGoogleFontLink(f.family, f.weight);
   }, [detectedSelection?.fontChoices, loadGoogleFontLink]);
 
-  const showSelectedOriginal = useCallback((original: boolean) => {
-    if (!activeSvg || !selectedLayer) return;
+  // Any lifted field, swapped for its original outlines or back — the Text tab's Show
+  // original for the selection, and the switches listed under Customise for each field.
+  const showFieldOriginal = useCallback((id: string, original: boolean) => {
+    if (!activeSvg) return;
     snapshotForUndo(activeSvg.content, activeSvg.layers);
-    const content = showDetectedOriginal(activeSvg.content, selectedLayer, original);
+    const content = showDetectedOriginal(activeSvg.content, id, original);
     setActiveSvg((prev) => (prev ? { ...prev, content } : null));
-  }, [activeSvg, selectedLayer, snapshotForUndo]);
+  }, [activeSvg, snapshotForUndo]);
+  const showSelectedOriginal = useCallback((original: boolean) => {
+    if (selectedLayer) showFieldOriginal(selectedLayer, original);
+  }, [selectedLayer, showFieldOriginal]);
+  const customisedFields = useMemo(
+    () => (activeSvg?.content ? detectedFields(activeSvg.content) : []),
+    [activeSvg?.content],
+  );
 
   const rejectSelectedDetected = useCallback(() => {
     if (!activeSvg || !selectedLayer) return;
@@ -3144,9 +3161,22 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     // Customised too recently — the button stays live and re-opens the cooldown
     // message instead of running the pass.
     cooldown: cooldownActive,
+    fields: customisedFields,
+    // Hiding the selected field would leave its frame standing over nothing, so the
+    // selection goes with it. (The Text tab's Show original keeps it on purpose: its
+    // checkbox is how that field is switched back.)
+    onToggleField: (id: string, original: boolean) => {
+      if (original && selectedLayers.has(id)) selectOne(null);
+      showFieldOriginal(id, original);
+    },
+    onSelectField: (id: string) => {
+      // Only when the selection will change: otherwise the effect doesn't run to clear it.
+      if (selectedLayer !== id) selectFromFieldListRef.current = true;
+      selectOne(id);
+    },
   }), [
     runCustomise, onAiToolsClick, customiseLoading, customiseDone, aiPanelOpen,
-    activeSvg, isLoading, cooldownActive,
+    activeSvg, isLoading, cooldownActive, customisedFields, showFieldOriginal, selectOne, selectedLayers, selectedLayer,
   ]);
 
   return (
