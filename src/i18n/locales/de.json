@@ -123,7 +123,7 @@
     "browse": "oder klicken zum Auswählen"
   },
   "ai": {
-    "textChanges": "Textänderungen",
+    "customisations": "Anpassungen",
     "fieldShowOriginal": "Ursprüngliche Schrift für „%{text}“ zeigen",
     "fieldShowEditable": "Bearbeitbaren Text für „%{text}“ zeigen",
     "customise": "Anpassen",

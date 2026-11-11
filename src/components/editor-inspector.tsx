@@ -15,9 +15,9 @@ import {
 } from './svg-icons';
 import { TextControls } from './text-controls';
 
-// ── Text Customise changed ───────────────────────────────────────────────────
+// ── Customisations ───────────────────────────────────────────────────────────
 //
-// Under the Customise button once it has run: each field it put in place of lettering,
+// At the top of the Tools tab once Customise has run: each field it put in place of lettering,
 // with a switch between the new editable text (on) and the original lettering (off) — the
 // Text tab's Show original, for every field at once without selecting each. Clicking the
 // words selects that field.
@@ -31,8 +31,8 @@ const CustomisedFields = React.memo(function CustomisedFields({
 }) {
   const t = useT();
   return (
-    <div style={{ marginTop: 12 }} data-customised-fields>
-      <div style={{ ...sectionLabelStyle, marginBottom: 6 }}>{t('ai.textChanges')}</div>
+    <div style={{ marginBottom: 18 }} data-customised-fields>
+      <div style={{ ...sectionLabelStyle, marginBottom: 6 }}>{t('ai.customisations')}</div>
       {fields.map((f) => {
         const on = !f.showingOriginal;
         return (
@@ -265,6 +265,18 @@ export const ToolsTab = React.memo(function ToolsTab({
 
   return (
     <div>
+      {/* ── Customisations ─────────────────────────────────────────────────
+          What Customise changed, once it has run: the first thing to review afterwards,
+          so it heads the tab. */}
+      {customise.fields.length > 0 && (
+        <CustomisedFields
+          fields={customise.fields}
+          onToggle={customise.onToggleField}
+          onSelect={customise.onSelectField}
+          selectedId={selectedLayer}
+        />
+      )}
+
       {/* ── History ────────────────────────────────────────────────────────
           Document-level rather than selection-level, so it heads the tab. The
           unsaved-changes state still reads off revert, which is live only when there is
@@ -358,14 +370,6 @@ export const ToolsTab = React.memo(function ToolsTab({
           Center does, rather than on the selection the Colours block below edits. */}
       <div style={{ marginBottom: 18 }}>
         <CustomiseButton {...customise} />
-        {customise.fields.length > 0 && (
-          <CustomisedFields
-            fields={customise.fields}
-            onToggle={customise.onToggleField}
-            onSelect={customise.onSelectField}
-            selectedId={selectedLayer}
-          />
-        )}
       </div>
 
       {/* ── Workspace ──────────────────────────────────────────────────────

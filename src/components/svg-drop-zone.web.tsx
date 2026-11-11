@@ -660,9 +660,10 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
 
   // ── Clear ──────────────────────────────────────────────────────────────────
 
-  // Set by the Text changes list under Customise just before it selects a field, so the
-  // tab-follows-selection effect leaves the Tools tab open (see that effect).
-  const selectFromFieldListRef = useRef(false);
+  // Set just before a selection made from the Tools tab itself — a pick in its
+  // Customisations list, or Customise selecting the first field it made — so the
+  // tab-follows-selection effect leaves Tools open (see that effect).
+  const keepToolsTabRef = useRef(false);
   const selectOne = useCallback((id: string | null) => {
     setSelectedLayer(id);
     setSelectedLayers(id ? new Set([id]) : new Set());
@@ -1729,13 +1730,14 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
   // always win, which is why this rule can't trap a canvas click on Layers.
   // Read as a functional update so the current tab is not itself a dependency; otherwise
   // the effect would re-fire (and fight the user) on every manual tab change.
-  // The Text changes list under Customise is the same kind of list, so a pick from it
-  // leaves Tools where it is (selectFromFieldListRef, set by that list for one selection).
+  // Selections made from the Tools tab itself — its Customisations list, or Customise
+  // picking the first field it made — leave Tools where it is too (keepToolsTabRef, set
+  // for that one selection).
   useEffect(() => {
     if (!selectedLayer) return;
-    const fromFieldList = selectFromFieldListRef.current;
-    selectFromFieldListRef.current = false;
-    setControlTab((cur) => (cur === 'layers' || (fromFieldList && cur === 'tools')
+    const keepTools = keepToolsTabRef.current;
+    keepToolsTabRef.current = false;
+    setControlTab((cur) => (cur === 'layers' || (keepTools && cur === 'tools')
       ? cur : selectionIsText ? 'text' : 'layers'));
   }, [selectedLayer, selectionIsText]);
 
@@ -2020,8 +2022,10 @@ export function SvgDropZone({ reviewUuid }: { reviewUuid?: string } = {}) {
         const doc = new DOMParser().parseFromString(lifted.content, 'image/svg+xml');
         const kept = pruneMissingLayers(doc, activeSvg.layers);
         setActiveSvg((prev) => (prev ? { ...prev, content: lifted.content, layers: [...kept, ...lifted.textLayers] } : null));
-        // Selected properly, not just pointed at: the Text tab opens on it with its frame
-        // on the canvas and its position fields live, as if it had been clicked.
+        // Selected properly, not just pointed at: its frame is on the canvas and its
+        // position fields are live, as if it had been clicked. The panel stays on Tools,
+        // though, where Customisations now heads the tab with what changed.
+        keepToolsTabRef.current = true;
         selectOne(lifted.textLayers[0].id);
         setCustomiseDone(true);
         const llm = result.llm;
@@ -3171,7 +3175,7 @@ Respond with ONLY a valid JSON object — no markdown, no code fences, no explan
     },
     onSelectField: (id: string) => {
       // Only when the selection will change: otherwise the effect doesn't run to clear it.
-      if (selectedLayer !== id) selectFromFieldListRef.current = true;
+      if (selectedLayer !== id) keepToolsTabRef.current = true;
       selectOne(id);
     },
   }), [
